@@ -1,0 +1,798 @@
+# homelinter Design Specification
+
+## Overview
+
+homelinter organizes home directories: it scans files, analyzes them, generates reorganization suggestions, and executes those suggestions automatically or interactively.
+
+One service owns scanning, analysis, planning, validation, and execution. The CLI, TUI, and SPA are clients of that service. The CLI and TUI launch an invocation-scoped service, while `homelinter web` launches a service that remains available until terminated.
+
+**Non-goals**: homelinter is not transactional across operations, does not emulate host capabilities that are unavailable, and does not guess at semantics it cannot verify safely (see "Execution & Safety").
+
+## Platform Scope
+
+homelinter supports Linux, macOS, and Windows as first-class platforms. The native executor and filesystem safety checks are the reference implementation on every platform. Platform-specific behavior is selected at runtime and is never inferred from Unix command syntax alone.
+
+Linux and macOS may export POSIX shell scripts. Windows supports drive-letter and UNC paths and exports PowerShell scripts. Exported scripts are platform-specific, are not portable between operating systems, and are always produced for the host platform.
+
+Paths, path comparison, filename validation, file identity, timestamps, permissions, links, and metadata preservation use host-platform semantics. Serialized plans and audit records retain host-native absolute paths and include the platform identifier. A capability unavailable on the host is reported as unsupported or failed rather than emulated unsafely.
+
+On Windows, homelinter distinguishes symbolic links, junctions, mount points, and other reparse points. Only link types explicitly supported by the implementation are indexed or repaired; unsupported reparse points are never followed or modified. Windows link operations require the permissions and operating-system features needed by the selected link type.
+
+## Core Principles
+
+- **Safety first**: homelinter never overwrites an existing object, modifies file contents, follows an unsupported link, or executes a stale or colliding operation.
+- **Non-destructive by default**: scanning, analysis, planning, and dry-run never modify the filesystem. A plan export writes a script file to the user-specified path but never modifies the scanned home tree; destructive operations on the scanned tree require explicit execution authorization.
+- **Honest failure reporting**: operations are validated immediately before execution, and failures and partial completion are reported precisely without claiming rollback that did not occur.
+- **Leverage existing tools**: prefer modern Rust tools (`fd`, etc.) over older counterparts (`find`), with graceful fallbacks.
+- **Convention without explicit configuration**: infer sensible defaults from the user's existing directory structure, patterns, and installed tools in the absence of explicit configuration.
+- **User in control**: all preferences are overridable via command-line arguments and configuration files.
+
+## Scan Root and Path Representation
+
+The user may instruct homelinter to scan any accessible directory with the CLI `--root <path>` option or the corresponding per-scan/per-session setting in an interactive client. The scan root is not persisted in the configuration file. If no scan root is specified, the scan root is `$HOME`.
+
+The scan root defines the root of the primary discovery tree: homelinter discovers and analyzes files, directories, and repository units only at or below that root, subject to the hidden-file, ignore, and exclusion rules. It does not limit where a discovered object may be moved.
+
+All filesystem paths in suggestions, exported plans, client APIs, and user-facing output are absolute paths in the host platform's native representation. This includes the scan root, `target`, and `new_path`. Paths are never interpreted relative to the process's current working directory, the scan root, or the platform's home directory. A destination may be outside the scan tree and outside the user's home directory, for example on a mounted USB device. Destination selection remains subject to configured permissions and execution safety checks.
+
+- Input paths for `--root`, configuration, and target directories are resolved according to their documented input rules and converted to absolute paths before scanning or planning.
+- Emitted paths must be normalized absolute paths using host-platform rules. They must not contain `~`, environment-variable references, redundant `.` components, or a relative-path prefix.
+- Unix paths, Windows drive-letter paths, and Windows UNC paths are accepted according to the host platform; paths are not converted between platform syntaxes.
+- Normalization must not resolve symlinks merely for display or serialization. The lexical absolute path and the filesystem identity it names must be preserved separately where necessary.
+- The scan root is captured when the scan starts and is retained with the scan and execution plan. A later change to the process's current working directory or environment must not change the meaning of a suggestion.
+- Before execution, `target` must still identify the discovered source object, and a `move` destination may be anywhere allowed by the plan. The destination is not required to be under the scan root or `$HOME`.
+
+`target` and `new_path` in a Suggestion are absolute paths. Internal APIs use platform-native path types, while client and serialization boundaries emit absolute paths in the host platform's representation. Audit records use the same representation and record the host platform.
+
+## Symlink Handling
+
+Symlinks are not ordinary discovery units and receive a separate treatment from primary discovery.
+
+**The home-wide symlink pass** is the deliberate exception to the scan-root boundary. For every scan, homelinter also performs a separate symlink pass over the entire user's home directory, regardless of `scan.root`. This pass finds symlinks that need repair when a discovered source is moved or deleted. It records symlink entries and their raw targets but does not follow symlinks or scan their target contents. The pass includes symlinks in hidden and VCS-ignored directories; `scan.root` does not restrict it, and `scan.exclude_paths` does not exclude symlinks from it, because doing so could leave references to moved or deleted objects broken.
+
+The pass derives its scope from the platform's home environment variable resolved at scan start; the resolved home path is captured with the scan, so a later environment change does not change the repair-pass coverage. The pass collects only the metadata needed for repair - absolute link path, raw link target, link type, and the resolved target identity when resolvable - and never reads symlink target contents. This is a deliberate scope and privacy trade-off: a scan rooted below `$HOME` still reads symlink metadata across the entire home directory (including hidden and VCS-ignored directories) to keep moves and deletes from breaking links. Repairs are never performed for links unrelated to a planned move or delete, so a narrow scan gains no repairs outside its own suggestions.
+
+**Primary scan**: the primary scan never follows symlinks. Directory symlinks are recorded but never traversed or analyzed as directories. The pass preserves each link's raw target and whether that target is relative or absolute, because repair must preserve the link's intended target while accounting for the link's parent directory.
+
+**Repair**: during execution, symlinks in the home-directory index are eligible for repair only when their target is the source of a planned `move` or `delete`. A link to a moved file or directory is repaired to point to the new absolute target, represented in the link using the appropriate relative or absolute form. A link to a deleted duplicate is repaired to point to the retained original only when the duplicate relationship and target identity were confirmed.
+
+Repair is always performed under safe-only semantics: only links whose recorded identity and target were confirmed at scan time are repaired, unsupported reparse points are never followed or modified, and a repair is validated again immediately before it runs. Repair applies only to the link's path target metadata and never changes file contents. It preserves whether the original link target was relative or absolute: relative replacement targets are recalculated relative to the symlink's parent directory, while absolute replacement targets remain absolute.
+
+- For a moved directory, symlinks targeting the directory or any descendant are associated with the move and are repaired using the corresponding old-to-new path mapping.
+- For a deleted duplicate, symlinks to the deleted object may be repaired to point to the retained original only after the delete operation's preconditions and duplicate identity are confirmed.
+- Immediately before the parent operation, homelinter validates the symlink path, raw link target, and resolved target identity against the scan-time record. Immediately before repair, it validates the same state again and replaces the link without following it.
+
+Repair is a dependent `repair_symlink` operation (see "Suggestion Model"); it exists only as a dependency and is never surfaced or executed independently.
+
+## File Classification
+
+homelinter categorizes files into **Asset Kinds**:
+
+| Kind | Description | Example Extensions |
+|------|-------------|-------------------|
+| `document` | Text documents and office files | `pdf`, `docx`, `odt`, `txt`, `md`, `epub` |
+| `photo` | Raster and vector images | `jpg`, `jpeg`, `png`, `gif`, `webp`, `svg`, `raw`, `cr2`, `nef` |
+| `video` | Video files | `mp4`, `mkv`, `avi`, `mov`, `webm` |
+| `audio` | Music and sound files | `mp3`, `flac`, `ogg`, `m4a`, `wav`, `aac` |
+| `repository` | Version control repositories | `.git`, `.hg`, `.svn` (detected by a directory marker, or a `.git` file) |
+| `archive` | Compressed files | `zip`, `tar`, `gz`, `bz2`, `7z`, `rar` |
+| `data` | Structured data files | `json`, `xml`, `csv`, `yaml`, `sql`, `db` |
+| `executable` | Binaries and scripts | `exe`, `app`, `sh`, `py`, `rb`, `js`, `wasm` |
+| `other` | Everything else | - |
+
+**Empty files**: files of zero bytes are completely ignored. They are not scanned, not classified, and no suggestions are generated for them. They are never duplicates regardless of hash.
+
+**Hidden files**: whether hidden files and directories are scanned is a per-scan, per-session setting, resolved exactly like the scan root and never read from the configuration file. The CLI selects it with `--hidden`, and the TUI and SPA select it through per-scan/per-session controls. By default, when no override is given, hidden files and directories are excluded. When using `fd`, homelinter passes explicit flags (regardless of `fd`'s own defaults) to enforce this convention, consistent with `scan.exclude_paths` and the selected hidden setting. `find` is invoked with arguments that match the intended scope. The operation is deterministic from homelinter's configuration; tool defaults do not influence behavior.
+
+**Hidden-file definition by platform**: what counts as hidden is platform-native. On Linux and macOS, a path component at any depth (excluding `.` and `..`) is hidden when its name begins with a dot; VCS ignore rules are never consulted, because repositories are atomic units whose contents are never descended into, and dotfile classification does not read ignore files. On Windows, the definition is configurable via `scan.hidden_definition` (see "Configuration File Schema"): `explorer` (default) - an object is hidden when it has the Hidden or System file attribute, the union Explorer and common search tools treat as not displayed by default; `attribute` - the Hidden attribute alone; `dotfiles` - names beginning with a dot, matching Unix semantics. The definition gates only primary discovery, just like the boolean `--hidden` itself, and never the home-wide symlink repair pass; it is applied deterministically from the configuration value, never from the shell's or Explorer's display settings.
+
+**Repositories**: a directory is classified as `repository` if it contains a `.git` directory or `.git` file, a `.hg` directory, or a `.svn` directory. The `.git` file form covers git worktrees and other detached marker setups, whose marker is a regular file (a `gitdir:` pointer) rather than a directory. A repository is treated as an atomic unit: its contents are not scanned, classified, hashed, or analyzed, and the tool may suggest moving or renaming only the repository root, never restructuring internals. VCS ignore rules do not control repository discovery or primary discovery; repositories are detected structurally. Nested repositories (including submodules) are ignored for scanning and classification, but they remain physically inside the parent repository and move with it if the parent root is relocated.
+
+**Symlinks**: see "Symlink Handling".
+
+## Analysis Pipeline
+
+For each discovered file or repository unit in the primary scan, homelinter collects:
+
+1. **Filesystem metadata**: size, modification time, creation time, permissions, owner
+2. **Kind-specific metadata**:
+   - Photos/Videos: EXIF / IPTC / XMP data (date taken, camera, GPS, orientation)
+   - GPS coordinates from photos and videos are reverse-geocoded to a place name by the configured geocoder when it is enabled (see "Destination Path Format Strings")
+   - Documents: title, author, page count (where extractable)
+   - Audio: ID3 tags, bitrate, duration
+   - Repositories: remote URLs, default branch, commit count, last activity, collected by the per-VCS adapter (see "Tooling Strategy")
+3. **Content-derived metadata** *(optional, user-configurable)*:
+   - An LLM analyzes document subject matter (e.g., "invoice", "travel photo", "tax document")
+   - A description service produces a short description of the content, used by the `%s` placeholder. Descriptions are LLM-backed today through the `[llm]` backend; image/video recognition providers are reserved future `type` values behind the same plugin interface (see "Provider Plugins"). A configurable default provider may serve all content kinds, with per-kind providers overriding it when needed.
+   - Documents are preprocessed to plain text before the description service runs, using the configured extraction tool for their format (see "Tooling Strategy"). Text extraction is disabled by default and incurs no cost when the description service is off.
+   - The model and provider backend are configurable by the user (local via Ollama/LM Studio, or remote via OpenRouter/OpenAI-compatible endpoints; see "Provider Plugins")
+   - LLM analysis and description services are **disabled by default** and incur explicit cost/privacy trade-offs
+   - Reverse-geocoding and description results are stored in a persistent cache so repeated scans do not make redundant requests and continue to produce stable user-readable values.
+4. **Filename- and path-derived metadata**: the filename and relevant parent-directory path may be analyzed by an optional LLM when higher-priority metadata and content-based analysis do not provide the requested value. This analysis reads only the name and path, never the file bytes. It is distinct from the `%f`, `%F`, `%n`, and `%e` placeholders, which use the filename directly. Filename-based LLM analysis is **disabled by default**, uses the same configurable-provider and persistent-cache machinery as content-derived metadata, and is the last metadata-analysis stage before placeholder-specific generic fallbacks.
+
+For format-string metadata, the general precedence is: kind-specific embedded document or media metadata first, then content-based analysis (including document preprocessing such as `pdftotext` before an LLM request), then filename/path analysis by LLM, and finally the placeholder's generic fallback. A placeholder may omit sources that cannot produce that kind of value, but a lower-priority source must not override a value from a higher-priority source.
+
+## Suggestion Model
+
+A **Suggestion** is a proposed change to the filesystem. There are two user-facing suggestion types:
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `move` | Relocate and/or rename a file or directory | `/home/alice/Downloads/photo.jpg` -> `/home/alice/Pictures/2024/photo.jpg` |
+| `delete` | Remove a redundant file | `/home/alice/Desktop/copy.pdf` (duplicate of `/home/alice/docs/original.pdf`) |
+
+Move destinations are produced by the destination format string for the target's Asset Kind (see "Destination Path Format Strings"). The format string resolves to the complete new path relative to the platform's home directory (or an absolute path). A filename placeholder controls whether the moved object keeps its original name or is renamed.
+
+**Suggestion properties**:
+- `target`: Absolute path to a file or directory
+- `type`: `move` or `delete`
+- `new_path`: Proposed absolute destination (for `move` only)
+- `reason`: Human-readable explanation
+- `metadata`: Structured data supporting the suggestion (e.g., "extracted date: 2024-03-15")
+- `dependent_operations`: Filesystem operations that are required because this suggestion is executed; these operations are not independently selectable
+
+**One suggestion per target**: homelinter produces exactly one top-level suggestion per file or repository unit. (If no reorganization is warranted, no suggestion is generated.) Moves apply only to files and repository roots. Ordinary directories are discovered and analyzed for structure inference, but they are not themselves targets of reorganization or deletion suggestions. Internal analysis may evaluate multiple candidates, but only the single best primary operation is surfaced. Dependent symlink repairs belong to their parent suggestion and do not violate this rule. Suggestions never modify file contents.
+
+**Dependent operations**: a move suggestion may have zero or more dependent `repair_symlink` operations, and a delete suggestion may have repairs attached when deleting the target would otherwise leave a confirmed symlink broken. Each dependent operation identifies an absolute symlink path, the symlink target recorded during analysis, and the replacement target to write after the parent operation. The primary operation is the dependency's cause. The parent and all of its dependent repairs form one execution unit: dependent operations are mandatory members of the execution plan, are executed only if the parent operation succeeds, are not independently selectable, rejectable, or executable, and never run if the parent is rejected, deselected, or otherwise excluded from the execution batch. A symlink repair is never surfaced or executed as an independent suggestion. Dependent operations do not change file contents of either the moved/deleted object or the symlink target.
+
+Interactive clients may select top-level suggestions; dependent operations always follow their parent. CLI execution, dry-run, and export operate on the complete generated batch.
+
+### Deduplication Semantics
+
+- **Content verification**: SHA-256 is the only hash algorithm used. The full-content SHA-256 hash is the only hash that determines membership in a duplicate group. For files larger than the configured threshold, a fast-path SHA-256 hash is computed from the first 1MB concatenated with the last 1MB and the total file size encoded as an 8-byte little-endian unsigned integer (in that order, with no separator). The fast path is a shortlist only: files whose fast-path hash already matches are queued for a full-content hash, and only files whose verified full-content hashes match are grouped and considered for `delete` suggestions. The fast path never establishes a duplicate relationship or a delete suggestion by itself. A full-content hash is computed on demand whenever a group's membership must be confirmed.
+- **Duplicate groups**: a duplicate group is the set of files whose verified full-content hashes match. Each group is reported as a finding during analysis. For every redundant file in a group (all except the preferred keeper), homelinter suggests `delete`, and the preferred keeper may be moved to a new suggested path and name when its inferred destination differs from its current path. The keeper is a move candidate under exactly the same resolution, validation, and safety rules as any non-duplicate file: it receives a `move` suggestion if and only if the resolved `new_path` differs from its current absolute path (per "Destination Path Format Strings"), the move passes destination resolution and batch validation, and no metadata-preservation suppression applies to the group. A keeper whose move is suppressed or rejected receives no suggestion and keeps its current location, exactly like any other file whose move fails validation; a blocked sibling delete never blocks or changes the keeper's move. A redundant copy never receives a move or any other suggestion: its one top-level suggestion is the `delete`, so "one suggestion per target" holds even when the same copy would otherwise be a move candidate. Delete suggestions are always file-level: deduplication operates on file content hashes, and a repository root is an atomic unit that is never a deletion candidate.
+- **Conflict resolution**: when duplicates are confirmed, the oldest file (by creation time; fallback to modification time) is preferred. Newer copies receive exactly one suggestion each.
+- **Metadata preservation**: if the newer duplicate has better metadata (e.g., more complete EXIF), homelinter emits a warning and suppresses the executable suggestion for the conflicting files. In interactive modes, the user is notified; in non-interactive modes, the warning is logged and the files are left untouched until manually reviewed.
+
+## Directory Structure Inference
+
+In the absence of explicit configuration, homelinter infers the user's preferred organization by scanning existing top-level directories in `$HOME`:
+
+1. Detect standard directories (`Documents`, `Downloads`, `Pictures`, `Music`, `Videos`, `Desktop`, `.config`, etc.)
+2. Identify user-created organizational patterns (year-based folders, project folders, client folders)
+3. Map Asset Kinds to inferred destinations using folder names and existing file distributions
+4. Infer destination format strings from recurring structural patterns: a `Pictures/2024/03` layout suggests `Pictures/%Y/%m/%f`, a flat `Music/<artist>` layout suggests `Music/%a/%f`, and a flat directory with no recurring structure infers `Projects/%f` or another `%f`-suffixed directory for the matched kind
+5. Confidence weighted by: number of existing files, consistency of pattern, recency of use
+
+With **explicit configuration**, `target_paths` directly maps Asset Kinds to destination format strings and overrides inferred defaults. Platform user-directory APIs contribute only to inferred defaults (precedence level 3) and never override explicit `target_paths`; `xdg-user-dir` is used on Linux where available, with platform-appropriate equivalents on macOS and Windows.
+
+## Destination Path Format Strings
+
+A destination format string is a printf-style template that determines the new path of a discovered object, relative to `$HOME` or absolute. Every Asset Kind has exactly one destination format string at any point, resolved by the standard precedence (see "Configuration"). A format string resolves to the complete new path of the moved object; the final `new_path` of a move suggestion is the resolved path.
+
+### Syntax
+
+- The resolved string is interpreted relative to the platform's home directory unless it uses the host platform's absolute-path syntax, in which case it may point anywhere allowed by the operating system, including outside the home directory and on another filesystem.
+- `%%` emits a literal percent sign.
+- Every other `%` must be followed by a supported placeholder character. An unknown placeholder is an error at configuration and parse time: it is rejected rather than emitted literally, so typos fail fast instead of producing surprising paths.
+- Placeholders may repeat and may be combined in any order, for example `Pictures/%Y/%m/%f` or `Music/%a/%Y/%t.%e`.
+- A format string must contain at least one placeholder and must name the target file. A format string with no placeholder names a fixed file and is an error at configuration and parse time. A format string that resolves to an empty path, or whose final segment is empty, is also rejected: it must not end with a path separator or an empty value. The original filename is never appended implicitly, and a trailing `/` is not special.
+- The original filename is optional. Omitting the filename placeholders (`%f`, `%F`, `%n`, `%e`) discards the original name and names the target from metadata alone, for example `Pictures/%Y/%m/%s` or `Pictures/%s_%Y%m%d`. Date and metadata placeholders always produce a non-empty value, so such a format still yields a valid filename.
+
+### Placeholders
+
+| Placeholder | Meaning | Primary source | Fallback |
+|---|---|---|---|
+| `%Y` | four-digit year | extracted date (EXIF date taken, ID3 date, document date) | modification time |
+| `%y` | two-digit year | extracted date | modification time |
+| `%m` | two-digit month (`01`-`12`) | extracted date | modification time |
+| `%d` | two-digit day (`01`-`31`) | extracted date | modification time |
+| `%H` | two-digit hour (`00`-`23`) | extracted date | modification time |
+| `%M` | two-digit minute (`00`-`59`) | extracted date | modification time |
+| `%S` | two-digit second (`00`-`59`) | extracted date | modification time |
+| `%t` | title | document title, ID3 title, EXIF title, repository name | content-derived description, then filename/path analysis by LLM, then filename stem |
+| `%a` | author / artist | document author, ID3 artist, EXIF artist | `unknown` |
+| `%l` | location | GPS metadata reverse-geocoded to a place name by the configured geocoder | `unknown` |
+| `%s` | subject / description | the selected description provider (per-kind, then default) | `unknown` |
+| `%c` | camera model | EXIF camera model | `unknown` |
+| `%h` | remote host | repository remote URL host (e.g. `github.com`) | `unknown` |
+| `%k` | asset kind | classification | always available |
+| `%f` | original filename, including extension | original filename | always available |
+| `%F` | original filename, lowercased with whitespace replaced by hyphens | original filename | always available |
+| `%n` | filename stem (original filename without its extension) | original filename | always available |
+| `%e` | extension without the leading dot; empty when the file has no extension | original extension | always available |
+
+**Fallbacks**: format-string metadata follows the general order: kind-specific embedded metadata, content-based analysis, filename/path analysis by LLM, and then the placeholder-specific generic fallback. Date placeholders use an extracted date from that hierarchy and fall back to the file's modification time, which is always available. Date extraction may also inspect the filename as an implementation detail when higher-priority metadata does not provide a date. Recognized filename forms are implementation-defined and may include examples such as `IMG_20240315_153045.jpg`, `PXL_20240315_153045123.jpg`, `2024-03-15.jpg`, and `20240315.jpg`; this list is illustrative, not exhaustive. Filename-derived dates must be parsed conservatively and must not override a date from a higher-priority source. `%t` uses document or media title metadata first, then content-derived subject matter or description, then filename/path analysis by LLM, and finally the filename stem. `%s` uses content-derived description before filename/path analysis by LLM and falls back to `unknown` when no applicable source is available. The remaining metadata placeholders fall back to `unknown` when metadata is absent or extraction failed.
+
+Filename placeholders derive from the original filename, so a format string can rename a file while preserving or dropping its extension, for example `%t.%e` or `%n_%Y%m%d.%e`: `%f` keeps the original case and spacing, while `%F` normalizes the same value to lowercase with whitespace replaced by hyphens.
+
+### Resolution & Sanitization
+
+- The format string is resolved per target at suggestion-generation time using the metadata collected during analysis; the resolved path is captured in `new_path`, and later metadata changes do not alter an already-generated suggestion. A resolved path equal to the target's current absolute path (same parent and filename) produces no move.
+- The parent directory of the resolved path is created before a move; exported scripts emit `mkdir -p` for it. Clobber prevention, cross-filesystem handling, and deduplication apply identically to resolved and static destinations.
+- The same format string applies to files and repository units alike; a repository move uses the `repository` kind's format. A rename produced by a filename placeholder is a `move` like any other, subject to the same validation, safety, and audit rules.
+- Suggestions are batch-validated after generation, before display, export, or execution (see "Execution & Safety" - Suggestion Batch Validation).
+- The format string is user configuration and is validated rather than sanitized: it must resolve to a non-empty path whose final segment is a filename, and interpolated segments cannot change the path structure.
+- Interpolated values are never trusted as raw path text. Each metadata value (`%t`, `%a`, `%l`, `%s`, `%c`, `%F`) is lowercased (Unicode-aware) and every run of whitespace (spaces, tabs, newlines) is replaced with a single hyphen; date placeholders contain only digits, `%k` is its canonical lowercase Asset Kind name, and literal text including `%%` is unchanged. A normalized segment therefore can never introduce a path separator or traversal, regardless of source metadata.
+  - Path separators (`/`, `\`), NUL, control characters, and platform-invalid characters are replaced with `_`.
+  - Leading and trailing whitespace, hyphens, and dots are trimmed after normalization.
+  - A value that is empty, or normalizes to `.` or `..`, is replaced with `unknown`.
+  - Example: `San Francisco` -> `san-francisco`; `Sunset over the River` -> `sunset-over-the-river`.
+- Filename placeholders (`%f`, `%n`, `%e`) are the only exception, preserved verbatim with case and spacing intact; `%F` is normalized like a metadata value above and is not exempt. This is safe because an existing host filename cannot contain a path separator, NUL, control character, or resolve to `.`/`..`, so it is always a valid destination segment on the same filesystem. Host limits still apply: a destination past the path-length limit, or (on Windows) colliding with a reserved device name (`CON`, `PRN`, `NUL`, etc.), is reported as an error before any operation and never silently altered. When `%e` is empty, an immediately preceding `.` is omitted, so `%n.%e` degrades to the bare stem.
+- `%l` location: resolved by the configured geocoder to a place name; `unknown` when the geocoder is disabled, the file has no GPS data, or it fails. Raw coordinates are never interpolated into paths.
+- `%s` subject: resolved using the general metadata precedence: embedded metadata where applicable, then the selected content-description provider (per-kind first, then default), then optional filename/path analysis by LLM. `unknown` is used when no applicable source is available or a provider fails. Kinds without content (`repository`, `archive`, `data`, `executable`, `other`) do not use content description providers; they may still use filename/path analysis by LLM when configured. For documents, the file is first preprocessed to plain text with the configured extraction tool before a content-description request; if no extraction tool is available, the description service receives no text and `%s` may resolve to `unknown`. Cache lookups and keys follow the persistent cache under `Configuration > cache`, and provider selection follows the `[description]` schema.
+
+### Defaults
+
+When neither configuration nor inference supplies a format string for a kind, the opinionated defaults apply:
+
+| Kind | Default format string |
+|---|---|
+| `document` | `Documents/%f` |
+| `photo` | `Pictures/%Y/%m/%f` |
+| `video` | `Videos/%Y/%f` |
+| `audio` | `Music/%f` |
+| `repository` | `Projects/%f` |
+| `archive` | `Archives/%f` |
+| `data` | `Data/%f` |
+| `executable` | `bin/%f` |
+| `other` | `Other/%f` |
+
+The opinionated defaults preserve the original filename explicitly via `%f`.
+
+### Examples
+
+Config file:
+
+```toml
+[target_paths]
+photo = "Pictures/%Y/%m/%f"
+audio = "Music/%a/%Y/%t.%e"
+```
+
+`photo = "Pictures/%Y/%m/%f"` moves `~/Downloads/IMG_0001.jpg` to `~/Pictures/2024/03/IMG_0001.jpg`, keeping the original name via `%f`. `audio = "Music/%a/%Y/%t.%e"` renames `~/Downloads/Song Title.mp3` to `~/Music/artist/2024/song-title.mp3`, deriving the artist and title from ID3 tags and normalizing them per the sanitization rules (here the ID3 artist `%a` = `Artist` and title `%t` = `Song Title` are lowercased and hyphenated to `artist` and `song-title`).
+
+CLI override:
+
+```text
+homelinter --target-path photo='Pictures/%Y/%m/%f' --target-path video='Videos/%Y/%f'
+```
+
+Locations and descriptions:
+
+```toml
+[target_paths]
+photo = "Pictures/%Y/%m/%l/%s.%e"
+
+[geocoder]
+enabled = true
+service = "nominatim"
+language = "en"
+
+[description.photo]
+enabled = true
+type = "llm"
+```
+
+With this configuration, `~/Downloads/IMG_0001.jpg` moves to `~/Pictures/2024/03/paris/sunset-over-the-river.jpg`: the location is reverse-geocoded by Nominatim to `paris` and the description is generated by the LLM as `sunset-over-the-river`.
+
+## Configuration
+
+Configuration contains persistent preferences only. The scan root is deliberately not part of the configuration file schema: it is selected for each scan or interactive session. A CLI invocation may select it with `--root <path>`, and the TUI/SPA may select it through their per-scan/per-session controls. If no per-scan root is supplied, homelinter uses the host platform's home directory. A scan root supplied in a config file is rejected rather than silently ignored.
+
+### Precedence
+
+The single preference resolution order (highest to lowest) is:
+
+1. Per-scan or per-session settings, including CLI options and interactive-client controls
+2. Config file values
+3. Inferred values from system tools and home directory structure
+4. Opinionated defaults
+
+This same order governs destination format strings, config-file selection details below, and all other resolvable preferences.
+
+### Config File Resolution (highest to lowest precedence)
+
+1. Path specified by the `--config <path>` option
+2. The per-user configuration path for the host platform, typically `$HOME/.config/homelinter/config.toml` on Linux and macOS and `%APPDATA%\homelinter\config.toml` on Windows
+3. The system-wide configuration path for the host platform, typically `/etc/homelinter/config.toml` on Linux and macOS and the Windows system-wide application-data location on Windows
+
+The configuration files are merged from lowest to highest precedence with a deep merge: nested tables and mappings are merged by key recursively; all other values - scalars and arrays - are replaced by the higher-precedence value; and an empty table contributes nothing, so a higher-precedence file cannot wipe an entire lower-precedence table (there is no "replace this whole table" syntax in TOML, and none is implied). Under these rules, a user `[description.photo]` entry composes with a system `[description]` base, a higher-precedence `document_extraction` entry replaces only the argv array for its format key, and `scan.exclude_paths` is replaced wholesale rather than unioned, allowing a higher-precedence file to drop a system pattern. The same deep-merge semantics apply to `PUT /config`, which merges submitted values into the existing file rather than replacing it. A missing explicitly requested config file or a malformed config file is an error; an absent default config file is ignored.
+
+### Configuration File Schema
+
+The configuration file is TOML. The supported schema is:
+
+```toml
+[target_paths]
+# Each key is an Asset Kind: document, photo, video, audio, repository,
+# archive, data, executable, or other. Values are destination format
+# strings (see "Destination Path Format Strings") resolving to a path
+# relative to $HOME or an absolute path; a value must contain at least one
+# placeholder and name the target file. The original filename is optional
+# (omit %f/%F/%n/%e to discard it and name the target from metadata).
+document = "Documents/%f"
+photo = "Pictures/%Y/%m/%f"
+
+[llm]
+enabled = false
+backend = "ollama" # "ollama", "openrouter", "openai", or "custom"
+endpoint = "http://localhost:11434"
+model = "<model-name>"
+api_key = "<optional-api-key>"
+max_tokens = 512 # optional; response length cap for completion requests
+
+[geocoder]
+enabled = false
+service = "nominatim" # "nominatim", "photon", "google", "mapbox", or "custom"
+endpoint = "https://nominatim.openstreetmap.org"
+api_key = "<optional-api-key>"
+language = "en"
+user_agent_contact = "<optional-contact-string>" # appended to the User-Agent; recommended for public services such as Nominatim
+
+[description]
+# Default provider used for every content kind without an explicit
+# per-kind entry. A per-kind entry takes precedence, including
+# enabled = false.
+enabled = false
+type = "llm" # only "llm" is supported today; "image", "video", and "custom" are reserved for future providers
+# type = "llm" reuses the [llm] backend settings.
+
+# Optional per-kind overrides can be added as [description.document],
+# [description.photo], [description.video], or [description.audio].
+# An explicitly disabled per-kind entry suppresses the default for that kind.
+
+[document_extraction]
+# Per-format text extraction commands used to preprocess documents
+# before description generation. Each value is an argv array; `{path}`
+# is replaced by the absolute input path and must be a complete argument
+# of its own; plain text is read from stdout. Commands are never interpreted by a shell. Defaults
+# are selected at runtime from available tools, like fd; an empty
+# array disables extraction for that format.
+pdf = ["pdftotext", "-layout", "{path}", "-"]
+docx = ["pandoc", "{path}", "-t", "plain"]
+odt = ["pandoc", "{path}", "-t", "plain"]
+epub = ["pandoc", "{path}", "-t", "plain"]
+
+[duplication]
+large_file_threshold = 104857600
+
+[scan]
+exclude_paths = [".cache/**", "build/**"]
+# Definition of "hidden" on Windows only; ignored on Linux/macOS, where
+# hidden always means dotfile names. "explorer", "attribute", or "dotfiles".
+hidden_definition = "explorer"
+
+[output]
+format = "pretty" # "pretty", "json", or "toml"
+
+[cache]
+# The persistent metadata cache is stored in the platform's standard
+# per-user application-data directory by default.
+enabled = true
+
+[limits]
+# Bounds on external calls and tool output. Every value is optional;
+# an absent value uses the implementation default, and the defaults are
+# never infinite. Overrunning a limit degrades to the normal failure
+# behavior (e.g. `%s` resolves to `unknown`) rather than stalling the scan.
+provider_timeout_seconds = 120
+tool_timeout_seconds = 30
+tool_stdout_max_bytes = 16777216
+```
+
+**Secrets**: API keys for `llm`, `geocoder`, and `description` providers must never be written to logs or included in suggestions.
+
+Schema rules:
+
+- `target_paths` is an optional mapping from Asset Kind to destination format string. Resolved paths emitted in suggestions are always absolute. An unknown placeholder, a format string with no placeholder, a format string that resolves to an empty path, or a format string that ends in a path separator is a configuration error. A resolved destination whose final segment is empty is rejected at suggestion time and produces no move. The original filename is never appended implicitly. Values must not contain `~` or environment-variable references; such a value is a configuration error, consistent with the API's rejection of `~`, relative, and environment-variable path inputs. The operating system's permissions and execution safety checks remain applicable. See "Destination Path Format Strings".
+- `llm.enabled` defaults to `false`. `backend` selects the provider adapter and accepts `ollama`, `openrouter`, `openai`, or `custom` (default `ollama`); an unknown `backend` is a configuration error. `endpoint`, `model`, `max_tokens`, and `api_key` are optional when LLM analysis is disabled; when enabled, `model` is required, `endpoint` defaults per `backend` (see "Provider Plugins"), `max_tokens` defaults to `512`, and `api_key` is required by `openrouter` and `openai` and rejected by validation if `backend` is `ollama`. When present, `api_key` is always sent as an `Authorization: Bearer` header; a key set for a `custom` or `ollama` endpoint that does not expect one is simply ignored by the server.
+- `geocoder.enabled` defaults to `false`. `service` accepts `nominatim`, `photon`, `google`, `mapbox`, or `custom`; `endpoint` defaults to the service's public endpoint (see "Provider Plugins"), and `language` is an optional ISO 639-1 code passed through to the provider. `user_agent_contact` is an optional string appended to the User-Agent sent with geocoder requests (`homelinter/<version>` plus contact); it does not join the cache key, and is recommended for public services that require identification. When enabled, `api_key` is required by `google` and `mapbox`, rejected by validation if `service` is `nominatim` or `photon`, and optional for `custom`. A `custom` service implements the neutral reverse-geocode contract described under "Provider Plugins".
+- `description` is an optional provider configuration with optional per-kind overrides. The base `[description]` provider is the default for every content kind (`document`, `photo`, `video`, `audio`) that has no explicit per-kind entry, allowing one general provider to be configured without repeating it. The selected provider must support the target kind; if it does not, the description is unavailable and `%s` resolves to `unknown` unless a per-kind override is configured. Only those content kinds may be used as per-kind keys; any other per-kind key is rejected. Each provider has `enabled` (default `false`) and `type`. Only `type = "llm"` is implemented today; it reuses the `[llm]` backend settings. The values `image`, `video`, and `custom` are reserved for future recognition providers and are rejected as configuration errors until implemented. A per-kind entry takes precedence over the base provider, including an explicitly disabled entry. If neither a per-kind provider nor the base `[description]` provider is configured, `%s` resolves to `unknown`.
+- `document_extraction` is an optional mapping from document format (`pdf`, `docx`, `odt`, `epub`, and any other format key) to an argv array. The first element is the executable and subsequent elements are arguments; the literal `{path}` must occur exactly once and must be a complete argument of its own (an argument that embeds `{path}` with other text is a configuration error), and the standalone argument is replaced by the absolute input path. Commands are executed directly without a shell, so paths and metadata cannot inject shell syntax. An empty array disables extraction for that format. A command with no executable, more than one `{path}`, an argument that embeds `{path}` with other text, or any unsupported placeholder is a configuration error. Defaults are selected at runtime from available tools, following the fd pattern: `pdftotext` for PDF, `pandoc` for office and ebook formats, with built-in Rust crates as fallback. External commands run with a bounded timeout and stdout size limit governed by `[limits]` (`tool_timeout_seconds`, `tool_stdout_max_bytes`), receive a minimal sanitized environment, and are terminated if they exceed either limit. Non-zero exit status, timeout, output-limit failure, or unavailable tools are treated as extraction failure; the description service receives no text and `%s` resolves to `unknown` while analysis continues.
+- Deduplication always uses SHA-256 for both fast-path and full-content hashes. The hash algorithm is fixed and is not configurable.
+- `duplication.large_file_threshold` is a non-negative integer number of bytes and defaults to `104857600` (100 MiB).
+- `scan.exclude_paths` is an optional array of host-platform glob patterns applied to primary discovery. It does not exclude the home-wide symlink repair pass. Each pattern is evaluated against the normalized absolute path of a discovered object, so matching is deterministic and independent of the discovery order. A pattern containing a path separator matches the relative path from the scan root to the object (for example `build/**` excludes `build` and everything below it, and `cache/vendored/**` excludes that subtree); a pattern without a path separator matches the final path component at any depth (so `*.hs` excludes every Haskell source anywhere under the root). Both `*` and `**` are supported: `*` matches within a single path component and never crosses a path separator, while `**` crosses component boundaries, including zero components; a trailing `/**` matches a directory and everything below it. Patterns are applied only to primary discovery and are never applied to the home-wide symlink repair pass or to repository internals, which are atomic units. VCS ignore rules never affect primary discovery. Excluding a directory excludes everything below it; directory symlinks are excluded along with what they would label, because their contents are never traversed anyway.
+- `scan.hidden_definition` is a valid, persistent configuration key defining what counts as hidden on Windows only: `explorer` (default) - an object is hidden when it has the Hidden or System file attribute; `attribute` - the Hidden attribute alone; `dotfiles` - names beginning with a dot, matching Unix semantics. On Linux and macOS the key is ignored: hidden always means dotfile names (see "File Classification"). It is a definition, not a session selection: unlike `scan.root` and `scan.hidden`, which remain invalid configuration keys, `scan.hidden_definition` is accepted.
+- `output.format` defaults to `pretty` and accepts only `pretty`, `json`, or `toml`.
+- The persistent metadata cache is enabled by default and is stored in the platform's standard per-user application-data directory. It stores successful geocoding and description results, cache keys, provider metadata, schema/version information, and timestamps. Failed, timed-out, or unavailable provider requests are not cached as successful results and may be retried on a later scan. A provider response is not refreshed while its complete cache key remains unchanged, ensuring that repeated scans produce the same user-readable location or description rather than renaming a file because an external response changed. Cache writes are atomic and concurrency-safe; a corrupt or incompatible cache is ignored or rebuilt without preventing a scan. Cache contents may contain extracted text, descriptions, locations, provider identifiers, and content-derived identifiers, so the cache is user data and must be protected with normal per-user file permissions. The cache must not store API keys or full source files. Cache invalidation and clearing are exposed through the CLI and service API.
+- `llm.max_tokens` and the effective `[limits]` values join the cache entry key (see "Cache Implementation"), so changing any of them invalidates cached descriptions and locations and triggers fresh provider requests.
+- `scan.root` and `scan.hidden` are not valid configuration keys. The scan root and the hidden setting are session-scoped, exactly like the per-scan API inputs; a config file that sets either is rejected rather than silently ignored.
+
+### Cache Implementation
+
+The cache is implemented as a single SQLite database file (`cache.db`) in the platform's standard per-user application-data directory. The database uses WAL (Write-Ahead Logging) mode for atomic writes and concurrent-safe read/write access.
+
+**Schema**:
+
+- `meta` table: key-value pairs storing schema version, creation timestamp, and metadata. Keyed by text string; values are text.
+- `entries` table: cached query results. Columns:
+  - `cache_key` (BLOB, PRIMARY KEY): SHA-256 hash of the complete request input (see "Cache Key Construction").
+  - `kind` (TEXT, NOT NULL): entry type (`geocode`, `description`, `filename_analysis`).
+  - `provider` (TEXT, NOT NULL): provider identifier (e.g., `llm:ollama:mistral` or `nominatim:openstreetmap`) plus a hash of provider-specific settings (model name, endpoint URL, language code, per-kind overrides). Settings are hashed to ensure that config changes invalidate cached entries.
+  - `input_hash` (BLOB, NOT NULL): hash of the content-derived input (extracted text, file content, GPS coordinates, or path). Used for diagnostics and index optimization; not used for cache lookup (the `cache_key` is the sole lookup key).
+  - `value` (TEXT, NOT NULL): the cached result (location name, description, or analysis).
+  - `created_at` (TEXT, NOT NULL): ISO-8601 timestamp of insertion.
+  - Index on `(kind)` for discovery and stats queries.
+
+**Cache key construction**:
+
+The cache key is computed as SHA-256 of a canonical serialization of the request tuple: `(kind, provider_id, provider_settings_hash, input_hash)`. Each field is length-prefixed as an 8-byte little-endian integer followed by its content, ensuring unambiguous serialization. This composition guarantees that any change to the provider configuration or input invalidates the key and forces a cache miss, while identical inputs always produce the same key and therefore deterministic cache hits.
+
+**Concurrency**:
+
+Multiple processes may access the cache simultaneously. SQLite in WAL mode permits concurrent readers and serialized writers. Inserts into `entries` are write-once (same key, same value): if a concurrent process has already inserted an entry, the second insert either succeeds (WAL serialization order) or fails with `SQLITE_CONSTRAINT`; both outcomes are safe because the value is identical. A lookup always reads the latest committed value.
+
+**Version and corruption handling**:
+
+On cache open, the implementation reads `meta.schema_version`. If the version is absent, newer, or incompatible with the current code, the entire cache file is replaced and rebuilt from scratch. If any operation raises `SQLITE_CORRUPT` or other unrecoverable errors, the cache file is replaced and rebuilding proceeds, ensuring the scan is never blocked. A corrupt or missing cache is treated identically: the scan proceeds with no cache hits, and new results are written to a freshly created file. Replacement is atomic: a fresh database is written to a temporary name in the same directory and renamed over the old file, so a concurrent process never observes a partially written cache.
+
+**Clearing and eviction**:
+
+`DELETE /cache` (and the `--cache-clear` CLI flag) clears all rows from `entries` and the schema metadata in a single transactional write; it never deletes the cache file. Because SQLite WAL serializes writers, a clear is a transaction like any other: it is safe while another instance holds the file open, safe during a scan (a concurrent scan's later inserts simply repopulate entries after the clear), and safe on Windows, where an open file cannot be deleted. The end state is "cleared, then repopulated from anything written after the clear" - exactly the semantics a pre-scan clear wants. File-level deletion is reserved for the corrupt-or-incompatible rebuild path, where the replacement is atomic (a fresh database written to a temporary name, then renamed over the old one), so concurrent rebuilds last-wins safely. Eviction policies (LRU, TTL, size limits) are not implemented; the cache grows unbounded within filesystem constraints. Future enhancements may add configurable size limits and eviction strategies.
+
+### Provider Plugins
+
+Provider plugins are the single interface for external intelligence: LLM analysis, content descriptions, and reverse geocoding. Each plugin type defines a neutral request/response contract, and built-in backends translate that contract into a vendor's API. A provider failure (non-2xx status, timeout, malformed response) is not a scan error: analysis continues, the request is not cached, and the affected placeholder falls back per its rules. External calls run with a bounded timeout governed by `[limits].provider_timeout_seconds` (see "Configuration File Schema"); overrunning it is a provider failure like any other.
+
+**LLM backends** (`[llm].backend`):
+
+| Backend | Default endpoint | API key |
+|---|---|---|
+| `ollama` | `http://localhost:11434` | never required; a configured key is sent as a bearer header |
+| `openrouter` | `https://openrouter.ai/api/v1` | required (config error when LLM enabled without it) |
+| `openai` | `https://api.openai.com/v1` | required (config error when LLM enabled without it) |
+| `custom` | user-supplied | never required; a configured key is sent as a bearer header |
+
+Each backend adapts a neutral completion request (a prompt plus the configured `model`) to its vendor's API and normalizes the returned completion text into the neutral response. The `ollama`, `openrouter`, and `openai` backends translate into each vendor's native chat-completions schema; they do not send the neutral contract on the wire. The neutral contract is what a `custom` backend (and any local gateway speaking it) implements: `POST` to `endpoint` with JSON `{"model": "...", "prompt": "...", "max_tokens": N}` where N is `[llm].max_tokens`, and a successful response is `{"content": "..."}`. An optional configured `api_key` is sent as an `Authorization: Bearer` header. Servers speaking the OpenAI schema, such as LM Studio, work through the `openai` backend without code changes; servers speaking the neutral contract work through the `custom` backend. New LLM vendors are added behind the same interface.
+
+**Description providers** (`[description]` `type`):
+
+Only `type = "llm"` is implemented; it reuses the `[llm]` backend. The values `image`, `video`, and `custom` are reserved for future recognition providers and are rejected as configuration errors until implemented. A future image/video provider plugs in behind the same interface and requires no changes to analysis, caching, or format-string resolution.
+
+**Geocoder backends** (`[geocoder]` `service`):
+
+| `service` | API | default `endpoint` |
+|---|---|---|
+| `nominatim` | OpenStreetMap Nominatim reverse geocoding | `https://nominatim.openstreetmap.org` |
+| `photon` | Photon reverse geocoding | Photon default host |
+| `google` | Google Geocoding API | Google default host |
+| `mapbox` | Mapbox Geocoding API | Mapbox default host |
+| `custom` | neutral contract (below) | user-supplied |
+
+Each backend maps a neutral reverse-geocode request (latitude, longitude, optional `language`) to the vendor API and normalizes the returned place name into the neutral response. The neutral contract is `POST` to `endpoint` with JSON `{"latitude": ..., "longitude": ..., "language": "..."}`; a successful response is `{"name": "..."}`. Raw coordinates are never interpolated into paths; the place name fulfills `%l`.
+
+**Geocoder rate limiting and identification**: requests to a geocoder backend are serialized per backend, never sent in parallel. The built-in public services enforce their providers' usage policies: `nominatim` sends at most one request per second and `photon` its documented public rate, so a first scan over many GPS-tagged photos trickles rather than floods the public endpoint. Requests identify with a User-Agent of `homelinter/<version>` plus the optional configured contact (`geocoder.user_agent_contact`), as public geocoding services require. `custom` and self-hosted endpoints are the user's responsibility and get the same serialization with no built-in delay. Rate delays and timeouts compose: a request that overruns `[limits].provider_timeout_seconds` is a provider failure like any other.
+
+## User Interfaces
+
+The service is the only backend. It owns the scan session, configuration, suggestion generation, batch validation, execution, export, and reporting. The CLI, TUI, and SPA are clients of the service and do not implement filesystem operations independently.
+
+The scan root and the hidden-file selection are per-scan or per-session settings in every client, selected by CLI (`--root`, `--hidden`) or the interactive clients' per-session controls; they are never persisted as configuration-file values.
+
+The CLI and TUI launch an ephemeral localhost service for the duration of the client session. They wait for readiness, propagate the service result, and attempt graceful shutdown followed by forced termination if necessary. An invocation-owned service must not outlive its client.
+
+The `web` command launches the same service as a standalone localhost server on an ephemeral port. It remains running after browser disconnects and is terminated explicitly by the user. The SPA communicates with it through REST and Server-Sent Events. The server is localhost-only, unauthenticated, and keeps session state in memory; a restart requires a new scan.
+
+All clients display the same suggestions and previews. Interactive clients may select top-level suggestions, while dependent operations are included automatically. Filtering affects navigation and bulk selection only. The CLI also supports pager-based interactive review and non-interactive dry-run, execution, and export modes as defined in "Command-Line Interface Schema". The TUI requires a terminal of at least 80x24.
+
+### CLI (Command-Line Interface)
+
+The CLI uses the service lifecycle defined above and supports two modes:
+
+- **Interactive mode (default)**: scans the selected root, generates suggestions, shows them in a pager, and prompts the user for a decision with a menu. The user can review suggestions in the pager, export them to a script, or execute them. See "Command-Line Interface Schema" for the exact flow.
+- **Non-interactive mode**: driven by instructions passed as command-line arguments, such as `--execute`, `--dry-run`, or `--export`. These modes skip the pager and menu and run to completion without prompting.
+
+Dry-run is meaningful only as a non-interactive mode. In the interactive CLI, TUI, and SPA, the previewed suggestions are themselves the dry run: the user sees every suggestion with its destination and reason before deciding, so a dry run is redundant. In non-interactive mode, the dry-run report is the user's only view of what would happen, and therefore carries the full suggestion data for every entry (see "Service API > Data Types").
+
+### TUI (Terminal User Interface)
+
+- Interactive terminal interface (e.g., `ratatui`).
+- Uses the shared service and its standard client lifecycle.
+- Displays suggestion previews and supports filtering and selection of top-level suggestions.
+- Requires a terminal with minimum 80x24 dimensions.
+
+### GUI via SPA (Single-Page Application)
+
+- The SPA is served by the standalone `web` service described above.
+- It can view and modify live configuration; configuration changes are persisted by the service.
+- It communicates through REST and Server-Sent Events.
+- It is localhost-only and unauthenticated; closing the browser does not stop the service.
+
+## Command-Line Interface Schema
+
+The CLI has interactive and non-interactive modes (see "User Interfaces"). The supported command-line syntax is:
+
+```text
+homelinter [OPTIONS]
+homelinter web [OPTIONS]
+```
+
+Supported options:
+
+| Option | Value | Meaning |
+|---|---|---|
+| `--config` | `<path>` | Select the configuration file. |
+| `--root` | `<path>` | Select the scan root for this invocation only. Relative paths are resolved against the current working directory; the resolved path is converted to an absolute path before scanning. Defaults to the platform's home directory. |
+| `--execute` | none | Skip the pager and menu, then execute all generated top-level suggestions and their dependent operations immediately. |
+| `--dry-run` | none | Scan and generate suggestions, dry-run the batch, and report the would-be operations without modifying the filesystem or opening the interactive review menu. |
+| `--export` | `<path>` | Scan and generate suggestions, write the complete executable shell plan, including dependent symlink repairs, to `<path>`, and exit without executing it. |
+| `--hidden` | none | Include hidden files and directories in primary discovery. |
+| `--format` | `<pretty\|json\|toml>` | Override `output.format` for this invocation. |
+| `--target-path` | `<kind>=<path>` | Override the destination format string for one Asset Kind for this invocation. Repeatable; each Asset Kind may be supplied at most once. Takes precedence over `target_paths`. |
+| `--cache-clear` | none | Clear the persistent metadata cache before this invocation performs any scan or execution. May be combined with any other mode; alone it runs the default interactive flow. |
+| `-v`, `--verbose` | none, repeatable | Increase structured logging verbosity. |
+| `-q`, `--quiet` | none, repeatable | Decrease structured logging verbosity. |
+
+`--hidden` applies only to primary discovery and does not affect the separate home-wide symlink repair pass (see "Symlink Handling"). Like `--root`, it is a session-scoped selection and is never persisted to the configuration file. What counts as hidden is platform-native and on Windows configurable via `scan.hidden_definition` (see "File Classification").
+
+`--execute`, `--dry-run`, and `--export` are mutually exclusive. Each is also mutually exclusive with the interactive review flow. `--config`, `--root`, and `--export` may each be supplied at most once. `--cache-clear` is orthogonal: it may accompany any mode, including the interactive flow, and never implies scanning beyond the selected mode. If both `--format` and `output.format` are supplied, `--format` takes precedence. `--target-path` takes precedence over `target_paths` for the kinds it names; supplying the same kind twice is an error, as is an unknown Asset Kind or an invalid format string. Conflicting verbosity options are an error. `--export` takes an output path and fails if the path cannot be created or safely written.
+
+The `web` subcommand launches the standalone service described in "User Interfaces". It accepts common configuration and scan options, including `--config`, `--root`, `--hidden`, `--target-path`, `--cache-clear`, and logging options, but not `--execute`, `--dry-run`, or `--export`; execution is initiated through the SPA. A root supplied on the `web` command line pre-seeds the session's default scan root; a per-scan `root` in `POST /session/scan` overrides it for that scan, and with neither supplied the platform home directory applies. The scan root is held in session memory and is not persisted to configuration.
+
+**Interactive mode (no `--execute`)**
+1. Scan the selected root and generate suggestions.
+2. If no suggestions were generated, print a "no suggestions" notice and exit without entering the pager or menu.
+3. Display all suggestions in a pager (e.g. `less`).
+4. Present a menu and prompt for choice:
+   1. Show suggestions in pager for review and then return to menu once finished
+   2. Export suggestions to an executable shell script
+   3. Execute suggestions
+
+   Pressing `Ctrl+C` or `Ctrl+D` aborts and exits.
+5. After exporting, return to the menu so the user can review the remaining suggestions again, export, or execute.
+6. After executing, summarize execution and exit.
+
+**Non-interactive mode (`--execute`)**
+- Skips the pager and menu entirely.
+- Scans, generates suggestions, and executes them immediately.
+- Each operation is logged as it happens (and recorded in the audit log). In pretty mode the per-operation log goes to stdout; in json/toml modes it is structured logging and goes to stderr, so stdout carries only the final document (see "Output & Reporting > Machine-Readable Output").
+- `Ctrl+C` terminates the process; already-completed operations are not rolled back.
+
+## Service API
+
+The service exposes a single HTTP API on a localhost-only listener. The CLI and TUI spawn an ephemeral instance and drive it through this API for the duration of the client session. The `web` command serves the SPA from the same process and exposes the identical API to the browser. The CLI, TUI, and SPA are therefore interchangeable clients of one backend contract.
+
+### Transport & Conventions
+
+- **Base URL**: `http://127.0.0.1:<port>/api/v1`. The port is ephemeral. The CLI and TUI parse a single readiness line printed to stdout by the spawned service (`homelinter: listening on 127.0.0.1:<port>`) and then poll `/health` until it returns 200. The SPA uses the same origin it was served from.
+- **Protocol**: HTTP/1.1 REST with JSON request and response bodies (`Content-Type: application/json`), plus one Server-Sent Events stream for push updates. The server is unauthenticated, binds loopback addresses only, and rejects non-loopback Host headers.
+- **Paths**: every path in a request or response is an absolute, normalized, host-native path per "Scan Root and Path Representation". The service rejects relative paths, `~`, and environment-variable references in request inputs with a 422 error. The CLI resolves `--root` and `--export` paths to absolute form before calling the API.
+- **Errors**: errors are returned as `{"error":{"code":"<machine-code>","message":"<human text>","details":{...}}}` with a status of 400 (bad request), 404 (not found), 409 (conflict with the current session state), or 422 (validation failure).
+- **Idempotency**: suggestion IDs are stable within a session and derived from the normalized absolute target path, so re-selecting or re-executing a suggestion is a no-op rather than an error. The service retains the report most recently produced by an execution or dry-run; a re-run of the same batch returns that stored report when it still corresponds to the executed batch, and is rejected with 409 when the stored report covers a different batch, so idempotency never serves a stale result under a different batch's identity.
+- **Concurrency**: one scan and one execution at a time per session. A request that conflicts with the current state, for example starting a scan while an execution is running, returns 409.
+
+### Session Model
+
+A service instance holds exactly one in-memory session. The session state machine is:
+
+| State | Meaning |
+|---|---|
+| `idle` | No scan has been started. |
+| `scanning` | File discovery is in progress. |
+| `analyzing` | Metadata extraction and suggestion generation are in progress. |
+| `ready` | Suggestions are generated and the batch has been validated. |
+| `executing` | An execution or dry-run is in progress. |
+| `done` | Execution finished; the report is available until the next scan. |
+| `failed` | A scan or execution failed, or a scan was cancelled; no suggestions or a partial report is available, resolved by a new scan. |
+
+A scan that produces no suggestions reaches `ready` with an empty batch: suggestion counts are zero, and clients present a "no suggestions" notice. The empty batch is a valid validated batch; execution on it is rejected with 400 by the existing empty-selection rule.
+
+State transitions: a new scan replaces the session from `idle`, `ready`, `done`, and `failed`; starting one from `scanning`, `analyzing`, or `executing` conflicts with the in-progress operation and returns 409 (cancel first). A new execution or dry-run is accepted from `ready` and `done`. And only `ready` is never re-entered from a later state except by a new scan. A scan or execution that fails at any point transitions to `failed`, and the failure's reason and any partial report are retrievable until the next scan replaces them.
+
+**Cancellation**: a `POST /cancel` cooperatively cancels the in-progress scan or execution. A scan stops at the current phase boundary and transitions to `failed` with a cancellation reason; an execution finishes the top-level suggestion it is working on, marks the remaining ones `skipped` with a cancellation reason, and transitions to `done` with the partial report. Already-completed operations are never rolled back. Cancelling an idle session is a no-op returning the current state. In `ready`, `done`, or `failed` state nothing is in progress, and cancellation returns 409. A later execution naming only the skipped-from-cancellation suggestions (a different batch identity) executes them fresh, while re-running the full batch returns the stored partial report.
+
+A restart requires a new scan: session state is never persisted. The scan root is captured when the scan starts and is retained with the session (see "Scan Root and Path Representation").
+
+### Data Types
+
+**Suggestion**:
+
+```json
+{
+  "id": "s-<sha256-of-normalized-target>",
+  "type": "move",
+  "asset_kind": "photo",
+  "target": "/home/alice/Downloads/IMG_0001.jpg",
+  "new_path": "/home/alice/Pictures/2024/03/IMG_0001.jpg",
+  "reason": "Moved to the photo archive for 2024-03.",
+  "metadata": {"extracted_date": "2024-03-15", "source": "exif"},
+  "dependent_operations": [
+    {"type": "repair_symlink", "link_path": "...", "recorded_target": "...", "replacement_target": "..."}
+  ],
+  "selected": false,
+  "status": "pending",
+  "rejection_reason": null
+}
+```
+
+- `type`: `move` or `delete`. `new_path` is present only for `move`.
+- `dependent_operations`: mandatory members of the parent execution unit. They are never independently selectable, rejectable, or executable; the API rejects any request that names one.
+- `selected`: client selection state, maintained by the service.
+- `status`: `pending`, `rejected`, `executed`, `failed`, or `skipped`. `rejected` carries `rejection_reason` from batch validation and is never executable or exportable.
+
+**ExecutionReport**: one entry per top-level suggestion with `suggestion_id`, `result` (`executed`, `failed`, `skipped`), per-operation outcomes including dependent `repair_symlink` steps, `dry_run` (true when the report came from a dry run), and `partial` (true when a parent succeeded but a dependent repair failed). The report also records the scan root and platform. When the report came from a dry run, every entry also carries the full suggestion data (`target`, `new_path` when present, `type`, `reason`), so the report is a self-contained preview; during a real execution the stored suggestions remain available through `GET /suggestions` and the entry carries only `suggestion_id` and outcomes.
+
+**ScanSummary**: total files scanned in the primary scan, total symlinks indexed for repair, suggestions by type and Asset Kind, and estimated space reclaimed by deduplication.
+
+### Endpoints
+
+#### Lifecycle
+
+| Method & Path | Description |
+|---|---|
+| `GET /health` | Readiness probe. Returns 200 with the current session state when the service is accepting requests; clients poll until 200. In `failed` state the response includes the failure reason. |
+| `POST /shutdown` | Graceful shutdown: stop accepting new work, finish in-flight operations, then exit. Returns 204. The CLI and TUI always call this before exiting and force-terminate the process if it does not exit promptly. |
+| `POST /cancel` | Cooperatively cancel the in-progress scan or execution (see "Session Model > Cancellation"). A cancelled scan transitions to `failed` with a cancellation reason; a cancelled execution finishes its current top-level suggestion, marks the rest `skipped`, and completes with a partial report. Returns 200 with the resulting state (a no-op when idle); 409 in `ready`, `done`, or `failed` state. |
+
+#### Session & Scan
+
+| Method & Path        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /session/scan` | Start a scan. Body: `{"root": "<abs path, optional>", "hidden": false, "target_paths": {"photo": "Pictures/%Y/%m/%f"}}`. `root` defaults to the platform home directory; `target_paths` overrides the config file's `target_paths` for this scan only. Returns 202 with `{"state": "scanning"}`; progress and completion arrive over SSE. A scan started from `idle`, `ready`, `done`, or `failed` replaces the session: previous suggestions, selection, and the execution report are discarded. Starting one from `scanning`, `analyzing`, or `executing` conflicts with the in-progress operation and returns 409. A scan started from `failed` replaces the session and its failure record before scanning begins. A failure during scanning or analysis leaves the session in `failed` state (see "Session Model"). |
+| `GET /session`       | Current session: state, scan root, platform, effective config hash, suggestion counts, and selection count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+#### Suggestions & Selection
+
+| Method & Path | Description |
+|---|---|
+| `GET /suggestions` | List top-level suggestions in deterministic order (normalized absolute source path). Query params: `type`, `asset_kind`, `status`, `selected`, `offset`, `limit`. Returns `{"items": [...], "total": N}`. Filtering affects navigation and bulk selection only; it never changes what is selectable or executable. |
+| `GET /suggestions/{id}` | One suggestion including its dependent operations. |
+| `GET /selection` | The current selection: `{"ids": [...]}`. |
+| `PUT /selection` | Replace the selection exactly. Body: `{"ids": [...]}`. Dependent-operation IDs are rejected. |
+| `POST /selection/add` | Add to the selection. Body: `{"ids": [...]}` or `{"filter": {...}}` to add everything matching a filter (bulk selection applies to the filtered set only). |
+| `POST /selection/remove` | Remove from the selection, with the same body forms as add. |
+
+Every selection change triggers re-validation of the selected subset (see "Suggestion Batch Validation"); rejected suggestions are marked `rejected` with a machine-readable reason and are excluded from execution and export.
+
+#### Validation, Execution & Export
+
+| Method & Path | Description |
+|---|---|
+| `POST /validate` | Re-validate a batch. Body: `{"ids": [...]}` (optional; defaults to the selection). Returns `{"valid": true}` or `{"valid": false, "rejected": [{"id": "...", "reason": "..."}]}`. The service also validates automatically on selection change and before every execution or export; this endpoint exists for clients to preview rejection reasons. |
+| `POST /execute` | Execute a batch. Body: `{"ids": [...] (optional; defaults to the selection), "dry_run": false}`. Returns 202 with `{"state": "executing"}`; per-operation events and the final report arrive over SSE. A dry run is a full execution with the filesystem untouched: it transitions `executing` -> `done`, emits `execution.op` events, and stores a report retrievable from `GET /execution` with `dry_run: true`; suggestion `status` fields are left unchanged (they stay `pending`/`selected`), so a dry run never consumes idempotency for a later real execution. `dry_run: true` validates and reports the would-be operations without touching the filesystem. A request with no `ids` and an empty selection is rejected with 400; the CLI `--execute` passes all suggestion IDs explicitly. Already-`executed` IDs are covered by the stored report (idempotency), and `rejected` IDs are excluded from the batch without being an error. A request whose IDs resolve entirely to already-executed or rejected entries executes nothing, returns the normal 202 response, and yields an empty report. |
+| `GET /execution` | The execution report for the most recent completed execution or dry-run; 404 when none exists. Only the most recent report is retained per batch identity: a new execution or dry-run for the same batch replaces the stored report with the same identity, an execution or dry-run for a different batch replaces identity and report, and the next scan discards it. |
+| `POST /export` | Generate the platform script for a batch. Body: `{"ids": [...] (optional; defaults to the selection), "path": "<abs path, optional>"}`. With `path`, the service writes the script there, failing with 422 if the path cannot be created or safely written, and returns `{"path": "...", "platform": "linux|macos|windows", "count": N}`. Without `path`, the response body is the script text and the platform and count are returned in the `X-Homelinter-Platform` and `X-Homelinter-Count` headers. |
+
+#### Configuration
+
+| Method & Path | Description |
+|---|---|
+| `GET /config` | The effective configuration merged per "Configuration > Precedence", plus `config_path` (the resolved config file path, or null when none exists). |
+| `PUT /config` | Validate and persist a partial configuration to the config file. The service merges the submitted values into the existing file (deep merge: tables by key, scalars and arrays replaced, empty tables contributing nothing, as under "Config File Resolution"), validates the result (unknown placeholders, invalid keys, `scan.root` rejection, invalid per-kind description keys, and so on), and writes it atomically. Returns 200 with the new effective configuration and emits a `config.updated` event. Validation failures return 422 with per-field errors and nothing is written. Changes apply to the next scan; already-generated suggestions are not regenerated. |
+| `POST /config/validate` | Validate a candidate configuration without persisting it. Returns 200 `{"valid": true}` or 422 `{"valid": false, "errors": [...]}`. |
+
+#### Cache, Audit & Reporting
+
+| Method & Path | Description |
+|---|---|
+| `DELETE /cache` | Clear all cached geocoding and description results in a single transactional write (see "Cache Implementation > Clearing and eviction"). Returns 204 and emits a `cache.cleared` event. Never deletes the cache file, and is safe during a scan or with other instances using the cache. |
+| `GET /report/summary` | The `ScanSummary` for the current session. |
+| `GET /audit` | Audit log entries as a JSON array, newest first, read from the persisted NDJSON audit file (see "Output & Reporting > Logging"). Query params: `since` (ISO-8601 timestamp; entries with a timestamp strictly before it are omitted) and `limit` (default 100, maximum 1000; entries beyond the limit are omitted). Each entry: timestamp, operation type, absolute source path, absolute destination path (if any), reason, and the scan root. |
+| `GET /events` | The Server-Sent Events push channel described under "Events (SSE)"; on connect it sends the current `session.state` and, when a batch exists, the current `suggestion.batch` snapshot, then streams live events. |
+
+### Events (SSE)
+
+`GET /events` returns a `text/event-stream` connection. On connect, the service sends the current `session.state` and, when a batch exists, the current `suggestion.batch` snapshot; afterwards it streams live events.
+
+| Event | Data |
+|---|---|
+| `session.state` | `{"state": "idle" \| "scanning" \| "analyzing" \| "ready" \| "executing" \| "done" \| "failed"}` |
+| `scan.progress` | `{"phase": "discovery" \| "metadata" \| "symlinks" \| "suggestions", "scanned": N, "elapsed_ms": N}` |
+| `scan.complete` | `{"summary": {...}}` |
+| `suggestion.batch` | `{"items": [...], "total": N}` emitted after generation and batch validation |
+| `batch.validated` | `{"valid": bool, "rejected": [{"id": "...", "reason": "..."}]}` emitted after every selection change |
+| `execution.op` | `{"suggestion_id": "...", "operation": "move" \| "delete" \| "repair_symlink", "status": "started" \| "completed" \| "failed" \| "skipped", "detail": {...}}` |
+| `execution.complete` | `{"report": {...}}` |
+| `config.updated` | `{"config": {...}}` |
+| `cache.cleared` | `{}` |
+
+### Client Lifecycle
+
+The CLI and TUI spawn the service, parse the readiness line, poll `/health` until 200, drive the session through the API, then call `POST /shutdown` and wait for process exit, force-terminating if the process does not exit promptly. An invocation-owned service must not outlive its client. The `web` command serves the SPA at `/` and the API under `/api/v1` from the same process; it never shuts itself down and is terminated explicitly by the user.
+
+The non-interactive CLI modes map directly onto this API: `--dry-run` scans and generates suggestions, calls `POST /execute` with `dry_run: true`, and prints the resulting report without modifying the filesystem; `--execute` scans and executes with all suggestion IDs, and `--export <path>` scans and calls `POST /export` with the resolved path. The interactive CLI scans, lists suggestions via `GET /suggestions`, and drives the pager and menu from the same data.
+
+## Tooling Strategy
+
+homelinter shells out to external tools for discovery and metadata extraction:
+
+| Task | Primary Tool | Fallback |
+|------|-------------|----------|
+| File discovery | `fd` | `find` |
+| EXIF extraction | `exiftool` | Built-in `kamadak-exif` (Rust) |
+| Document text extraction | `pdftotext` (PDF), `pandoc` (docx/odt/epub) | Built-in Rust crates (`pdf-extract`, `docx-rs`) |
+| Git info | `git` CLI | - |
+| Hashing | Rust `sha2` crate | - |
+
+**Repository adapters**: repository metadata (remote URLs, default branch, commit count, last activity) is collected by a pluggable per-VCS adapter following the same pattern as the provider plugins in "Provider Plugins". Adapters for `git` (`.git` directory or file), `hg` (`.hg`), and `svn` (`.svn`) map to their platform CLIs (`git`, `hg`, `svn`). An adapter whose CLI is unavailable leaves that repository's metadata empty and analysis continues, exactly like other optional tools; new version-control systems are added behind the same interface without changing analysis code.
+
+External tools are optional and platform-specific. The implementation must use platform-neutral Rust APIs for core discovery, hashing, path handling, and execution safety, with external tools used only when available and compatible with the host platform. Windows equivalents may be used for metadata and repository operations, but missing Unix utilities are never errors when a built-in implementation is available. Tools are detected at runtime. If a primary tool is missing, homelinter falls back gracefully. If no suitable tool is available for a metadata type, that metadata is omitted (analysis continues). Hashing is always in-process via the Rust `sha2` crate: it is a core safety operation used by deduplication and move verification, is required on every platform, and never depends on an external binary.
+
+## Execution & Safety
+
+### Guaranteed invariants
+
+These invariants are non-negotiable and testable:
+
+- homelinter never overwrites an existing object.
+- homelinter never modifies file contents.
+- homelinter never follows or modifies an unsupported link or reparse point.
+- A dependent operation runs only after its parent operation succeeds.
+- A stale suggestion whose source identity no longer matches is never executed.
+- An invalid or colliding batch is never executed.
+- Partial completion and failures are always reported accurately.
+- Completed operations are never reported as rolled back.
+
+homelinter does not guarantee transactional behavior across multiple filesystem operations. A later failure may leave earlier operations completed. Cross-filesystem moves and dependent symlink repairs can therefore produce partial completion.
+
+### Execution policies
+
+Destructive and lower-safety behaviors are gated behind explicit configuration. The proposed defaults favor safety over completeness. Symlink repair and cross-filesystem moves are not configurable:
+
+- Delete suggestions are executable and exportable whenever they pass the same validation and execution checks as other suggestions.
+- Cross-filesystem moves always use the verified copy-and-delete protocol described under "Transactional Safety"; there is no configuration to weaken or disable it.
+- Symlink repair is always performed under the safe-only semantics described in "Symlink Handling".
+- Execution always continues with unrelated suggestions after a failure. A failed suggestion and all of its dependent operations are skipped or stopped, while unrelated suggestions remain eligible.
+
+### Transactional Safety
+
+- Suggestions and their dependent operations are validated immediately before execution (re-check destination, re-stat source, and validate dependent symlink state).
+- Moves use atomic rename within the same filesystem, performed with no-replace semantics so the rename fails rather than overwrites if an object exists at the destination: `renameat2` with `RENAME_NOREPLACE` on Linux, `renamex_np` with `RENAME_EXCL` on macOS, and `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING` on Windows. Where the platform cannot express a no-replace rename, the destination is re-validated immediately before the publish and files are published through a hard link, which fails on an existing target; if no safe no-replace publish is available, the move fails rather than risks an overwrite.
+- A cross-filesystem move of a file follows a verified copy-and-delete protocol whose shape mirrors the kernel-based copy strategy of `mv`: the copy phase uses `copy_file_range(2)` where available (so the kernel performs the copy, and network filesystems such as NFS/SMB may execute it server-side), falling back to `sendfile(2)` and then to a plain read/write loop when unsupported; Windows uses its file-copy API. Unlike `mv`, which copies into place without verification, the protocol is: copy to a temporary file in the destination filesystem, `fsync` it, verify it against the source with the full-content SHA-256 hash, publish the copy by renaming the temporary file to its final name within the destination filesystem using the no-replace rename above, and delete the source only after the copy is published. At every interruption point, either the intact source or a complete verified destination exists at its final path; the source is never removed until the verified destination is in place.
+- Move verification always uses the full-content SHA-256 hash at every file size. The fast-path hash is a deduplication shortlist mechanism only and never verifies a move, so corruption in any part of a large file is detected before the source is removed.
+- A cross-filesystem move of a directory (a repository root) applies the same verified protocol to the whole tree, and the source tree is untouched until the copy is complete and verified:
+  1. Create a uniquely named temporary directory in the destination filesystem.
+  2. Copy the tree into it file by file with the verified file protocol above, preserving file metadata under host-platform semantics, preserving empty directories and the directory structure, and recreating contained symlinks and supported link types from their raw targets without following them; a contained link type that cannot be recreated safely fails the move rather than being dropped or copied as a regular file.
+  3. `fsync` the copied files and directory entries.
+  4. Verify structural completeness: the copy's relative path set must exactly match the source's, and every copied file's full-content hash must match its source.
+  5. Publish the copy by renaming the temporary directory to the final destination name with the no-replace rename above; the rename stays within the destination filesystem.
+  6. Delete the source tree only after the publish succeeds.
+  A failed or interrupted tree move leaves either the intact source or the complete verified copy at the temporary path, and the temporary directory's path is reported rather than silently removed, because the executor cannot always prove the source is intact afterward. A source-tree deletion that fails after a successful publish is reported as partial completion: the destination remains complete and the leftover source paths are reported.
+- A parent move or delete is executed before its dependent symlink repairs. Dependent repairs are mandatory members of the parent execution unit and are executed only if the parent operation completes successfully.
+- If a parent operation fails validation or execution, its dependent operations are skipped. Already-completed operations are not rolled back.
+- If a parent operation succeeds but one of its dependent symlink repairs fails, the result is reported as partially completed. The executor attempts the remaining safe dependent repairs, while unrelated suggestions remain eligible for execution.
+
+### Suggestion Batch Validation
+
+After suggestion generation, homelinter validates the complete top-level suggestion batch before presenting it in the pager, TUI, or SPA. The same validation runs again for every selected subset before export or execution, because interactive selection can change operation dependencies and path conflicts.
+
+Validation uses a deterministic ordering based on normalized absolute source paths and compares paths using the host filesystem's collision rules, including case folding where applicable. It rejects every suggestion in a collision set when multiple moves have the same destination. It also rejects any batch containing a destination that conflicts with another planned source, a delete target, or a dependent operation, unless the plan explicitly defines a safe, order-independent sequence. Rejected suggestions are reported with a collision reason. Existing destination checks, source identity checks, and symlink precondition checks remain mandatory immediately before execution. A batch with rejected suggestions is never presented as executable, exported, or executed; the rejected suggestions and machine-readable reasons are included in reporting.
+
+### Platform Script Export
+
+Export uses the same validated execution plan and dependency order as the native executor. Linux and macOS exports are POSIX shell scripts; Windows exports are PowerShell scripts. The exported language is determined by the host platform at export time and is not configurable, so a Linux or macOS export is always POSIX and a Windows export is always PowerShell. They contain absolute paths, create move destinations, perform moves and deletes, and include dependent symlink repairs only after their parent operation succeeds. Scripts use platform-safe quoting and are not portable between operating systems.
+
+Exported scripts cannot guarantee that the filesystem still satisfies its preconditions when the script is later run. They repeat the same safe defaults as the executor: they do not embed destructive operations beyond the plan, they abort on unexpected destination or source state rather than blindly overwriting, and cross-filesystem moves follow the same verified copy-and-delete protocol as the native executor. The native executor remains authoritative for validation and safety.
+
+### Race Condition Handling
+
+- Files are re-stat immediately before execution. File identity is the platform object identity: Unix device number plus inode (`st_dev`, `st_ino`); Windows volume serial number plus file index. A re-stat that finds a different size or a different object identity than analysis invalidates the suggestion and re-queues it for re-analysis. If only mtime changed, the source is re-checked and the suggestion may still execute when content identity is unchanged. When the platform cannot provide an object identity (for example FAT-style filesystems reporting a zero inode), identity degrades to the normalized absolute path plus a metadata signature (size and mtime), and the degraded identity is treated as unverifiable: the suggestion is conservatively re-analysed rather than executed.
+- A file lock is not held during interactive approval (TUI/SPA); if the file changes during approval, the user is notified and the suggestion is refreshed.
+
+## Output & Reporting
+
+### Scan Summary
+
+Pretty-printed table or JSON/TOML containing:
+- Total files scanned in the primary scan
+- Total symlinks indexed for repair across the platform's home directory
+- Suggestions by type and Asset Kind
+- Estimated space reclaimed (for deduplication)
+
+### Machine-Readable Output (`--format json|toml`)
+
+`output.format = "json"` or `"toml"` (or `--format json|toml`) applies to non-interactive CLI output only: the interactive pager and menu flow is always pretty. In json/toml mode the CLI emits a single structured document to stdout containing the union of the service data types that apply to the mode: the scan root, platform, `ScanSummary`, the full `Suggestion` batch when suggestions are shown, and the `ExecutionReport` when executing (including a dry run), with the pieces absent from the mode omitted. Per-operation progress during `--execute` is structured logging and goes to stderr in these modes, so stdout carries exactly one parseable document. The shape is exactly the corresponding "Service API" data types, not a new schema; `summary` matches `ScanSummary` as returned by `GET /report/summary`. TOML output omits optional and null-valued fields (TOML has no null); JSON output follows the API representation. Diagnostics and structured logging continue to go to stderr in every format. "Pretty" is the human-facing default and has no schema of its own.
+
+### Logging
+
+- Structured logging to stderr (level controlled by `-v` / `-q`)
+- Optional log file in the platform's standard per-user application-data directory
+- Audit log of all executed suggestions appended to the platform's standard per-user application-data directory as `audit.ndjson`, alongside the cache database
+- Audit log format: newline-delimited JSON (NDJSON), one entry per executed suggestion, containing timestamp, operation type, absolute source path, absolute destination path (if any), and reason. The record also includes the absolute scan root used for discovery.
+- The audit log is append-only, persists across sessions and restarts, and is never session-scoped; it is not rotated or rewritten. Its file name is fixed (`audit.ndjson`), and `GET /audit` reads it directly (see "Service API > Cache, Audit & Reporting").
+- Exported scripts do not append to the audit log: they run outside the service and their later execution is not audited.
+
+## Implementation Notes
+
+- Written in Rust
+- Async I/O for scanning and metadata extraction (tokio)
+- Modular architecture: `scan`, `analyze`, `suggest`, `execute`, `service`, `clients` crates
+- The `service` crate is the shared backend implemented by the locally running web server; the TUI and the SPA are frontends for it
+
+## Developer Environment
+
+- Nix flake (`flake.nix`) with Fenix provides the pinned Rust toolchain via `rust-toolchain.toml` (single source of truth, also usable with `rustup`), rust-analyzer, `pkg-config`, and developer tools (`cargo-nextest`, `cargo-audit`, `cargo-deny`, `taplo`).
+- `direnv` entry point is `use flake`; pairing with `nix-direnv` caches the shell for fast reloads.
+- The toolchain version is pinned in `rust-toolchain.toml`; the Fenix `sha256` in `flake.nix` is updated when that file changes.
+- C dependencies go in `devShells.default.buildInputs`: pkg-config -s dev outputs land in `PKG_CONFIG_PATH` and stdenv rpaths linked libs automatically. `LD_LIBRARY_PATH` is set only on demand (crates that dlopen `.so` files by name, e.g. game engines); see the commented example in `flake.nix`.
