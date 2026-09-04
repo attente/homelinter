@@ -489,7 +489,9 @@ Implemented as the `tui` subcommand of the CLI binary (see "Command-Line Interfa
 - The SPA is served by the standalone `web` service described above.
 - It can view and modify live configuration; configuration changes are persisted by the service.
 - It communicates through REST and Server-Sent Events.
-- It is localhost-only and unauthenticated; closing the browser does not stop the service.
+- It is localhost-only,and unauthenticated; closing the browser does not stop the service.
+
+Implemented under `webui/` as React + TypeScript + Vite, with no client-side router (one page, internal views like the TUI). The typed API client (`webui/src/api.ts`) mirrorsthe Service API JSON shapes from `crates/model`; pure logic lives in `webui/src/lib/` (`filter.ts` filters, `format.ts` path/shorten/report helpers,and `sse.ts` SSE payload parsing)and is unit-tested with Vitest in a node environment(no DOM required). Components render with plain CSS classes only, no inline styles, so the served app stays compatible with a strict Content Security Policy (`script-src 'self'`, `style-src 'self'`);the Vite build disablesthe modulepreload polyfill so `index.html` carries zero inline scripts. The SPA keeps one `EventSource('/api/v1/events')` stream with the browser's built-in reconnect, plus a session poll while a scan or run is in progress, falling back to polling when the stream fails. State transitions mirror the TUI's phases: scan form, progress, suggestion browser with filters and selection, live run log, report,and a config editor(json document view, validate, save`. The built app(Vite `dist`) is distributed by the `web` command; see "Implementation status" for the current wiring.
 
 ## Command-Line Interface Schema
 
