@@ -460,7 +460,7 @@ The service is the only backend. It owns the scan session, configuration, sugges
 
 The scan root and the hidden-file selection are per-scan or per-session settings in every client, selected by CLI (`--root`, `--hidden`) or the interactive clients' per-session controls; they are never persisted as configuration-file values.
 
-The CLI and TUI launch an ephemeral localhost service for the duration of the client session. They wait for readiness, propagate the service result, and attempt graceful shutdown followed by forced termination if necessary. An invocation-owned service must not outlive its client.
+The CLI embeds one service instance in the same process: it binds a loopback listener on an ephemeral port, builds the service in-process, and drives it through the HTTP API described under "Service API > Client Lifecycle". Managed CLI sessions always end with `POST /api/v1/shutdown` followed by a bounded wait and, if the service does not exit promptly, forced termination, so an invocation-owned service never outlives its client. The standalone `web` command serves on an ephemeral port, prints the readiness line `homelinter: listening on 127.0.0.1:<port>` to stdout, and never shuts itself down; it is terminated explicitly. The client contract itself is process-agnostic: a future TUI (or any other client) can spawn the same binary and parse that readiness line.
 
 The `web` command launches the same service as a standalone localhost server on an ephemeral port. It remains running after browser disconnects and is terminated explicitly by the user. The SPA communicates with it through REST and Server-Sent Events. The server is localhost-only, unauthenticated, and keeps session state in memory; a restart requires a new scan.
 
@@ -470,7 +470,7 @@ All clients display the same suggestions and previews. Interactive clients may s
 
 The CLI uses the service lifecycle defined above and supports two modes:
 
-- **Interactive mode (default)**: scans the selected root, generates suggestions, shows them in a pager, and prompts the user for a decision with a menu. The user can review suggestions in the pager, export them to a script, or execute them. See "Command-Line Interface Schema" for the exact flow.
+- **Interactive mode (default)**: scans the selected root, generates suggestions, shows them for review, and prompts the user for a decision with a menu. The user can review suggestions, export them to a script, or execute them. The current CLI prints the review list to stdout; an external pager is a later refinement. See "Command-Line Interface Schema" for the exact flow.
 - **Non-interactive mode**: driven by instructions passed as command-line arguments, such as `--execute`, `--dry-run`, or `--export`. These modes skip the pager and menu and run to completion without prompting.
 
 Dry-run is meaningful only as a non-interactive mode. In the interactive CLI, TUI, and SPA, the previewed suggestions are themselves the dry run: the user sees every suggestion with its destination and reason before deciding, so a dry run is redundant. In non-interactive mode, the dry-run report is the user's only view of what would happen, and therefore carries the full suggestion data for every entry (see "Service API > Data Types").
@@ -518,14 +518,14 @@ Supported options:
 
 `--execute`, `--dry-run`, and `--export` are mutually exclusive. Each is also mutually exclusive with the interactive review flow. `--config`, `--root`, and `--export` may each be supplied at most once. `--cache-clear` is orthogonal: it may accompany any mode, including the interactive flow, and never implies scanning beyond the selected mode. If both `--format` and `output.format` are supplied, `--format` takes precedence. `--target-path` takes precedence over `target_paths` for the kinds it names; supplying the same kind twice is an error, as is an unknown Asset Kind or an invalid format string. Conflicting verbosity options are an error. `--export` takes an output path and fails if the path cannot be created or safely written.
 
-The `web` subcommand launches the standalone service described in "User Interfaces". It accepts common configuration and scan options, including `--config`, `--root`, `--hidden`, `--target-path`, `--cache-clear`, and logging options, but not `--execute`, `--dry-run`, or `--export`; execution is initiated through the SPA. A root supplied on the `web` command line pre-seeds the session's default scan root; a per-scan `root` in `POST /session/scan` overrides it for that scan, and with neither supplied the platform home directory applies. The scan root is held in session memory and is not persisted to configuration.
+The `web` subcommand launches the standalone service described in "User Interfaces". It accepts common configuration and scan options, including `--config`, `--root`, `--hidden`, `--target-path`, `--cache-clear`, and logging options, but not `--execute`, `--dry-run`, or `--export`; execution is initiated through the SPA. A root supplied on the `web` command line pre-seeds the session's default scan root; a per-scan `root` in `POST /session/scan` overrides it for that scan, and with neither supplied the platform home directory applies. The scan root is held in session memory and is not persisted to configuration. In this build `--hidden` and `--target-path` are accepted for compatibility but are not pre-seeded into the session (a documented seam); scans must pass `hidden` and `target_paths` per request until the SPA exists.
 
 **Interactive mode (no `--execute`)**
 1. Scan the selected root and generate suggestions.
 2. If no suggestions were generated, print a "no suggestions" notice and exit without entering the pager or menu.
-3. Display all suggestions in a pager (e.g. `less`).
+3. Display all suggestions for review (the current CLI prints them to stdout; a pager such as `less` is a later refinement).
 4. Present a menu and prompt for choice:
-   1. Show suggestions in pager for review and then return to menu once finished
+   1. Show suggestions for review again and then return to menu once finished
    2. Export suggestions to an executable shell script
    3. Execute suggestions
 
@@ -536,7 +536,7 @@ The `web` subcommand launches the standalone service described in "User Interfac
 **Non-interactive mode (`--execute`)**
 - Skips the pager and menu entirely.
 - Scans, generates suggestions, and executes them immediately.
-- Each operation is logged as it happens (and recorded in the audit log). In pretty mode the per-operation log goes to stdout; in json/toml modes it is structured logging and goes to stderr, so stdout carries only the final document (see "Output & Reporting > Machine-Readable Output").
+- Every executed operation is recorded in the audit log; live per-operation events are available over SSE (`execution.op`). The CLI prints the final report: in pretty mode on stdout, and in json/toml modes stdout carries only the final document while progress and notices go to stderr (see "Output & Reporting > Machine-Readable Output").
 - `Ctrl+C` terminates the process; already-completed operations are not rolled back.
 
 ## Service API
@@ -545,7 +545,7 @@ The service exposes a single HTTP API on a localhost-only listener. The CLI and 
 
 ### Transport & Conventions
 
-- **Base URL**: `http://127.0.0.1:<port>/api/v1`. The port is ephemeral. The CLI and TUI parse a single readiness line printed to stdout by the spawned service (`homelinter: listening on 127.0.0.1:<port>`) and then poll `/health` until it returns 200. The SPA uses the same origin it was served from.
+- **Base URL**: `http://127.0.0.1:<port>/api/v1`. The port is ephemeral. Every path in the endpoint tables below is relative to this base: `GET /health` is served at `GET /api/v1/health`, `POST /execute` at `POST /api/v1/execute`, and so on. The managed CLI embeds its service in-process and polls `/health` until it returns 200; the standalone `web` command prints the readiness line `homelinter: listening on 127.0.0.1:<port>` to stdout for external clients, which parse it and then poll `/health`. The SPA uses the same origin it was served from.
 - **Protocol**: HTTP/1.1 REST with JSON request and response bodies (`Content-Type: application/json`), plus one Server-Sent Events stream for push updates. The server is unauthenticated, binds loopback addresses only, and rejects non-loopback Host headers.
 - **Paths**: every path in a request or response is an absolute, normalized, host-native path per "Scan Root and Path Representation". The service rejects relative paths, `~`, and environment-variable references in request inputs with a 422 error. The CLI resolves `--root` and `--export` paths to absolute form before calling the API.
 - **Errors**: errors are returned as `{"error":{"code":"<machine-code>","message":"<human text>","details":{...}}}` with a status of 400 (bad request), 404 (not found), 409 (conflict with the current session state), or 422 (validation failure).
@@ -787,8 +787,29 @@ Pretty-printed table or JSON/TOML containing:
 
 - Written in Rust
 - Async I/O for scanning and metadata extraction (tokio)
-- Modular architecture: `scan`, `analyze`, `suggest`, `execute`, `service`, `clients` crates
-- The `service` crate is the shared backend implemented by the locally running web server; the TUI and the SPA are frontends for it
+- Modular workspace: `model`, `scan`, `analyze`, `suggest`, `execute`, `service`, `clients` crates plus the `homelinter` CLI binary crate
+- The `service` crate is the shared backend implemented by the locally running web server; the CLI is a client of it and the TUI and SPA are future frontends for it
+
+### Implementation status
+
+The core pipeline and the HTTP service API are implemented and exercised by an end-to-end suite (unit and integration tests across all crates, including service API tests that drive real scans, dry runs, executions, exports, config PUT, cache clear, and an SSE connection over TCP):
+
+- `model` owns the error envelope, host-native path rules, Asset Kind classification, printf-style format strings, TOML/JSON config deep-merge and validation, suggestion/session types, and SHA-256 hashing.
+- `scan` implements primary discovery, the home-wide symlink pass, ToolSet detection for optional external tools, and repository atomicity.
+- `analyze` fills provenance and content hashes, extracts filename dates, and deduplicates (keeper = oldest copy).
+- `suggest` generates move and delete suggestions with dependent symlink repairs; delete suggestions always carry the recorded full-content hash required at execution and export time.
+- `execute` implements no-replace rename (kernel-atomic `renameat2(RENAME_NOREPLACE)` on Linux, checked fallback elsewhere), hash-verified delete, dependent symlink repair, verified cross-filesystem copy-and-delete with publish-then-delete ordering, dry runs, and platform script export (POSIX `sh` / PowerShell).
+- `service` implements the full REST + SSE API under `/api/v1`, the single-session state machine, batch validation, config merge-and-write, the SQLite cache, and the append-only audit log. Async-accept endpoints (`POST /session/scan`, `POST /execute`) return 202 and deliver their outcomes over SSE.
+- `clients` is a small hyper-based HTTP/1.1 + SSE client used by the CLI.
+- The `homelinter` binary embeds one service instance in-process for the managed CLI flows and for `web`, per the lifecycle described under "User Interfaces".
+
+### Documented seams
+
+- **Windows platform primitives**: symlink replacement is refused on non-Unix platforms rather than guessed; the exported PowerShell marks reparse-point repair as a seam and defers to a native run; `same_filesystem` conservatively assumes a shared volume so an unsafe copy is never attempted. No-replace rename falls back to a checked rename where the kernel API is unavailable.
+- **Provider plugins**: LLM and geocoder description/geocoding backends, image/video recognition providers, and document-text extraction backends are not implemented. The plugin seams (extractor/config schemas, ToolSet detection, cache) are in place; when a provider is unavailable the affected metadata is omitted and analysis continues. VCS repository adapters beyond the local scan/repo pass are likewise future work.
+- **CLI review pager**: interactive review prints the suggestion list to stdout; an external pager is a later refinement.
+- **`web` pre-seed**: `--root` pre-seeds the session default scan root; `--hidden` and `--target-path` are accepted but not pre-seeded and must be passed per scan.
+- **TUI and SPA**: not yet built; the service API and readiness-line contract are the client boundary they will use.
 
 ## Developer Environment
 

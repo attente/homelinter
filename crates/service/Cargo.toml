@@ -1,0 +1,31 @@
+[package]
+name = "homelinter-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+homelinter-model = { path = "../model" }
+homelinter-scan = { path = "../scan" }
+homelinter-analyze = { path = "../analyze" }
+homelinter-suggest = { path = "../suggest" }
+homelinter-execute = { path = "../execute" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"

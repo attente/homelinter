@@ -1,0 +1,12 @@
+[package]
+name = "homelinter-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+homelinter-model = { path = "../model" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+globset = { workspace = true }
+thiserror = { workspace = true }
