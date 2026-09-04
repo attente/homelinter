@@ -159,7 +159,11 @@ pub fn classify_file_name(name: &str) -> AssetKind {
             return AssetKind::Archive;
         }
     }
-    if lower == "cargo.lock" || lower == "package-lock.json" {
+    if lower == "cargo.lock"
+        || lower == "package-lock.json"
+        || lower == "pnpm-lock.yaml"
+        || lower == "yarn.lock"
+    {
         return AssetKind::Data;
     }
     let dot = lower.rfind('.');
