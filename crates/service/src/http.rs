@@ -6,10 +6,11 @@
 //! references are rejected with 422.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -158,7 +159,141 @@ pub fn router(app: AppHandle) -> Router {
         .route("/api/v1/report/summary", get(report_summary))
         .route("/api/v1/audit", get(audit_get))
         .route("/api/v1/events", get(events_sse))
+        .fallback(static_fallback)
         .with_state(app)
+}
+
+// ---------------------------------------------------------------------------
+// Static SPA serving
+// ---------------------------------------------------------------------------
+
+/// Strict Content-Security-Policy for the served SPA: same-origin only, no
+/// inline scripts/styles, no eval, no external origins.
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; \
+base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Content types for the file extensions the Vite build can emit.
+fn content_type_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "json" => "application/json; charset=utf-8",
+        "map" => "application/json; charset=utf-8",
+        "wasm" => "application/wasm",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Serve the built SPA from `web_dir` (index.html fallback for client
+/// routes), or a JSON 404 when the service runs without a web directory.
+async fn static_fallback(State(app): State<AppHandle>, req: axum::extract::Request) -> Response {
+    let uri = req.uri();
+    let path = uri.path();
+
+    // Unknown /api/* routes keep the JSON error envelope.
+    if path.starts_with("/api/") {
+        return err(ErrorCode::NotFound, "API route not found").into_response();
+    }
+
+    // Only GET/HEAD reach the SPA; everything else is unsupported.
+    if req.method() != Method::GET && req.method() != Method::HEAD {
+        let body = Json(json!({
+            "error": {"code": "method_not_allowed", "message": "method not allowed"}
+        }));
+        return (StatusCode::METHOD_NOT_ALLOWED, body).into_response();
+    }
+
+    let Some(web_dir) = &app.web_dir else {
+        let body = Json(json!({
+            "error": {"code": "not_found", "message": "web UI not available (no web directory configured)"}
+        }));
+        return (StatusCode::NOT_FOUND, body).into_response();
+    };
+
+    // Normalize the request path: strip the leading slash, reject traversal.
+    let rel = path.trim_start_matches('/');
+    if rel.is_empty() {
+        return serve_file(&web_dir.join("index.html"), "no-cache").await;
+    }
+    let segments = rel.split('/');
+    for seg in segments {
+        if seg.is_empty()
+            || seg == "."
+            || seg == ".."
+            || seg.contains('\\')
+            || seg.contains('\0')
+            || seg.contains('%')
+        {
+            // '%' is rejected outright: the service serves real files with
+            // literal names only, so percent-encoded traversal attempts
+            // (for example %2e%2e) cannot slip past the segment check.
+            let body = Json(json!({
+                "error": {"code": "bad_request", "message": "invalid path"}
+            }));
+            return (StatusCode::BAD_REQUEST, body).into_response();
+        }
+    }
+
+    let candidate = web_dir.join(rel);
+
+    // Client-side route (no file extension): serve index.html so the SPA
+    // can render; the app itself has no router, so this only matters for
+    // deep links and refreshes.
+    let has_extension = candidate.extension().is_some();
+    if !has_extension {
+        return serve_file(&web_dir.join("index.html"), "no-cache").await;
+    }
+    if !candidate.is_file() {
+        // A missing real file is a 404, not an SPA route.
+        let body = Json(json!({
+            "error": {"code": "not_found", "message": "not found"}
+        }));
+        return (StatusCode::NOT_FOUND, body).into_response();
+    }
+    let cache = if candidate.starts_with(web_dir.join("assets")) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    serve_file(&candidate, cache).await
+}
+
+/// Read a file from disk and respond with cache + CSP headers.
+async fn serve_file(path: &Path, cache: &'static str) -> Response {
+    let data = match tokio::fs::read(path).await {
+        Ok(d) => d,
+        Err(_) => {
+            let body = Json(json!({
+                "error": {"code": "not_found", "message": "not found"}
+            }));
+            return (StatusCode::NOT_FOUND, body).into_response();
+        }
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static(content_type_for(path)),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(CSP_HEADER),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    // index.html is revalidated every load; hashed assets are immutable.
+    headers.insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static(cache),
+    );
+    (StatusCode::OK, headers, Body::from(data)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -531,13 +666,15 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
         if !rejected.is_empty() {
             publish_validated(&app, rejected);
         }
-    } else if {
+    } else {
         // Idempotent re-run: exact previous batch -> stored report.
-        let sess = app.session.lock().await;
-        sess.executable_ids(&request_ids).is_empty()
-            && sess.report_batch.as_ref() == Some(&BatchIdentity::of(&request_ids))
-            && sess.report.is_some()
-    } {
+        let re_run_stored = {
+            let sess = app.session.lock().await;
+            sess.executable_ids(&request_ids).is_empty()
+                && sess.report_batch.as_ref() == Some(&BatchIdentity::of(&request_ids))
+                && sess.report.is_some()
+        };
+        if re_run_stored {
         let (report,) = {
             let sess = app.session.lock().await;
             (sess.report.clone().expect("checked above"),)
@@ -575,6 +712,7 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
             app.events.publish(ServerEvent::State(SessionState::Done));
             return accepted(json!({ "state": "done" }));
         }
+    }
     }
 
     {

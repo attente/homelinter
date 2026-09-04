@@ -54,6 +54,7 @@ impl Env {
             cli_config: Some(self._config.clone()),
             home_override: Some(self.home.clone()),
             data_dir_override: Some(self.data.clone()),
+            web_dir: None,
         };
         build_service(opts).unwrap().app
     }
@@ -466,6 +467,7 @@ async fn sse_snapshot_and_shutdown_over_http() {
         cli_config: Some(env._config.clone()),
         home_override: Some(env.home.clone()),
         data_dir_override: Some(env.data.clone()),
+        web_dir: None,
     })
     .unwrap();
     let app = built.app.clone();
@@ -553,4 +555,200 @@ async fn raw_http_request(
     let mut out = Vec::new();
     s.read_to_end(&mut out).await.unwrap();
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Static SPA serving
+// ---------------------------------------------------------------------------
+
+struct WebEnv {
+    home: PathBuf,
+    data: PathBuf,
+    web: PathBuf,
+    _config: PathBuf,
+}
+
+impl WebEnv {
+    fn new(tag: &str) -> WebEnv {
+        let base = unique_dir(tag);
+        let home = base.join("home");
+        let data = base.join("data");
+        let web = base.join("web");
+        let config = base.join("config.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(&config, "[output]\nformat = \"json\"\n").unwrap();
+        std::fs::write(
+            web.join("index.html"),
+            "<!doctype html><html><body>homelinter</body></html>",
+        )
+        .unwrap();
+        std::fs::write(web.join("assets/app.js"), "export const ok = 1;").unwrap();
+        WebEnv {
+            home,
+            data,
+            web,
+            _config: config,
+        }
+    }
+
+    fn service(&self) -> AppHandle {
+        let opts = ServiceOptions {
+            cli_config: Some(self._config.clone()),
+            home_override: Some(self.home.clone()),
+            data_dir_override: Some(self.data.clone()),
+            web_dir: Some(self.web.clone()),
+        };
+        build_service(opts).unwrap().app
+    }
+}
+
+impl Drop for WebEnv {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.home.parent().unwrap());
+    }
+}
+
+/// Raw response helper that keeps headers for static file assertions.
+async fn request_raw(
+    app: &AppHandle,
+    method: &str,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let router = homelinter_service::router(app.clone());
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot response");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn spa_serves_index_with_csp() {
+    let env = WebEnv::new("spa-index");
+    let app = env.service();
+    let (status, headers, bytes) = request_raw(&app, "GET", "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+    assert_eq!(
+        headers.get("content-security-policy").unwrap().to_str().unwrap(),
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    assert_eq!(
+        headers.get("cache-control").unwrap().to_str().unwrap(),
+        "no-cache"
+    );
+    assert!(String::from_utf8_lossy(&bytes).contains("homelinter"));
+}
+
+#[tokio::test]
+async fn spa_serves_hashed_assets_immutable() {
+    let env = WebEnv::new("spa-assets");
+    let app = env.service();
+    let (status, headers, bytes) = request_raw(&app, "GET", "/assets/app.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("javascript"));
+    assert_eq!(
+        headers.get("cache-control").unwrap().to_str().unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(String::from_utf8_lossy(&bytes), "export const ok = 1;");
+}
+
+#[tokio::test]
+async fn spa_falls_back_to_index_for_routes() {
+    let env = WebEnv::new("spa-route");
+    let app = env.service();
+    // Deep link with no file extension renders the SPA shell.
+    let (status, headers, bytes) = request_raw(&app, "GET", "/some/deep/route").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+    assert!(String::from_utf8_lossy(&bytes).contains("homelinter"));
+}
+
+#[tokio::test]
+async fn spa_missing_real_file_is_json_404() {
+    let env = WebEnv::new("spa-missing");
+    let app = env.service();
+    let (status, _, bytes) = request_raw(&app, "GET", "/assets/does-not-exist.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn spa_rejects_path_traversal() {
+    // Literal dot segments are normalized away by hyper before the handler
+    // runs, so the real attack surface is percent-encoded traversal and
+    // dot segments sent over a raw socket. Both must never read outside
+    // web_dir.
+
+    let env = WebEnv::new("spa-traversal");
+    let app = env.service();
+    let (status, _, _) = request_raw(&app, "GET", "/%2e%2e/etc/passwd").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = request_raw(&app, "GET", "/assets/%2e%2e/app.js").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = request_raw(&app, "GET", "/%2e/etc/passwd").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Over a real socket, a crafted request line must not serve files from
+    // outside web_dir (hyper normalizes /../x to /x; /x does not exist).
+    let secret = env.home.parent().unwrap().join("secret.txt");
+    std::fs::write(&secret, "TOP-SECRET-DO-NOT-SERVE").unwrap();
+    let built = build_service(ServiceOptions {
+        cli_config: Some(env._config.clone()),
+        home_override: Some(env.home.clone()),
+        data_dir_override: Some(env.data.clone()),
+        web_dir: Some(env.web.clone()),
+    })
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve = tokio::spawn(async move {
+        let _ = homelinter_service::serve(listener, built.app.clone(), built.shutdown_rx).await;
+    });
+    let resp = raw_http_get(addr, "/../secret.txt").await;
+    assert!(!resp.contains("TOP-SECRET"), "traversal served outside file: {resp}");
+    let resp2 = raw_http_get(addr, "/%2e%2e/secret.txt").await;
+    assert!(!resp2.contains("TOP-SECRET"), "encoded traversal served outside file: {resp2}");
+    let _ = serve.abort();
+}
+
+#[tokio::test]
+async fn spa_unknown_api_route_keeps_json_envelope() {
+    let env = WebEnv::new("spa-apiroute");
+    let app = env.service();
+    let (status, _, bytes) = request_raw(&app, "GET", "/api/v1/does-not-exist").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn spa_without_web_dir_serves_no_ui() {
+    let env = Env::new("spa-noweb");
+    let app = env.service(); // ServiceOptions without web_dir
+    let (status, _, bytes) = request_raw(&app, "GET", "/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn spa_rejects_non_get_methods() {
+    let env = WebEnv::new("spa-method");
+    let app = env.service();
+    let (status, _, _) = request_raw(&app, "POST", "/").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }

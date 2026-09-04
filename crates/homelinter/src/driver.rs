@@ -21,6 +21,33 @@ struct Instance {
     client: Client,
     task: JoinHandle<()>,
     data_dir: PathBuf,
+    web_dir: Option<PathBuf>,
+}
+
+/// Resolve the SPA directory for `web`: `HOMELINTER_WEB_DIR` when set,
+/// otherwise `<exe_dir>/webui/dist` if it exists.
+fn resolve_web_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("HOMELINTER_WEB_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return Some(p);
+        }
+        output::note(&format!(
+            "warning: HOMELINTER_WEB_DIR {} is not a directory; falling back",
+            p.display()
+        ));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("webui/dist");
+    if dir.is_dir() {
+        return Some(dir);
+    }
+    // Development layout: workspace-relative webui/dist next to the repo.
+    let dev = PathBuf::from("webui/dist");
+    if dev.is_dir() {
+        return Some(dev);
+    }
+    None
 }
 
 fn spawn(opts: homelinter_service::ServiceOptions) -> Result<Instance, String> {
@@ -41,6 +68,7 @@ fn spawn(opts: homelinter_service::ServiceOptions) -> Result<Instance, String> {
         data_dir,
         ..
     } = build_service(opts).map_err(|e| format!("service startup failed: {e}"))?;
+    let web_dir = app.web_dir.clone();
     let task = tokio::spawn(async move {
         let _ = serve(tokio_listener, app, shutdown_rx).await;
     });
@@ -49,6 +77,7 @@ fn spawn(opts: homelinter_service::ServiceOptions) -> Result<Instance, String> {
         client,
         task,
         data_dir,
+        web_dir,
     })
 }
 
@@ -131,12 +160,18 @@ pub async fn web(opts: WebOptions) -> Result<u8, String> {
         cli_config: opts.config,
         home_override: Some(root),
         data_dir_override: None,
+        web_dir: resolve_web_dir(),
     })?;
     if opts.verbosity >= 0 {
         output::note(&format!(
             "data dir: {} (cache and audit log)",
             inst.data_dir.display()
         ));
+    }
+    if let Some(web) = &inst.web_dir {
+        output::note(&format!("web UI: serving {} (SPA)", web.display()));
+    } else {
+        output::note("web UI: no SPA found (API only)");
     }
     if opts.hidden || !opts.target_paths.is_empty() {
         // Honest seam: the web command accepts --hidden and --target-path
@@ -192,6 +227,7 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
         cli_config: opts.config.clone(),
         home_override: None,
         data_dir_override: None,
+        web_dir: None,
     })?;
     let client = inst.client.clone();
     wait_health(&client, Duration::from_secs(10)).await?;
@@ -240,6 +276,7 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
         cli_config: opts.config.clone(),
         home_override: None,
         data_dir_override: None,
+        web_dir: None,
     })?;
     let client = inst.client.clone();
     wait_health(&client, Duration::from_secs(10)).await?;

@@ -36,6 +36,9 @@ pub struct ServiceOptions {
     pub home_override: Option<PathBuf>,
     /// Override the app data directory (cache, audit).
     pub data_dir_override: Option<PathBuf>,
+    /// Directory containing the built SPA (index.html + assets). When set,
+    /// the HTTP server also serves static files and the SPA index fallback.
+    pub web_dir: Option<PathBuf>,
 }
 
 /// A fully wired service instance ready to serve HTTP.
@@ -82,6 +85,7 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         cancel: AtomicU64::new(0),
         cli_config: opts.cli_config,
         home_override: opts.home_override,
+        web_dir: opts.web_dir,
         shutdown_tx,
     });
 

@@ -37,6 +37,9 @@ pub struct App {
     /// Test/embedding override for the home used by symlink indexing and
     /// relative destinations; None means the platform home.
     pub home_override: Option<PathBuf>,
+    /// Directory containing the built SPA (index.html + assets). None
+    /// disables static file serving (API-only mode).
+    pub web_dir: Option<PathBuf>,
     /// Watch channel: a `POST /api/v1/shutdown` sends `true` here and the
     /// HTTP server shuts down gracefully.
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
