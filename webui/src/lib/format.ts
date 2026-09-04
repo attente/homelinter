@@ -70,6 +70,17 @@ export function entryLine(e: ReportEntry): string {
   return `[${e.result}] ${e.suggestion_id}`;
 }
 
+/** One display line for an in-flight `execution.op` SSE event. */
+export function opLine(op: {
+  suggestion_id: string;
+  operation: string;
+  status: string;
+  detail?: unknown;
+}): string {
+  const suffix = op.detail ? ` (${String(op.detail)})` : '';
+  return `[${op.status}] ${op.operation} ${op.suggestion_id}${suffix}`;
+}
+
 export function elapsedLabel(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);

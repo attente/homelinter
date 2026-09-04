@@ -8,7 +8,7 @@ import { ScanForm, ScanFormValues } from './components/ScanForm';
 import { Toasts } from './components/Toasts';
 import { EventSourceClient } from './events';
 import { downloadText } from './lib/download';
-import { elapsedLabel, entryLine, stateLabel } from './lib/format';
+import { elapsedLabel, opLine, stateLabel } from './lib/format';
 import type { ExecutionReport, ScanProgress, Session, SseEvent, Suggestion } from './types';
 
 type Phase = 'idle' | 'scanning' | 'browse' | 'running' | 'report';
@@ -162,7 +162,13 @@ export default function App() {
           break;
         }
         case 'execution.op':
-          setSt((prev) => ({ ...prev, runLog: [...prev.runLog, entryLine(d as never)] }));
+          setSt((prev) => ({
+            ...prev,
+            runLog: [
+              ...prev.runLog,
+              opLine(d as { suggestion_id: string; operation: string; status: string; detail?: unknown }),
+            ],
+          }));
           break;
         case 'execution.complete':
           await fetchExecution();
