@@ -9,6 +9,7 @@
 mod args;
 mod driver;
 mod output;
+mod tui;
 
 use std::process::ExitCode;
 
@@ -30,5 +31,6 @@ async fn run() -> Result<u8, String> {
     match mode {
         Mode::Managed(opts) => driver::managed(opts).await,
         Mode::Web(opts) => driver::web(opts).await,
+        Mode::Tui(opts) => driver::tui(opts).await,
     }
 }

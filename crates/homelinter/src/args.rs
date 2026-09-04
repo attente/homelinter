@@ -14,6 +14,8 @@ use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 pub enum Mode {
     /// Serve the standalone web/API process on an ephemeral loopback port.
     Web(WebOptions),
+    /// Full-screen interactive terminal client on an ephemeral service.
+    Tui(TuiOptions),
     /// Managed session: embed the service, drive it, then shut it down.
     Managed(ManagedOptions),
 }
@@ -40,6 +42,16 @@ pub enum ManagedAction {
 
 #[derive(Debug, Clone)]
 pub struct WebOptions {
+    pub config: Option<PathBuf>,
+    pub root: Option<PathBuf>,
+    pub hidden: bool,
+    pub target_paths: BTreeMap<String, String>,
+    pub cache_clear: bool,
+    pub verbosity: i8,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuiOptions {
     pub config: Option<PathBuf>,
     pub root: Option<PathBuf>,
     pub hidden: bool,
@@ -114,6 +126,33 @@ pub struct Cli {
 enum Commands {
     /// Launch the standalone localhost service (SPA + API).
     Web(WebArgs),
+    /// Launch the full-screen interactive terminal client.
+    Tui(TuiArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct TuiArgs {
+    /// Select the configuration file.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Scan root for this session (defaults to the home directory).
+    #[arg(long, value_name = "PATH")]
+    root: Option<PathBuf>,
+    /// Include hidden files and directories in primary discovery.
+    #[arg(long)]
+    hidden: bool,
+    /// Override the destination format string for one Asset Kind; repeatable.
+    #[arg(long = "target-path", value_name = "KIND=PATH", action = clap::ArgAction::Append)]
+    target_path: Vec<String>,
+    /// Clear the persistent metadata cache at startup.
+    #[arg(long)]
+    cache_clear: bool,
+    /// Increase structured logging verbosity (repeatable).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Decrease structured logging verbosity (repeatable).
+    #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count)]
+    quiet: u8,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -158,6 +197,19 @@ pub fn parse() -> Result<Mode, String> {
             target_paths: parse_target_paths(&web.target_path)?,
             cache_clear: web.cache_clear,
             verbosity: web.verbose as i8 - web.quiet as i8,
+        }));
+    }
+    if let Some(Commands::Tui(tui)) = &cli.command {
+        if cli.config.is_some() || cli.root.is_some() || cli.hidden || cli.format.is_some() {
+            return Err("--config, --root, --hidden, and --format are not accepted with `tui`; pass them to the `tui` subcommand instead".to_string());
+        }
+        return Ok(Mode::Tui(TuiOptions {
+            config: tui.config.clone(),
+            root: tui.root.clone(),
+            hidden: tui.hidden,
+            target_paths: parse_target_paths(&tui.target_path)?,
+            cache_clear: tui.cache_clear,
+            verbosity: tui.verbose as i8 - tui.quiet as i8,
         }));
     }
     if cli.command.is_some() {

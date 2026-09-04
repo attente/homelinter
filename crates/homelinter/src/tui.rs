@@ -1,0 +1,1623 @@
+//! Full-screen interactive terminal client (ratatui + crossterm).
+//!
+//! The TUI drives one embedded service instance through the HTTP API exactly
+//! like the managed CLI modes do (see "Client Lifecycle" in DESIGN.md). It
+//! keeps one `GET /events` connection for live progress and falls back to
+//! session polling when the stream is interrupted, so the UI stays
+//! responsive even if an SSE connection is dropped.
+//!
+//! Screens: a scanning/progress screen while the batch is generated, a
+//! two-pane suggestion browser with client-side filtering and server-side
+//! selection, a live operation log during execution and dry runs, and a
+//! report view when a run finishes. Confirmation and text-input dialogs are
+//! modal overlays. A terminal of at least 80x24 is required.
+
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use futures_util::StreamExt;
+use homelinter_clients::{Client, SseEvent, SseReader};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::{Frame, Terminal};
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::io::{self, IsTerminal};
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// Minimum terminal dimensions required by the design.
+const MIN_COLS: u16 = 80;
+const MIN_ROWS: u16 = 24;
+
+/// Restore the terminal when the TUI exits, on any path.
+struct Restore;
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------
+
+/// One top-level suggestion rendered in the browser.
+#[derive(Debug, Clone)]
+struct Row {
+    id: String,
+    typ: String,
+    kind: String,
+    status: String,
+    selected: bool,
+    target: String,
+    new_path: String,
+    reason: String,
+    rejection: String,
+    dependents: Vec<String>,
+}
+
+impl Row {
+    fn from_json(v: &Value) -> Row {
+        let dependents: Vec<String> = v["dependent_operations"]
+            .as_array()
+            .map(|ops| {
+                ops.iter()
+                    .filter_map(|op| {
+                        let obj = op.as_object()?;
+                        let mut s = obj
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("op")
+                            .to_string();
+                        let mut rest: Vec<String> = obj
+                            .iter()
+                            .filter(|(k, _)| k.as_str() != "type")
+                            .map(|(k, val)| {
+                                let text = match val {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                format!("{k}={text}")
+                            })
+                            .collect();
+                        rest.sort();
+                        if !rest.is_empty() {
+                            s.push_str(&format!(" ({})", rest.join(", ")));
+                        }
+                        Some(s)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Row {
+            id: str_field(v, "id"),
+            typ: str_field(v, "type"),
+            kind: str_field(v, "asset_kind"),
+            status: if str_field(v, "status").is_empty() {
+                "pending".to_string()
+            } else {
+                str_field(v, "status")
+            },
+            selected: v["selected"].as_bool().unwrap_or(false),
+            target: str_field(v, "target"),
+            new_path: str_field(v, "new_path"),
+            reason: str_field(v, "reason"),
+            rejection: v["rejection_reason"].as_str().unwrap_or("").to_string(),
+            dependents,
+        }
+    }
+
+    fn is_executable(&self) -> bool {
+        self.status == "pending" || self.status == "executed"
+    }
+}
+
+fn str_field(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or("").to_string()
+}
+
+/// Client-side filter. Affects navigation and bulk selection only; the
+/// service keeps the authoritative selection.
+#[derive(Debug, Clone, Default)]
+struct Filter {
+    typ: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Scan,
+    Browse,
+    Run,
+    Report,
+}
+
+#[derive(Debug, Clone)]
+enum ConfirmAction {
+    Quit,
+    Run { dry: bool },
+}
+
+struct Confirm {
+    title: String,
+    message: String,
+    yes: ConfirmAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    ExportPath,
+    ScanRoot,
+}
+
+struct Prompt {
+    title: String,
+    kind: PromptKind,
+    value: String,
+    cursor: usize,
+}
+
+#[derive(Default)]
+struct RunView {
+    log: Vec<String>,
+    report: Option<Value>,
+    failed_message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Application state
+// ---------------------------------------------------------------------------
+
+struct App {
+    client: Client,
+    phase: Phase,
+    state: String,
+    root: String,
+    hidden: bool,
+    target_paths: BTreeMap<String, String>,
+    rows: Vec<Row>,
+    kinds: Vec<String>,
+    progress_phase: String,
+    progress_scanned: u64,
+    progress_elapsed_ms: u64,
+    filter: Filter,
+    cursor: usize,
+    list_offset: usize,
+    confirm: Option<Confirm>,
+    prompt: Option<Prompt>,
+    help: bool,
+    toast: Option<String>,
+    run: RunView,
+    frame: u64,
+    quit: bool,
+}
+
+impl App {
+    fn new(
+        client: Client,
+        root: PathBuf,
+        hidden: bool,
+        target_paths: BTreeMap<String, String>,
+    ) -> App {
+        App {
+            client,
+            phase: Phase::Scan,
+            state: "starting".to_string(),
+            root: root.to_string_lossy().into_owned(),
+            hidden,
+            target_paths,
+            rows: Vec::new(),
+            kinds: Vec::new(),
+            progress_phase: String::new(),
+            progress_scanned: 0,
+            progress_elapsed_ms: 0,
+            filter: Filter::default(),
+            cursor: 0,
+            list_offset: 0,
+            confirm: None,
+            prompt: None,
+            help: false,
+            toast: None,
+            run: RunView::default(),
+            frame: 0,
+            quit: false,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // API actions
+    // ------------------------------------------------------------------
+
+    async fn start_scan(&mut self) -> Result<(), String> {
+        let mut body = serde_json::json!({
+            "root": self.root,
+            "hidden": self.hidden,
+        });
+        if !self.target_paths.is_empty() {
+            body["target_paths"] = serde_json::json!(self.target_paths);
+        }
+        self.phase = Phase::Scan;
+        self.state = "scanning".to_string();
+        self.rows.clear();
+        self.kinds.clear();
+        self.cursor = 0;
+        self.list_offset = 0;
+        self.filter = Filter::default();
+        self.client
+            .start_scan(body)
+            .await
+            .map_err(|e| format!("cannot start scan: {e}"))?;
+        Ok(())
+    }
+
+    async fn refresh_rows(&mut self) -> Result<(), String> {
+        let v = self
+            .client
+            .suggestions(None)
+            .await
+            .map_err(|e| format!("cannot list suggestions: {e}"))?;
+        let items = v["items"].as_array().cloned().unwrap_or_default();
+        self.rows = items.iter().map(Row::from_json).collect();
+        self.kinds = self.unique_kinds();
+        if self.cursor >= self.rows.len() && !self.rows.is_empty() {
+            self.cursor = self.rows.len() - 1;
+        }
+        Ok(())
+    }
+
+    fn unique_kinds(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for r in &self.rows {
+            if !r.kind.is_empty() && !seen.iter().any(|k| *k == r.kind) {
+                seen.push(r.kind.clone());
+            }
+        }
+        seen.sort();
+        seen
+    }
+
+    /// The currently selected ids. When nothing is selected, selects the
+    /// highlighted row first so single-item actions never silently no-op.
+    async fn ensure_selection(&mut self) -> Result<Vec<String>, String> {
+        let selected: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.selected)
+            .map(|r| r.id.clone())
+            .collect();
+        if !selected.is_empty() {
+            return Ok(selected);
+        }
+        let Some(idx) = self.filtered_index(self.cursor) else {
+            return Ok(Vec::new());
+        };
+        let id = self.rows[idx].id.clone();
+        self.client
+            .selection_add(Some(vec![id.clone()]), None)
+            .await
+            .map_err(|e| format!("cannot select suggestion: {e}"))?;
+        self.refresh_rows().await?;
+        Ok(vec![id])
+    }
+
+    async fn toggle_current(&mut self) {
+        let Some(idx) = self.filtered_index(self.cursor) else {
+            return;
+        };
+        let id = self.rows[idx].id.clone();
+        let select = !self.rows[idx].selected;
+        let res = if select {
+            self.client.selection_add(Some(vec![id]), None).await
+        } else {
+            self.client.selection_remove(Some(vec![id]), None).await
+        };
+        match res {
+            Ok(_) => self.refresh_after_mutation().await,
+            Err(e) => self.toast = Some(format!("selection update failed: {e}")),
+        }
+    }
+
+    async fn select_all_filtered(&mut self) {
+        let ids: Vec<String> = self
+            .filtered_ids()
+            .into_iter()
+            .filter(|id| {
+                self.rows
+                    .iter()
+                    .find(|r| &r.id == id)
+                    .map(|r| !r.selected)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        match self.client.selection_add(Some(ids), None).await {
+            Ok(_) => self.refresh_after_mutation().await,
+            Err(e) => self.toast = Some(format!("selection failed: {e}")),
+        }
+    }
+
+    async fn clear_selection(&mut self) {
+        let ids: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.selected)
+            .map(|r| r.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        match self.client.selection_remove(Some(ids), None).await {
+            Ok(_) => self.refresh_after_mutation().await,
+            Err(e) => self.toast = Some(format!("selection update failed: {e}")),
+        }
+    }
+
+    async fn refresh_after_mutation(&mut self) {
+        if let Err(e) = self.refresh_rows().await {
+            self.toast = Some(format!("refresh failed: {e}"));
+        }
+    }
+
+    /// Start an execution or dry run for the current selection.
+    async fn run_selected(&mut self, dry: bool) -> Result<(), String> {
+        let ids = self.ensure_selection().await?;
+        if ids.is_empty() {
+            self.toast = Some("nothing to run: the batch is empty".to_string());
+            return Ok(());
+        }
+        let label = if dry { "dry run" } else { "execution" };
+        self.client
+            .execute(Some(ids), dry)
+            .await
+            .map_err(|e| format!("cannot start {label}: {e}"))?;
+        self.run = RunView::default();
+        self.phase = Phase::Run;
+        self.state = "executing".to_string();
+        Ok(())
+    }
+
+    async fn export_selected(&mut self, raw_path: String) {
+        let path = match self.resolve_path(&raw_path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast = Some(e);
+                return;
+            }
+        };
+        let ids = match self.ensure_selection().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                self.toast = Some(e);
+                return;
+            }
+        };
+        if ids.is_empty() {
+            self.toast = Some("nothing to export: the batch is empty".to_string());
+            return;
+        }
+        let outcome = self
+            .client
+            .export(Some(ids), Some(path.to_string_lossy().into_owned()))
+            .await;
+        match outcome {
+            Ok(homelinter_clients::ExportOutcome::Written { path, count, .. }) => {
+                self.toast = Some(format!("exported {count} suggestions to {path}"));
+            }
+            Ok(homelinter_clients::ExportOutcome::ScriptText { .. }) => {
+                self.toast =
+                    Some("service returned script text although a path was requested".to_string());
+            }
+            Err(e) => self.toast = Some(format!("export failed: {e}")),
+        }
+    }
+
+    fn resolve_path(&self, input: &str) -> Result<PathBuf, String> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err("path must not be empty".to_string());
+        }
+        if input.contains('~') || input.contains('$') {
+            return Err("path must not contain '~' or environment references".to_string());
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        homelinter_model::path::to_absolute(std::path::Path::new(input), &cwd)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Cancel an in-progress scan or run and wait for the session to settle.
+    async fn cancel_in_flight(&mut self) {
+        if !matches!(self.state.as_str(), "scanning" | "analyzing" | "executing") {
+            return;
+        }
+        let _ = self.client.cancel().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.client.session().await {
+                Ok(sess) => {
+                    let st = str_field(&sess, "state");
+                    self.state = st.clone();
+                    if matches!(st.as_str(), "ready" | "done" | "failed" | "idle") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Filtering
+    // ------------------------------------------------------------------
+
+    fn row_matches(&self, r: &Row) -> bool {
+        if let Some(t) = &self.filter.typ {
+            if r.typ != *t {
+                return false;
+            }
+        }
+        if let Some(k) = &self.filter.kind {
+            if r.kind != *k {
+                return false;
+            }
+        }
+        if let Some(s) = &self.filter.status {
+            if r.status != *s {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn filtered(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| self.row_matches(r))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn filtered_index(&self, pos: usize) -> Option<usize> {
+        self.filtered().get(pos).copied()
+    }
+
+    fn filtered_ids(&self) -> Vec<String> {
+        self.filtered()
+            .into_iter()
+            .map(|i| self.rows[i].id.clone())
+            .collect()
+    }
+
+    fn filtered_len(&self) -> usize {
+        self.filtered().len()
+    }
+
+    // ------------------------------------------------------------------
+    // SSE and polling
+    // ------------------------------------------------------------------
+
+    async fn on_sse(&mut self, ev: SseEvent) {
+        match ev.event.as_str() {
+            "session.state" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    self.state = str_field(&v, "state");
+                }
+            }
+            "scan.progress" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    self.progress_phase = str_field(&v, "phase");
+                    self.progress_scanned = v["scanned"].as_u64().unwrap_or(0);
+                    self.progress_elapsed_ms = v["elapsed_ms"].as_u64().unwrap_or(0);
+                }
+            }
+            "suggestion.batch" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    let items = v["items"].as_array().cloned().unwrap_or_default();
+                    self.rows = items.iter().map(Row::from_json).collect();
+                    self.kinds = self.unique_kinds();
+                }
+            }
+            "batch.validated" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    let rejected = v["rejected"].as_array().cloned().unwrap_or_default();
+                    if !rejected.is_empty() {
+                        self.toast = Some(format!(
+                            "re-validation rejected {} suggestion(s)",
+                            rejected.len()
+                        ));
+                    }
+                }
+                self.refresh_after_mutation().await;
+            }
+            "execution.op" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    let line = format!(
+                        "[{}] {} {}",
+                        str_field(&v, "status"),
+                        str_field(&v, "operation"),
+                        str_field(&v, "suggestion_id")
+                    );
+                    if self.run.log.len() > 400 {
+                        self.run.log.remove(0);
+                    }
+                    self.run.log.push(line);
+                }
+            }
+            "execution.complete" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    self.run.report = v.get("report").cloned();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Periodic work: session poll plus phase transitions.
+    async fn poll(&mut self) {
+        self.frame += 1;
+        if let Ok(sess) = self.client.session().await {
+            self.state = str_field(&sess, "state");
+        }
+        match self.phase {
+            Phase::Scan => {
+                if self.state == "ready" {
+                    if self.rows.is_empty() {
+                        let _ = self.refresh_rows().await;
+                    }
+                    self.phase = Phase::Browse;
+                } else if self.state == "failed" {
+                    self.phase = Phase::Browse;
+                    self.toast = Some("scan failed; no suggestions were generated".to_string());
+                }
+            }
+            Phase::Run => {
+                if self.state == "done" {
+                    self.finish_run().await;
+                } else if self.state == "failed" {
+                    self.run.failed_message = Some("the run failed".to_string());
+                    self.phase = Phase::Report;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn finish_run(&mut self) {
+        match self.client.execution_report().await {
+            Ok(report) => self.run.report = Some(report),
+            Err(e) => {
+                self.run.failed_message = Some(format!("cannot read execution report: {e}"));
+            }
+        }
+        self.phase = Phase::Report;
+    }
+
+    async fn report_done(&mut self) {
+        let _ = self.refresh_rows().await;
+        self.run = RunView::default();
+        self.phase = Phase::Browse;
+        self.state = "ready".to_string();
+    }
+
+    // ------------------------------------------------------------------
+    // Key handling
+    // ------------------------------------------------------------------
+
+    async fn on_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if let Some(p) = self.prompt.take() {
+            self.on_prompt_key(p, key).await;
+            return;
+        }
+        if let Some(c) = self.confirm.take() {
+            self.on_confirm_key(c, key).await;
+            return;
+        }
+        if self.help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => self.help = false,
+                _ => {}
+            }
+            return;
+        }
+        if let KeyCode::Char('c') = key.code {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                self.cancel_in_flight().await;
+                self.quit = true;
+                return;
+            }
+        }
+        match self.phase {
+            Phase::Scan => match key.code {
+                KeyCode::Char('?') => self.help = true,
+                KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
+                _ => {}
+            },
+            Phase::Browse => self.on_browse_key(key).await,
+            Phase::Run => match key.code {
+                // Ignore all keys except a quit request during a run.
+                KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
+                _ => {}
+            },
+            Phase::Report => {
+                self.report_done().await;
+            }
+        }
+    }
+
+    async fn on_browse_key(&mut self, key: KeyEvent) {
+        let total = self.filtered_len();
+        match key.code {
+            KeyCode::Up => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.cursor + 1 < total {
+                    self.cursor += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                self.cursor = self.cursor.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.cursor = (self.cursor + 10).min(total.saturating_sub(1));
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                self.list_offset = 0;
+            }
+            KeyCode::End => {
+                self.cursor = total.saturating_sub(1);
+            }
+            KeyCode::Char(' ') => self.toggle_current().await,
+            KeyCode::Char('a') => self.select_all_filtered().await,
+            KeyCode::Char('A') => self.clear_selection().await,
+            KeyCode::Char('t') => {
+                self.filter.typ = match self.filter.typ.as_deref() {
+                    None => Some("move".to_string()),
+                    Some("move") => Some("delete".to_string()),
+                    Some(_) => None,
+                };
+            }
+            KeyCode::Char('k') => {
+                let choices = self.kind_cycle();
+                let current = self.filter.kind.as_deref().unwrap_or("");
+                let pos = choices.iter().position(|c| c == current).unwrap_or(0);
+                self.filter.kind = if choices.is_empty() {
+                    None
+                } else {
+                    let next = choices[(pos + 1) % choices.len()].clone();
+                    if next.is_empty() {
+                        None
+                    } else {
+                        Some(next)
+                    }
+                };
+            }
+            KeyCode::Char('u') => {
+                let choices = ["", "pending", "rejected", "executed", "failed", "skipped"];
+                let current = self.filter.status.as_deref().unwrap_or("");
+                let pos = choices.iter().position(|c| *c == current).unwrap_or(0);
+                self.filter.status = {
+                    let next = choices[(pos + 1) % choices.len()];
+                    if next.is_empty() {
+                        None
+                    } else {
+                        Some(next.to_string())
+                    }
+                };
+            }
+            KeyCode::Char('c') => self.filter = Filter::default(),
+            KeyCode::Char('x') => {
+                let n = self.executable_count();
+                if n == 0 {
+                    self.toast = Some(
+                        "nothing to execute: select suggestions with space or 'a'".to_string(),
+                    );
+                } else {
+                    self.confirm = Some(Confirm {
+                        title: "Execute".to_string(),
+                        message: format!("Run {n} suggestion(s)? The filesystem will be modified."),
+                        yes: ConfirmAction::Run { dry: false },
+                    });
+                }
+            }
+            KeyCode::Char('r') => {
+                let n = self.executable_count();
+                if n == 0 {
+                    self.toast = Some(
+                        "nothing to dry-run: select suggestions with space or 'a'".to_string(),
+                    );
+                } else {
+                    self.confirm = Some(Confirm {
+                        title: "Dry run".to_string(),
+                        message: format!(
+                            "Dry-run {n} suggestion(s)? The filesystem will not be modified."
+                        ),
+                        yes: ConfirmAction::Run { dry: true },
+                    });
+                }
+            }
+            KeyCode::Char('e') => {
+                if self.rows.is_empty() {
+                    self.toast = Some("nothing to export: the batch is empty".to_string());
+                } else {
+                    self.prompt = Some(Prompt {
+                        title: "Export path (absolute; no ~ or $)".to_string(),
+                        kind: PromptKind::ExportPath,
+                        value: String::new(),
+                        cursor: 0,
+                    });
+                }
+            }
+            KeyCode::Char('n') => {
+                self.prompt = Some(Prompt {
+                    title: self.scan_prompt_title(),
+                    kind: PromptKind::ScanRoot,
+                    value: self.root.clone(),
+                    cursor: self.root.len(),
+                });
+            }
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
+            _ => {}
+        }
+    }
+
+    fn kind_cycle(&self) -> Vec<String> {
+        let mut out = vec!["".to_string()];
+        out.extend(self.kinds.iter().cloned());
+        out
+    }
+
+    fn executable_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| r.selected && r.is_executable())
+            .count()
+    }
+
+    fn scan_prompt_title(&self) -> String {
+        format!(
+            "Scan root (empty = home) [hidden: {}; Tab toggles]",
+            if self.hidden { "yes" } else { "no" }
+        )
+    }
+
+    async fn on_confirm_key(&mut self, c: Confirm, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => match c.yes {
+                ConfirmAction::Quit => {
+                    self.cancel_in_flight().await;
+                    self.quit = true;
+                }
+                ConfirmAction::Run { dry } => {
+                    if let Err(e) = self.run_selected(dry).await {
+                        self.toast = Some(e);
+                    }
+                }
+            },
+            KeyCode::Char('n') | KeyCode::Esc => {}
+            _ => self.confirm = Some(c),
+        }
+    }
+
+    async fn on_prompt_key(&mut self, mut p: Prompt, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    p.value.insert(p.cursor, ch);
+                    p.cursor += 1;
+                }
+                self.prompt = Some(p);
+            }
+            KeyCode::Backspace => {
+                if p.cursor > 0 {
+                    p.cursor -= 1;
+                    p.value.remove(p.cursor);
+                }
+                self.prompt = Some(p);
+            }
+            KeyCode::Delete => {
+                if p.cursor < p.value.len() {
+                    p.value.remove(p.cursor);
+                }
+                self.prompt = Some(p);
+            }
+            KeyCode::Left => {
+                p.cursor = p.cursor.saturating_sub(1);
+                self.prompt = Some(p);
+            }
+            KeyCode::Right => {
+                if p.cursor < p.value.len() {
+                    p.cursor += 1;
+                }
+                self.prompt = Some(p);
+            }
+            KeyCode::Home => {
+                p.cursor = 0;
+                self.prompt = Some(p);
+            }
+            KeyCode::End => {
+                p.cursor = p.value.len();
+                self.prompt = Some(p);
+            }
+            KeyCode::Tab => match p.kind {
+                PromptKind::ScanRoot => {
+                    self.hidden = !self.hidden;
+                    p.title = self.scan_prompt_title();
+                }
+                PromptKind::ExportPath => {}
+            },
+            KeyCode::Enter => {
+                let kind = p.kind;
+                let value = p.value;
+                match kind {
+                    PromptKind::ExportPath => self.export_selected(value).await,
+                    PromptKind::ScanRoot => {
+                        let resolved = if value.trim().is_empty() {
+                            homelinter_model::path::home_dir()
+                                .ok_or_else(|| "cannot determine home directory".to_string())
+                        } else {
+                            self.resolve_path(&value)
+                        };
+                        match resolved {
+                            Ok(root) => {
+                                self.root = root.to_string_lossy().into_owned();
+                                if let Err(e) = self.start_scan().await {
+                                    self.toast = Some(e);
+                                    self.phase = Phase::Browse;
+                                }
+                            }
+                            Err(e) => self.toast = Some(e),
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {}
+            _ => self.prompt = Some(p),
+        }
+    }
+
+    fn ask_quit(&mut self) {
+        self.confirm = Some(Confirm {
+            title: "Quit".to_string(),
+            message: "Quit homelinter? A running scan or execution is cancelled.".to_string(),
+            yes: ConfirmAction::Quit,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+impl App {
+    fn draw(&mut self, f: &mut Frame) {
+        match self.phase {
+            Phase::Scan => self.draw_scan(f),
+            Phase::Browse => self.draw_browse(f),
+            Phase::Run => self.draw_run(f),
+            Phase::Report => self.draw_report(f),
+        }
+        if let Some(p) = &self.prompt {
+            self.draw_prompt(f, p);
+        } else if let Some(c) = &self.confirm {
+            self.draw_confirm(f, c);
+        } else if self.help {
+            self.draw_help(f);
+        }
+    }
+
+    fn header_line(&self) -> Line<'static> {
+        let state_color = match self.state.as_str() {
+            "ready" => Color::Green,
+            "done" => Color::Cyan,
+            "failed" => Color::Red,
+            _ => Color::Yellow,
+        };
+        let selected = self.rows.iter().filter(|r| r.selected).count();
+        Line::from(vec![
+            Span::styled(
+                " homelinter ",
+                Style::new().fg(Color::Black).bg(Color::Cyan),
+            ),
+            Span::raw("  "),
+            Span::styled(self.state.clone(), Style::new().fg(state_color).bold()),
+            Span::raw(format!("  root: {}  ", shorten(&self.root, 30))),
+            Span::raw(format!(
+                "batch: {}  shown: {}  selected: {}",
+                self.rows.len(),
+                self.filtered_len(),
+                selected
+            )),
+        ])
+    }
+
+    fn filter_line(&self) -> Line<'static> {
+        let t = self.filter.typ.as_deref().unwrap_or("all");
+        let k = self.filter.kind.as_deref().unwrap_or("all");
+        let s = self.filter.status.as_deref().unwrap_or("all");
+        Line::from(vec![
+            Span::styled(" filter ", Style::new().fg(Color::Black).bg(Color::Blue)),
+            Span::raw(format!(" t:type={t}  k:kind={k}  u:status={s}  c:clear  ")),
+            Span::styled("space", Style::new().fg(Color::Green)),
+            Span::raw(" toggle  "),
+            Span::styled("a", Style::new().fg(Color::Green)),
+            Span::raw(" all  "),
+            Span::styled("A", Style::new().fg(Color::Green)),
+            Span::raw(" none"),
+        ])
+    }
+
+    fn draw_scan(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let spinner = "-\\|/"
+            .chars()
+            .nth((self.frame % 4) as usize)
+            .unwrap_or('-');
+        let lines = vec![
+            Line::from(vec![Span::styled(
+                " Scanning home directory",
+                Style::new().fg(Color::Cyan).bold(),
+            )]),
+            Line::from(""),
+            Line::from(format!(" state: {}  {spinner}", self.state)),
+            Line::from(format!(" root:  {}", self.root)),
+            Line::from(format!(
+                " hidden: {}   target overrides: {}",
+                if self.hidden { "yes" } else { "no" },
+                self.target_paths.len()
+            )),
+        ];
+        let mut text = Text::from(lines);
+        if !self.progress_phase.is_empty() {
+            text.lines.push(Line::from(""));
+            text.lines.push(Line::from(format!(
+                " phase: {}   scanned: {}   elapsed: {} ms",
+                self.progress_phase, self.progress_scanned, self.progress_elapsed_ms
+            )));
+        }
+        text.lines.push(Line::from(""));
+        text.lines
+            .push(Line::from(" q/Esc: cancel and quit   ?: help"));
+        f.render_widget(Paragraph::new(text).block(block("Scanning")), area);
+    }
+
+    fn draw_browse(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let [header, filter_row, list_area, detail_area, foot] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(4),
+            Constraint::Length(9),
+            Constraint::Length(3),
+        ])
+        .areas(area);
+        f.render_widget(Paragraph::new(self.header_line()), header);
+        f.render_widget(Paragraph::new(self.filter_line()), filter_row);
+
+        let filtered = self.filtered();
+        let n = filtered.len();
+        if self.cursor >= n {
+            self.cursor = if n > 0 { n - 1 } else { 0 };
+        }
+        let vis = list_area.height as usize;
+        if vis > 0 {
+            if self.cursor < self.list_offset {
+                self.list_offset = self.cursor;
+            }
+            let window_end = self.list_offset.saturating_add(vis);
+            if self.cursor >= window_end {
+                self.list_offset = self.cursor.saturating_add(1).saturating_sub(vis);
+            }
+        }
+        let shown: Vec<&Row> = filtered
+            .iter()
+            .skip(self.list_offset)
+            .take(vis)
+            .filter_map(|&i| self.rows.get(i))
+            .collect();
+
+        let items: Vec<ListItem> = shown.iter().map(|r| ListItem::new(row_label(r))).collect();
+        let title = format!(" Suggestions ({n} matching) ");
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        let mut state = ratatui::widgets::ListState::default();
+        if !shown.is_empty() {
+            let pos = self
+                .cursor
+                .saturating_sub(self.list_offset)
+                .min(shown.len() - 1);
+            state.select(Some(pos));
+        }
+        f.render_stateful_widget(list, list_area, &mut state);
+
+        let detail = match self
+            .cursor
+            .checked_sub(self.list_offset)
+            .and_then(|i| shown.get(i))
+        {
+            Some(row) => detail_text(row),
+            None => Text::from(vec![Line::from(
+                "No suggestions in this view. Press n to scan another root or q to quit.",
+            )]),
+        };
+        f.render_widget(
+            Paragraph::new(detail)
+                .block(block("Detail"))
+                .wrap(Wrap { trim: false }),
+            detail_area,
+        );
+
+        self.draw_foot(f, foot);
+    }
+
+    fn draw_run(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let spinner = "-\\|/"
+            .chars()
+            .nth((self.frame % 4) as usize)
+            .unwrap_or('-');
+        let mut text = Text::from(vec![
+            Line::from(vec![Span::styled(
+                " Running",
+                Style::new().fg(Color::Magenta).bold(),
+            )]),
+            Line::from(format!(" state: {}  {spinner}", self.state)),
+            Line::from(""),
+        ]);
+        let max = area.height.saturating_sub(6) as usize;
+        let start = self.run.log.len().saturating_sub(max);
+        for entry in self.run.log.iter().skip(start) {
+            text.lines.push(Line::from(entry.as_str()));
+        }
+        text.lines.push(Line::from(""));
+        text.lines
+            .push(Line::from(" q/Esc: cancel the run and return"));
+        f.render_widget(Paragraph::new(text).block(block("Execution")), area);
+    }
+
+    fn draw_report(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let mut text = Text::from(vec![Line::from(vec![Span::styled(
+            " Run finished",
+            Style::new().fg(Color::Green).bold(),
+        )])]);
+        if let Some(msg) = &self.run.failed_message {
+            text.lines.push(Line::from(msg.as_str()));
+        }
+        if let Some(report) = &self.run.report {
+            let dry = report["dry_run"].as_bool().unwrap_or(false);
+            let partial = report["partial"].as_bool().unwrap_or(false);
+            let entries = report["entries"].as_array().cloned().unwrap_or_default();
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut entry_lines: Vec<String> = Vec::new();
+            for e in &entries {
+                let result = str_field(e, "result");
+                *counts.entry(result.clone()).or_insert(0) += 1;
+                let mut line = format!("[{}] {}", result, str_field(e, "suggestion_id"));
+                if let Some(s) = e["suggestion"].as_object() {
+                    let target = s
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let dest = s
+                        .get("new_path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("delete");
+                    if !target.is_empty() {
+                        line = format!("[{}] {target} -> {dest}", result);
+                    }
+                }
+                entry_lines.push(line);
+            }
+            let summary = if counts.is_empty() {
+                "no entries executed".to_string()
+            } else {
+                counts
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            };
+            text.lines.push(Line::from(format!(
+                " mode: {}   partial: {}   root: {}",
+                if dry { "dry run" } else { "execution" },
+                partial,
+                report["scan_root"].as_str().unwrap_or("")
+            )));
+            text.lines.push(Line::from(summary));
+            text.lines.push(Line::from(""));
+            for line in entry_lines {
+                text.lines.push(Line::from(line));
+            }
+        } else {
+            text.lines
+                .push(Line::from("no report was stored for this run"));
+        }
+        text.lines.push(Line::from(""));
+        text.lines
+            .push(Line::from(" any key: return to the suggestion browser"));
+        f.render_widget(
+            Paragraph::new(text)
+                .block(block("Report"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+
+    fn draw_foot(&self, f: &mut Frame, area: Rect) {
+        let mut lines = vec![Line::from(
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  r dry-run  e export  n scan  ? help  q quit",
+        )];
+        if let Some(t) = &self.toast {
+            lines.push(Line::from(vec![Span::styled(
+                t.as_str(),
+                Style::new().fg(Color::Red),
+            )]));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+
+    fn draw_prompt(&self, f: &mut Frame, p: &Prompt) {
+        let area = f.area();
+        let rect = centered_rect(80, 12, area);
+        let block = Block::bordered().title(p.title.clone());
+        let inner = block.inner(rect);
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        f.render_widget(Paragraph::new(p.value.clone()), inner);
+        let col = (p.cursor as u16).min(inner.width.saturating_sub(1));
+        f.set_cursor_position(Position::new(inner.x.saturating_add(col), inner.y));
+    }
+
+    fn draw_confirm(&self, f: &mut Frame, c: &Confirm) {
+        let area = f.area();
+        let rect = centered_rect(70, 15, area);
+        let block = Block::bordered().title(c.title.clone());
+        let inner = block.inner(rect);
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        let text = Text::from(vec![
+            Line::from(c.message.clone()),
+            Line::from(""),
+            Line::from(" y: yes    n/Esc: no"),
+        ]);
+        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), inner);
+    }
+
+    fn draw_help(&self, f: &mut Frame) {
+        let area = f.area();
+        let text = Text::from(vec![
+            Line::from(" homelinter TUI - keys"),
+            Line::from(""),
+            Line::from(" j or Up/Down         move through suggestions"),
+            Line::from(" PageUp/PageDown      page through the list"),
+            Line::from(" space               select / deselect the highlighted suggestion"),
+            Line::from(" a                   select all suggestions matching the filter"),
+            Line::from(" A                   clear the whole selection"),
+            Line::from(" t                   cycle the type filter (all/move/delete)"),
+            Line::from(" k                   cycle the asset-kind filter"),
+            Line::from(" u                   cycle the status filter"),
+            Line::from(" c                   clear all filters"),
+            Line::from(" x                   execute the selection (asks for confirmation)"),
+            Line::from(" r                   dry-run the selection (filesystem untouched)"),
+            Line::from(" e                   export the selection to a shell script"),
+            Line::from(" n                   scan another root (edit root, Tab toggles hidden)"),
+            Line::from(" ?                   show this help"),
+            Line::from(" q / Esc / Ctrl-C     quit"),
+            Line::from(""),
+            Line::from(" Filtering affects navigation and bulk selection only."),
+            Line::from(" Dependent operations (e.g. symlink repairs) run with their parent"),
+            Line::from(" suggestion automatically."),
+        ]);
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(text).block(block("Help")), area);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Small rendering helpers
+// ---------------------------------------------------------------------------
+
+fn block(title: &str) -> Block<'static> {
+    Block::bordered().title(title.to_string())
+}
+
+fn centered_rect(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
+    let [v] = Layout::vertical([Constraint::Percentage(height_pct)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [h] = Layout::horizontal([Constraint::Percentage(width_pct)])
+        .flex(Flex::Center)
+        .areas(v);
+    h
+}
+
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let tail_text: String = s
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail_text}")
+}
+
+/// One-line label for the suggestions list, ASCII only.
+fn row_label(r: &Row) -> Line<'static> {
+    let marker = if r.selected { "[x]" } else { "[ ]" };
+    let name = tail(&r.target, 3);
+    let dest = if r.new_path.is_empty() {
+        "delete".to_string()
+    } else {
+        tail(&r.new_path, 3)
+    };
+    let status = if r.status == "pending" {
+        String::new()
+    } else {
+        format!(" ({})", r.status)
+    };
+    let reject = if r.rejection.is_empty() {
+        String::new()
+    } else {
+        " [rejected]".to_string()
+    };
+    let text = format!(
+        "{marker} {:<6} {:<8} {name} -> {dest}{status}{reject}",
+        r.typ, r.kind
+    );
+    let color = if r.selected {
+        Color::Green
+    } else {
+        Color::White
+    };
+    Line::from(Span::styled(text, Style::new().fg(color)))
+}
+
+/// The last `n` path segments joined by '/', or the whole path when shorter.
+fn tail(path: &str, n: usize) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= n {
+        return format!("/{}", parts.join("/"));
+    }
+    let last = &parts[parts.len() - n..];
+    format!("/{}", last.join("/"))
+}
+
+fn detail_text(r: &Row) -> Text<'static> {
+    let mk = |label: &str, value: &str| {
+        Line::from(vec![
+            Span::styled(format!("{label}: "), Style::new().fg(Color::DarkGray)),
+            Span::raw(value.to_string()),
+        ])
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(mk("id", &r.id));
+    lines.push(Line::from(vec![
+        Span::styled("type: ", Style::new().fg(Color::DarkGray)),
+        Span::raw(r.typ.clone()),
+        Span::styled("  kind: ", Style::new().fg(Color::DarkGray)),
+        Span::raw(r.kind.clone()),
+        Span::styled("  status: ", Style::new().fg(Color::DarkGray)),
+        Span::styled(r.status.clone(), Style::new().fg(status_color(&r.status))),
+    ]));
+    lines.push(mk("target", &r.target));
+    if !r.new_path.is_empty() {
+        lines.push(mk("new path", &r.new_path));
+    }
+    if !r.reason.is_empty() {
+        lines.push(mk("reason", &r.reason));
+    }
+    for d in &r.dependents {
+        lines.push(Line::from(vec![
+            Span::styled("dependent: ", Style::new().fg(Color::DarkGray)),
+            Span::raw(d.clone()),
+        ]));
+    }
+    if !r.rejection.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("rejected: ", Style::new().fg(Color::Red)),
+            Span::raw(r.rejection.clone()),
+        ]));
+    }
+    Text::from(lines)
+}
+
+fn status_color(status: &str) -> Color {
+    match status {
+        "executed" => Color::Green,
+        "failed" => Color::Red,
+        "skipped" => Color::Yellow,
+        "rejected" => Color::Red,
+        _ => Color::White,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Run the TUI against an already-healthy embedded service, then return.
+/// The caller (driver) performs the graceful shutdown afterwards.
+pub async fn run(
+    client: &Client,
+    root: PathBuf,
+    hidden: bool,
+    target_paths: BTreeMap<String, String>,
+) -> Result<u8, String> {
+    if !io::stdin().is_terminal() {
+        return Err(
+            "the tui requires a terminal; use the interactive mode or --dry-run/--execute/--export without one"
+                .to_string(),
+        );
+    }
+    let (cols, rows) =
+        crossterm::terminal::size().map_err(|e| format!("cannot read terminal size: {e}"))?;
+    if cols < MIN_COLS || rows < MIN_ROWS {
+        return Err(format!(
+            "the tui requires at least {MIN_COLS}x{MIN_ROWS}; the terminal is {cols}x{rows}"
+        ));
+    }
+
+    enable_raw_mode().map_err(|e| format!("cannot enable raw mode: {e}"))?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)
+        .map_err(|e| format!("cannot enter the alternate screen: {e}"))?;
+    let _guard = Restore;
+
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
+        .map_err(|e| format!("cannot start the terminal backend: {e}"))?;
+
+    let mut app = App::new(client.clone(), root, hidden, target_paths);
+    app.start_scan()
+        .await
+        .map_err(|e| format!("cannot start the initial scan: {e}"))?;
+
+    let mut keys = EventStream::new();
+    let mut sse: Option<SseReader> = None;
+    let mut ticker = tokio::time::interval(Duration::from_millis(120));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            k = keys.next() => {
+                match k {
+                    Some(Ok(Event::Key(key))) => app.on_key(key).await,
+                    Some(Ok(Event::Resize(_, _))) => {}
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => app.toast = Some(format!("terminal input error: {e}")),
+                    None => {
+                        // Terminal closed under us.
+                        app.cancel_in_flight().await;
+                        app.quit = true;
+                    }
+                }
+            }
+            ev = read_sse(&mut sse, client) => {
+                if let Some(ev) = ev {
+                    app.on_sse(ev).await;
+                }
+            }
+            _ = ticker.tick() => {
+                app.poll().await;
+            }
+        }
+        if app.quit {
+            break;
+        }
+        let _ = terminal.draw(|f| app.draw(f));
+    }
+
+    let _ = terminal.flush();
+    Ok(0)
+}
+
+/// Read the next SSE event, reconnecting when the stream drops.
+async fn read_sse(reader: &mut Option<SseReader>, client: &Client) -> Option<SseEvent> {
+    loop {
+        match reader {
+            Some(r) => match r.next_event().await {
+                Ok(ev) => return Some(ev),
+                Err(_) => {
+                    *reader = None;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+            None => match client.events().await {
+                Ok(r) => *reader = Some(r),
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    return None;
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_row() -> Row {
+        Row::from_json(&json!({
+            "id": "s-abc",
+            "type": "move",
+            "asset_kind": "photo",
+            "status": "pending",
+            "selected": false,
+            "target": "/home/a/IMG_1.jpg",
+            "new_path": "/home/a/Pictures/2024/IMG_1.jpg",
+            "reason": "organize",
+            "rejection_reason": null,
+            "dependent_operations": [
+                {"type": "repair_symlink", "link_path": "/home/a/L", "replacement_target": "/home/a/Pictures/2024"}
+            ]
+        }))
+    }
+
+    #[test]
+    fn parses_row_fields_and_dependents() {
+        let r = sample_row();
+        assert_eq!(r.id, "s-abc");
+        assert_eq!(r.typ, "move");
+        assert_eq!(r.kind, "photo");
+        assert_eq!(r.new_path, "/home/a/Pictures/2024/IMG_1.jpg");
+        assert_eq!(r.dependents.len(), 1);
+        assert!(r.dependents[0].contains("repair_symlink"));
+        assert!(r.is_executable());
+    }
+
+    #[test]
+    fn filter_predicate_on_type_kind_status() {
+        let r = sample_row();
+        let matched = |f: &Filter| -> bool {
+            if let Some(t) = &f.typ {
+                if r.typ != *t {
+                    return false;
+                }
+            }
+            if let Some(k) = &f.kind {
+                if r.kind != *k {
+                    return false;
+                }
+            }
+            if let Some(s) = &f.status {
+                if r.status != *s {
+                    return false;
+                }
+            }
+            true
+        };
+        let f = Filter {
+            typ: Some("move".to_string()),
+            kind: None,
+            status: None,
+        };
+        assert!(matched(&f));
+        let f2 = Filter {
+            typ: Some("delete".to_string()),
+            ..Default::default()
+        };
+        assert!(!matched(&f2));
+        let f3 = Filter {
+            typ: None,
+            kind: Some("audio".to_string()),
+            status: None,
+        };
+        assert!(!matched(&f3));
+        let f4 = Filter {
+            typ: None,
+            kind: None,
+            status: Some("executed".to_string()),
+        };
+        assert!(!matched(&f4));
+    }
+
+    #[test]
+    fn tail_keeps_last_segments() {
+        assert_eq!(tail("/a/b/c/d.jpg", 2), "/c/d.jpg");
+        assert_eq!(tail("/a/b.jpg", 3), "/a/b.jpg");
+        assert_eq!(tail("/", 3), "/");
+    }
+
+    #[test]
+    fn shorten_elides_the_middle() {
+        let long = "x".repeat(80);
+        let s = shorten(&long, 40);
+        assert_eq!(s.chars().count(), 40);
+        assert!(s.starts_with("..."));
+    }
+
+    #[test]
+    fn row_label_is_ascii_and_marks_selection() {
+        let r = sample_row();
+        let label = row_label(&r).to_string();
+        assert!(label.starts_with("[ ]"));
+        assert!(!label.contains('\u{2192}'));
+        let mut sel = r.clone();
+        sel.selected = true;
+        assert!(row_label(&sel).to_string().starts_with("[x]"));
+    }
+
+    #[test]
+    fn prompt_editing_moves_cursor() {
+        let mut p = Prompt {
+            title: "t".to_string(),
+            kind: PromptKind::ExportPath,
+            value: "abcd".to_string(),
+            cursor: 2,
+        };
+        // Insert in the middle.
+        edit_test(
+            &mut p,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE),
+        );
+        assert_eq!(p.value, "abZcd");
+        assert_eq!(p.cursor, 3);
+        // Backspace deletes the character before the cursor (the inserted Z).
+        edit_test(
+            &mut p,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(p.value, "abcd");
+        assert_eq!(p.cursor, 2);
+        // Home/End.
+        edit_test(&mut p, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(p.cursor, 0);
+        edit_test(&mut p, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(p.cursor, p.value.len());
+    }
+
+    fn edit_test(p: &mut Prompt, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    p.value.insert(p.cursor, ch);
+                    p.cursor += 1;
+                }
+            }
+            KeyCode::Backspace => {
+                if p.cursor > 0 {
+                    p.cursor -= 1;
+                    p.value.remove(p.cursor);
+                }
+            }
+            KeyCode::Home => p.cursor = 0,
+            KeyCode::End => p.cursor = p.value.len(),
+            _ => {}
+        }
+    }
+}

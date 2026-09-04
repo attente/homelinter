@@ -23,7 +23,7 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 
-pub use crate::sse::SseEvent;
+pub use crate::sse::{SseEvent, SseReader};
 
 /// Error type for service API calls.
 #[derive(Debug, Clone)]
@@ -279,6 +279,76 @@ impl Client {
             None => "/api/v1/suggestions".to_string(),
         };
         let (_, v) = self.json(Method::GET, &path, None).await?;
+        Ok(v)
+    }
+
+    /// GET /api/v1/selection: `{"ids": [...]}`.
+    pub async fn selection(&self) -> Result<Value, ClientsError> {
+        let (_, v) = self.json(Method::GET, "/api/v1/selection", None).await?;
+        Ok(v)
+    }
+
+    /// PUT /api/v1/selection: replace the selection exactly with `ids`.
+    pub async fn selection_put(&self, ids: Vec<String>) -> Result<Value, ClientsError> {
+        let (_, v) = self
+            .json(
+                Method::PUT,
+                "/api/v1/selection",
+                Some(json!({ "ids": ids })),
+            )
+            .await?;
+        Ok(v)
+    }
+
+    /// POST /api/v1/selection/add with an id list or a filter object
+    /// (`{"type":..., "asset_kind":..., "status":..., "selected":...}`).
+    pub async fn selection_add(
+        &self,
+        ids: Option<Vec<String>>,
+        filter: Option<Value>,
+    ) -> Result<Value, ClientsError> {
+        let mut body = json!({});
+        if let Some(ids) = &ids {
+            body["ids"] = json!(ids);
+        }
+        if let Some(f) = &filter {
+            body["filter"] = f.clone();
+        }
+        let (_, v) = self
+            .json(Method::POST, "/api/v1/selection/add", Some(body))
+            .await?;
+        Ok(v)
+    }
+
+    /// POST /api/v1/selection/remove with an id list or a filter object.
+    pub async fn selection_remove(
+        &self,
+        ids: Option<Vec<String>>,
+        filter: Option<Value>,
+    ) -> Result<Value, ClientsError> {
+        let mut body = json!({});
+        if let Some(ids) = &ids {
+            body["ids"] = json!(ids);
+        }
+        if let Some(f) = &filter {
+            body["filter"] = f.clone();
+        }
+        let (_, v) = self
+            .json(Method::POST, "/api/v1/selection/remove", Some(body))
+            .await?;
+        Ok(v)
+    }
+
+    /// POST /api/v1/validate with an optional id list (defaults to the
+    /// selection). Returns `{"valid": bool, "rejected": [...]}`.
+    pub async fn validate(&self, ids: Option<Vec<String>>) -> Result<Value, ClientsError> {
+        let mut body = json!({});
+        if let Some(ids) = &ids {
+            body["ids"] = json!(ids);
+        }
+        let (_, v) = self
+            .json(Method::POST, "/api/v1/validate", Some(body))
+            .await?;
         Ok(v)
     }
 

@@ -460,27 +460,29 @@ The service is the only backend. It owns the scan session, configuration, sugges
 
 The scan root and the hidden-file selection are per-scan or per-session settings in every client, selected by CLI (`--root`, `--hidden`) or the interactive clients' per-session controls; they are never persisted as configuration-file values.
 
-The CLI embeds one service instance in the same process: it binds a loopback listener on an ephemeral port, builds the service in-process, and drives it through the HTTP API described under "Service API > Client Lifecycle". Managed CLI sessions always end with `POST /api/v1/shutdown` followed by a bounded wait and, if the service does not exit promptly, forced termination, so an invocation-owned service never outlives its client. The standalone `web` command serves on an ephemeral port, prints the readiness line `homelinter: listening on 127.0.0.1:<port>` to stdout, and never shuts itself down; it is terminated explicitly. The client contract itself is process-agnostic: a future TUI (or any other client) can spawn the same binary and parse that readiness line.
+The CLI and the TUI embed one service instance in the same process: they bind a loopback listener on an ephemeral port, build the service in-process, and drive it through the HTTP API described under "Service API > Client Lifecycle". Managed sessions always end with `POST /api/v1/shutdown` followed by a bounded wait and, if the service does not exit promptly, forced termination, so an invocation-owned service never outlives its client. The standalone `web` command serves on an ephemeral port, prints the readiness line `homelinter: listening on 127.0.0.1:<port>` to stdout, and never shuts itself down; it is terminated explicitly. The client contract itself is process-agnostic: a future external client can spawn the same binary and parse that readiness line.
 
 The `web` command launches the same service as a standalone localhost server on an ephemeral port. It remains running after browser disconnects and is terminated explicitly by the user. The SPA communicates with it through REST and Server-Sent Events. The server is localhost-only, unauthenticated, and keeps session state in memory; a restart requires a new scan.
 
-All clients display the same suggestions and previews. Interactive clients may select top-level suggestions, while dependent operations are included automatically. Filtering affects navigation and bulk selection only. The CLI also supports pager-based interactive review and non-interactive dry-run, execution, and export modes as defined in "Command-Line Interface Schema". The TUI requires a terminal of at least 80x24.
+All clients display the same suggestions and previews. Interactive clients may select top-level suggestions, while dependent operations are included automatically. Filtering affects navigation and bulk selection only. The CLI also supports simple interactive review and non-interactive dry-run, execution, and export modes as defined in "Command-Line Interface Schema"; the TUI provides the full-screen review experience. The TUI requires a terminal of at least 80x24 and refuses to start on a smaller one.
 
 ### CLI (Command-Line Interface)
 
 The CLI uses the service lifecycle defined above and supports two modes:
 
-- **Interactive mode (default)**: scans the selected root, generates suggestions, shows them for review, and prompts the user for a decision with a menu. The user can review suggestions, export them to a script, or execute them. The current CLI prints the review list to stdout; an external pager is a later refinement. See "Command-Line Interface Schema" for the exact flow.
+- **Interactive mode (default)**: scans the selected root, generates suggestions, shows them for review, and prompts the user for a decision with a menu. The user can review suggestions, export them to a script, or execute them. The current CLI prints the review list to stdout; `homelinter tui` provides a full-screen review. See "Command-Line Interface Schema" for the exact flow.
 - **Non-interactive mode**: driven by instructions passed as command-line arguments, such as `--execute`, `--dry-run`, or `--export`. These modes skip the pager and menu and run to completion without prompting.
 
 Dry-run is meaningful only as a non-interactive mode. In the interactive CLI, TUI, and SPA, the previewed suggestions are themselves the dry run: the user sees every suggestion with its destination and reason before deciding, so a dry run is redundant. In non-interactive mode, the dry-run report is the user's only view of what would happen, and therefore carries the full suggestion data for every entry (see "Service API > Data Types").
 
 ### TUI (Terminal User Interface)
 
-- Interactive terminal interface (e.g., `ratatui`).
-- Uses the shared service and its standard client lifecycle.
+- Full-screen interactive terminal interface built with `ratatui` and `crossterm` (target visual style: ASCII only, no em-dashes or special glyphs).
+- Uses the shared service and its standard client lifecycle, including `POST /api/v1/shutdown` on quit.
 - Displays suggestion previews and supports filtering and selection of top-level suggestions.
 - Requires a terminal with minimum 80x24 dimensions.
+
+Implemented as the `tui` subcommand of the CLI binary (see "Command-Line Interface Schema"), embedding the service in-process exactly like the CLI flow. Screens: a scanning progress view, a two-pane suggestion browser (filtered list plus detail panel), a live execution log, and a report view. It keeps one `GET /events` Server-Sent Events connection and falls back to session polling when the stream drops. Command key map (see `tui.rs`): arrows and `j` to move; space to select; `a`/`A` to select all/none; `t`/`k`/`u`/`c` to cycle type, asset-kind, and status filters and clear them; `x`/`r` to execute or dry-run with a confirmation dialog; `e` to export to a script path; `n` to scan another root (Tab toggles hidden); `?` for help; `q`/Esc/Ctrl-C to quit (cancelling an in-flight scan or run first).
 
 ### GUI via SPA (Single-Page Application)
 
@@ -496,6 +498,7 @@ The CLI has interactive and non-interactive modes (see "User Interfaces"). The s
 ```text
 homelinter [OPTIONS]
 homelinter web [OPTIONS]
+homelinter tui [OPTIONS]
 ```
 
 Supported options:
@@ -520,10 +523,12 @@ Supported options:
 
 The `web` subcommand launches the standalone service described in "User Interfaces". It accepts common configuration and scan options, including `--config`, `--root`, `--hidden`, `--target-path`, `--cache-clear`, and logging options, but not `--execute`, `--dry-run`, or `--export`; execution is initiated through the SPA. A root supplied on the `web` command line pre-seeds the session's default scan root; a per-scan `root` in `POST /session/scan` overrides it for that scan, and with neither supplied the platform home directory applies. The scan root is held in session memory and is not persisted to configuration. In this build `--hidden` and `--target-path` are accepted for compatibility but are not pre-seeded into the session (a documented seam); scans must pass `hidden` and `target_paths` per request until the SPA exists.
 
+The `tui` subcommand starts the full-screen terminal interface described in "User Interfaces > TUI". Like `web` it accepts `--config`, `--root`, `--hidden`, `--target-path`, `--cache-clear`, and the logging options, but none of `--execute`, `--dry-run`, or `--export`; those actions are available inside the TUI. `--root` pre-seeds the scan root shown in the scan prompt, `--hidden` pre-seeds the hidden-file toggle, and `--target-path` is accepted for compatibility but is not wired to the session yet (the same documented seam as `web`). The TUI embeds the service in-process, refuses to start when stdin is not a terminal or the screen is smaller than 80x24, and sends `POST /api/v1/shutdown` when the user quits.
+
 **Interactive mode (no `--execute`)**
 1. Scan the selected root and generate suggestions.
 2. If no suggestions were generated, print a "no suggestions" notice and exit without entering the pager or menu.
-3. Display all suggestions for review (the current CLI prints them to stdout; a pager such as `less` is a later refinement).
+3. Display all suggestions for review (the current CLI prints them to stdout; `homelinter tui` provides the full-screen review).
 4. Present a menu and prompt for choice:
    1. Show suggestions for review again and then return to menu once finished
    2. Export suggestions to an executable shell script
@@ -681,7 +686,7 @@ Every selection change triggers re-validation of the selected subset (see "Sugge
 
 The CLI and TUI spawn the service, parse the readiness line, poll `/health` until 200, drive the session through the API, then call `POST /shutdown` and wait for process exit, force-terminating if the process does not exit promptly. An invocation-owned service must not outlive its client. The `web` command serves the SPA at `/` and the API under `/api/v1` from the same process; it never shuts itself down and is terminated explicitly by the user.
 
-The non-interactive CLI modes map directly onto this API: `--dry-run` scans and generates suggestions, calls `POST /execute` with `dry_run: true`, and prints the resulting report without modifying the filesystem; `--execute` scans and executes with all suggestion IDs, and `--export <path>` scans and calls `POST /export` with the resolved path. The interactive CLI scans, lists suggestions via `GET /suggestions`, and drives the pager and menu from the same data.
+The non-interactive CLI modes map directly onto this API: `--dry-run` scans and generates suggestions, calls `POST /execute` with `dry_run: true`, and prints the resulting report without modifying the filesystem; `--execute` scans and executes with all suggestion IDs, and `--export <path>` scans and calls `POST /export` with the resolved path. The interactive CLI scans, lists suggestions via `GET /suggestions`, and drives the menu from the same data; the TUI uses the same endpoints and adds live progress over SSE.
 
 ## Tooling Strategy
 
@@ -788,7 +793,7 @@ Pretty-printed table or JSON/TOML containing:
 - Written in Rust
 - Async I/O for scanning and metadata extraction (tokio)
 - Modular workspace: `model`, `scan`, `analyze`, `suggest`, `execute`, `service`, `clients` crates plus the `homelinter` CLI binary crate
-- The `service` crate is the shared backend implemented by the locally running web server; the CLI is a client of it and the TUI and SPA are future frontends for it
+- The `service` crate is the shared backend implemented by the locally running web server; the CLI and the TUI are clients of it and the SPA is a future frontend for it
 
 ### Implementation status
 
@@ -800,16 +805,17 @@ The core pipeline and the HTTP service API are implemented and exercised by an e
 - `suggest` generates move and delete suggestions with dependent symlink repairs; delete suggestions always carry the recorded full-content hash required at execution and export time.
 - `execute` implements no-replace rename (kernel-atomic `renameat2(RENAME_NOREPLACE)` on Linux, checked fallback elsewhere), hash-verified delete, dependent symlink repair, verified cross-filesystem copy-and-delete with publish-then-delete ordering, dry runs, and platform script export (POSIX `sh` / PowerShell).
 - `service` implements the full REST + SSE API under `/api/v1`, the single-session state machine, batch validation, config merge-and-write, the SQLite cache, and the append-only audit log. Async-accept endpoints (`POST /session/scan`, `POST /execute`) return 202 and deliver their outcomes over SSE.
-- `clients` is a small hyper-based HTTP/1.1 + SSE client used by the CLI.
-- The `homelinter` binary embeds one service instance in-process for the managed CLI flows and for `web`, per the lifecycle described under "User Interfaces".
+- `clients` is a small hyper-based HTTP/1.1 + SSE client used by the CLI and the TUI.
+- The `homelinter` binary embeds one service instance in-process for the managed CLI flows, the `tui` subcommand, and `web`, per the lifecycle described under "User Interfaces".
+- `homelinter tui` is the full-screen terminal client (ratatui + crossterm): scanning screen, two-pane suggestion browser with type/kind/status filters and selection, live execution log, report view, confirmation and text-input dialogs, and an 80x24 minimum terminal check. Keys: arrows/`j` move, space select, `a`/`A` select all/none, `t`/`k`/`u`/`c` filters, `x` execute, `r` dry-run, `e` export, `n` scan another root, `?` help, `q`/Esc/Ctrl-C quit (cancelling in-flight work first).
 
 ### Documented seams
 
 - **Windows platform primitives**: symlink replacement is refused on non-Unix platforms rather than guessed; the exported PowerShell marks reparse-point repair as a seam and defers to a native run; `same_filesystem` conservatively assumes a shared volume so an unsafe copy is never attempted. No-replace rename falls back to a checked rename where the kernel API is unavailable.
 - **Provider plugins**: LLM and geocoder description/geocoding backends, image/video recognition providers, and document-text extraction backends are not implemented. The plugin seams (extractor/config schemas, ToolSet detection, cache) are in place; when a provider is unavailable the affected metadata is omitted and analysis continues. VCS repository adapters beyond the local scan/repo pass are likewise future work.
-- **CLI review pager**: interactive review prints the suggestion list to stdout; an external pager is a later refinement.
-- **`web` pre-seed**: `--root` pre-seeds the session default scan root; `--hidden` and `--target-path` are accepted but not pre-seeded and must be passed per scan.
-- **TUI and SPA**: not yet built; the service API and readiness-line contract are the client boundary they will use.
+- **CLI review pager**: interactive (non-TUI) review prints the suggestion list to stdout; the full-screen review experience lives in `homelinter tui`.
+- **`web` pre-seed**: `--root` pre-seeds the session default too (scan root); `--hidden` and `--target-path` are accepted but not pre-seeded and must be passed per scan. `homelinter tui` mirrors this: `--root` and `--hidden` pre-seed the session, `--target-path` is parsed but not wired yet.
+- **TUI and SPA**: the TUI is built; the SPA remains future work, and the service API and readiness-line contract are the client boundary it will use.
 
 ## Developer Environment
 

@@ -12,8 +12,9 @@ use homelinter_service::{build_service, serve, Built};
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
 
-use crate::args::{ManagedAction, ManagedOptions, WebOptions};
+use crate::args::{ManagedAction, ManagedOptions, TuiOptions, WebOptions};
 use crate::output;
+use crate::tui;
 
 /// A running in-process service instance plus the API client for it.
 struct Instance {
@@ -171,6 +172,48 @@ fn port_of(client: &Client) -> u16 {
         .next()
         .and_then(|p| p.parse().ok())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// TUI session
+// ---------------------------------------------------------------------------
+
+pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
+    let verbosity = opts.verbosity;
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
+
+    let root = match &opts.root {
+        Some(p) => to_absolute(p, &cwd).map_err(|e| format!("invalid --root: {e}"))?,
+        None => homelinter_model::path::home_dir()
+            .ok_or_else(|| "cannot determine the home directory".to_string())?,
+    };
+
+    let inst = spawn(homelinter_service::ServiceOptions {
+        cli_config: opts.config.clone(),
+        home_override: None,
+        data_dir_override: None,
+    })?;
+    let client = inst.client.clone();
+    wait_health(&client, Duration::from_secs(10)).await?;
+
+    if opts.cache_clear {
+        client
+            .cache_clear()
+            .await
+            .map_err(|e| format!("cache clear failed: {e}"))?;
+    }
+    if verbosity >= 0 {
+        output::note(&format!(
+            "data dir: {} (cache and audit log)",
+            inst.data_dir.display()
+        ));
+    }
+
+    // The TUI owns the terminal from here on; it returns once the user
+    // quits, and any in-flight operation has been cancelled or finished.
+    let code = tui::run(&client, root, opts.hidden, opts.target_paths).await?;
+    shutdown_instance(inst).await;
+    Ok(code)
 }
 
 // ---------------------------------------------------------------------------
