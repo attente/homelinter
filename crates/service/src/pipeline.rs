@@ -221,7 +221,8 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
         &analysis,
         &formats,
         provider_epoch,
-    );
+    )
+    .await;
     let mut pending: std::collections::BTreeMap<usize, u32> =
         std::collections::BTreeMap::new();
     for job in &provider_jobs {

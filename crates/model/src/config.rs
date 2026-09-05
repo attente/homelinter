@@ -84,6 +84,15 @@ pub enum LlmBackend {
 }
 
 impl LlmBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            LlmBackend::Ollama => "ollama",
+            LlmBackend::Openrouter => "openrouter",
+            LlmBackend::Openai => "openai",
+            LlmBackend::Custom => "custom",
+        }
+    }
+
     pub fn default_endpoint(self) -> &'static str {
         match self {
             LlmBackend::Ollama => "http://localhost:11434",

@@ -26,10 +26,11 @@
 //! The scaffold implements the transport for the neutral `custom` geocoder
 //! contract only; the public nominatim/photon/google/mapbox backends and
 //! every description (LLM) backend return "not implemented yet" and thus
-//! behave as ordinary provider failures. `plan_provider_jobs` is a no-op:
-//! provider inputs (GPS coordinates, extracted document text) do not exist
-//! until the metadata extractors of the Analysis Pipeline land, and the
-//! providers are disabled by default, which is the zero-cost idle state.
+//! behave as ordinary provider failures. Jobs are planned per unit only
+//! when the destination format for the unit's kind uses the corresponding
+//! placeholder (`%l` for the geocoder, `%s` for descriptions); provider
+//! inputs that do exist (GPS coordinates from EXIF) are wired in, while
+//! document-text extraction remains future extractor work.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -50,8 +51,8 @@ use tokio::sync::Notify;
 
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::AssetKind;
-use homelinter_model::config::{GeocoderService, RawConfig};
-use homelinter_model::format::FormatString;
+use homelinter_model::config::{GeocoderService, LlmBackend, RawConfig};
+use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
 use homelinter_scan::SymlinkIndex;
 use homelinter_suggest::rebuild_move_suggestion;
@@ -529,24 +530,129 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
     })
 }
 
-/// Plan provider work for a completed scan: the requests the cache does
-/// not already satisfy, one job per unit per enabled provider. The pipeline
-/// calls this before publishing the batch so units with jobs have their
-/// suggestions marked `metadata_pending`.
+/// Build the description provider settings for one asset kind from the
+/// effective configuration, following per-kind overrides. `None` when the
+/// provider for that kind is disabled.
+pub fn description_settings(
+    cfg: &RawConfig,
+    kind: &AssetKind,
+) -> Option<ProviderSettings> {
+    let eff = cfg
+        .description
+        .kind_effective(&kind.name())
+        .unwrap_or_else(|| cfg.description.base_effective());
+    if !eff.enabled {
+        return None;
+    }
+    let backend = eff.backend.name();
+    let endpoint = eff
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| eff.backend.default_endpoint().to_string());
+    let mut provider_id = format!("describe:{backend}");
+    if backend == "custom" && !endpoint.is_empty() {
+        provider_id.push(':');
+        provider_id.push_str(&endpoint);
+    }
+    let settings_hash = sha256(&[
+        backend.as_bytes(),
+        endpoint.as_bytes(),
+        eff.model.as_deref().unwrap_or("").as_bytes(),
+        eff.api_key.as_deref().unwrap_or("").as_bytes(),
+    ]);
+    Some(ProviderSettings {
+        provider_id,
+        settings_hash,
+        min_interval: Duration::ZERO,
+        backend: backend.to_string(),
+        endpoint,
+        api_key: eff.api_key,
+        language: None,
+        model: eff.model,
+        max_tokens: Some(eff.max_tokens),
+    })
+}
+
+/// Plan provider work for a completed scan: one job per unit whose
+/// destination format actually uses the corresponding placeholder, per
+/// enabled provider. The pipeline calls this before publishing the batch
+/// so units with jobs have their suggestions marked `metadata_pending`.
 ///
-/// The scaffold has no provider inputs yet: GPS coordinates for photos and
-/// videos (the geocoder input) and extracted plain text for documents (the
-/// description input) both come from the Analysis Pipeline metadata
-/// extractors, which are not implemented, and every description backend is
-/// unimplemented, so this is currently a no-op. The signature is the
-/// contract the extractor work plugs into.
-pub fn plan_provider_jobs(
-    _app: &AppHandle,
-    _analysis: &Analysis,
-    _formats: &BTreeMap<AssetKind, FormatString>,
-    _epoch: u64,
+/// Gating: a geocode job is planned only when the unit's format contains
+/// `%l` (location), the geocoder is enabled, and the unit carries raw GPS
+/// coordinates; a description job only when the format contains `%s`
+/// (subject/subtitle) and a description provider is enabled for the unit's
+/// kind. A unit whose format never uses a placeholder never triggers a
+/// provider call.
+pub async fn plan_provider_jobs(
+    app: &AppHandle,
+    analysis: &Analysis,
+    formats: &BTreeMap<AssetKind, FormatString>,
+    epoch: u64,
 ) -> Vec<ProviderJob> {
-    Vec::new()
+    let cfg = app.session.lock().await.config.clone();
+    let geo = geocoder_settings(&cfg);
+    let mut jobs = Vec::new();
+    for (i, f) in analysis.files.iter().enumerate() {
+        let Some(fmt) = formats.get(&f.kind) else {
+            continue;
+        };
+        let uses_location = fmt.segments().iter().any(|s| {
+            matches!(s, Segment::Placeholder(Placeholder::Location))
+        });
+        let uses_subject = fmt.segments().iter().any(|s| {
+            matches!(s, Segment::Placeholder(Placeholder::Subject))
+        });
+        if uses_location {
+            if let (Some(g), Some(lat), Some(lon)) = (
+                &geo,
+                f.latitude,
+                f.longitude,
+            ) {
+                let input_hash = sha256(&[
+                    b"geocode",
+                    lat.to_le_bytes().as_slice(),
+                    lon.to_le_bytes().as_slice(),
+                    g.language.as_deref().unwrap_or("").as_bytes(),
+                ]);
+                jobs.push(ProviderJob {
+                    kind: ProviderKind::Geocode,
+                    settings: g.clone(),
+                    unit: UnitRef {
+                        epoch,
+                        index: i,
+                        path: f.path.clone(),
+                    },
+                    input_hash,
+                    input: ProviderInput::Geocode {
+                        latitude: lat,
+                        longitude: lon,
+                        language: g.language.clone(),
+                    },
+                });
+            }
+        }
+        if uses_subject {
+            if let Some(desc) = description_settings(&cfg, &f.kind) {
+                let input_hash = sha256(&[
+                    b"describe",
+                    f.path.as_os_str().as_encoded_bytes(),
+                ]);
+                jobs.push(ProviderJob {
+                    kind: ProviderKind::Description,
+                    settings: desc,
+                    unit: UnitRef {
+                        epoch,
+                        index: i,
+                        path: f.path.clone(),
+                    },
+                    input_hash,
+                    input: ProviderInput::Describe { text: None },
+                });
+            }
+        }
+    }
+    jobs
 }
 
 /// Deterministic settings hash builder for cache keys. Any field change
@@ -621,6 +727,8 @@ mod tests {
             extracted_date: None,
             date_source: "",
             embedded_title: None,
+            latitude: None,
+            longitude: None,
             location: None,
             subject: None,
         };
@@ -889,5 +997,146 @@ mod tests {
         let s = geocoder_settings(&nom).unwrap();
         assert_eq!(s.backend, "nominatim");
         assert_eq!(s.min_interval, Duration::from_secs(1));
+    }
+
+    /// Builds an app whose session atomically carries the given config.
+    async fn plan_app(config: RawConfig) -> AppHandle {
+        let dir = tmp_dir("plan");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let built = build_service(ServiceOptions {
+            home_override: Some(home.clone()),
+            data_dir_override: Some(dir.join("data")),
+            ..Default::default()
+        })
+        .unwrap();
+        let app = built.app;
+        {
+            let mut sess = app.session.lock().await;
+            sess.config = config;
+        }
+        app
+    }
+
+    fn file_at(
+        dir: &PathBuf,
+        name: &str,
+        kind: AssetKind,
+        lat: Option<f64>,
+        lon: Option<f64>,
+    ) -> AnalyzedFile {
+        AnalyzedFile {
+            path: dir.join(name),
+            kind,
+            size: 1,
+            modified: SystemTime::now(),
+            created: None,
+            full_hash: None,
+            provenance: Default::default(),
+            extracted_date: None,
+            date_source: "",
+            embedded_title: None,
+            latitude: lat,
+            longitude: lon,
+            location: None,
+            subject: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn plans_jobs_only_when_format_uses_placeholder() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+            language = "en"
+
+            [description]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let app = plan_app(cfg).await;
+        let dir = tmp_dir("files");
+
+        // Photo with a %l format and GPS: geocode planned.
+        let photo = file_at(&dir, "IMG_0001.jpg", AssetKind::Photo, Some(48.8566), Some(2.3522));
+        // Photo with a %l format but no GPS: nothing planned.
+        let photo_no_gps = file_at(&dir, "IMG_0002.jpg", AssetKind::Photo, None, None);
+        // Document with a %s format: description planned, no geocode.
+        let doc = file_at(&dir, "a.pdf", AssetKind::Document, Some(10.0), Some(20.0));
+        // Audio with a format using neither placeholder: nothing planned.
+        let audio = file_at(&dir, "b.mp3", AssetKind::Audio, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![photo, photo_no_gps, doc, audio],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%l/%f").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%s/%f").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Audio,
+            FormatString::parse("Music/%f").unwrap(),
+        );
+
+        let jobs = plan_provider_jobs(&app, &analysis, &formats, 7).await;
+
+        let photo_jobs: Vec<&ProviderJob> =
+            jobs.iter().filter(|j| j.unit.index == 0).collect();
+        assert_eq!(photo_jobs.len(), 1);
+        assert_eq!(photo_jobs[0].kind, ProviderKind::Geocode);
+        assert_eq!(photo_jobs[0].unit.epoch, 7);
+        match &photo_jobs[0].input {
+            ProviderInput::Geocode {
+                latitude,
+                longitude,
+                language,
+            } => {
+                assert_eq!(*latitude, 48.8566);
+                assert_eq!(*longitude, 2.3522);
+                assert_eq!(language.as_deref(), Some("en"));
+            }
+            _ => panic!("expected geocode input"),
+        }
+        // Photo with GPS but no format %l: no geocode job.
+        assert!(jobs.iter().all(|j| j.unit.index != 1));
+        // Document: one description job (format %s), never a geocode.
+        let doc_jobs: Vec<&ProviderJob> =
+            jobs.iter().filter(|j| j.unit.index == 2).collect();
+        assert_eq!(doc_jobs.len(), 1);
+        assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
+        // Audio format uses neither placeholder: no jobs.
+        assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn disabled_providers_plan_nothing() {
+        let cfg: RawConfig = toml::from_str("").unwrap(); // all disabled
+        let app = plan_app(cfg).await;
+        let dir = tmp_dir("off");
+        let photo = file_at(&dir, "IMG_0001.jpg", AssetKind::Photo, Some(48.8), Some(2.3));
+        let analysis = Arc::new(Analysis {
+            files: vec![photo],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%l/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&app, &analysis, &formats, 1).await;
+        assert!(jobs.is_empty());
     }
 }

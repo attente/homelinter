@@ -43,6 +43,10 @@ pub struct AnalyzedFile {
     pub date_source: &'static str,
     /// Embedded title metadata when an extractor provided one.
     pub embedded_title: Option<String>,
+    /// Raw GPS coordinates when an extractor found them (EXIF for photos
+    /// and videos). Backing input for the `%l` reverse-geocoder.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     /// Reverse-geocoded place name backing the `%l` placeholder. Resolved
     /// asynchronously by the provider worker after the scan; `None` until
     /// a provider (or the cache) supplies a value.
@@ -140,6 +144,8 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
             extracted_date: date,
             date_source: source,
             embedded_title,
+            latitude: None,
+            longitude: None,
             location: None,
             subject: None,
         });
