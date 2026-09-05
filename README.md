@@ -19,13 +19,13 @@ From the repo root, `cargo run -p homelinter -- <subcommand>` runs the `homelint
 - **Interactive CLI**: `cargo run -p homelinter` scans the default root (your home directory), shows suggestions for review, then exports or executes them on request.
 - **Non-interactive**: `cargo run -p homelinter -- --dry-run` reports what would happen without touching the filesystem; `--execute` runs all suggestions immediately; `--export <path>` writes the plan to an executable script.
 - **TUI**: `cargo run -p homelinter -- tui` starts the full-screen terminal interface (needs an 80x24 terminal).
-- **Web**: `cargo run -p homelinter -- web` starts a localhost service and serves the SPA at the printed URL; session state is in memory, so a restart requires a new scan.
+- **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Session state is in memory, so a restart requires a new scan.
 
 Per-scan options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute`, `--dry-run`, and `--export` are mutually exclusive.
 
 ### Developing the SPA
 
-The SPA lives in `webui/`. For development, run `homelinter web` in one terminal and `cd webui && pnpm install && pnpm dev` in another; Vite serves the app and proxies `/api` to the homelinter service.
+The SPA lives in `webui/`. For development, run `cargo run -p homelinter -- web --port 8787` in one terminal and `cd webui && pnpm install && pnpm dev` in another; Vite serves the app and proxies `/api` to the homelinter service on port 8787 (override the target with `HOMELINTER_WEB_PORT`).
 
 For production-style serving, `pnpm build` in `webui/` produces `webui/dist`, which `homelinter web` serves alongside the API. The Rust workspace never builds the JS toolchain, so remember to `pnpm build` after frontend changes before serving.
 

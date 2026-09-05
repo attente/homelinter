@@ -50,9 +50,18 @@ fn resolve_web_dir() -> Option<PathBuf> {
     None
 }
 
-fn spawn(opts: homelinter_service::ServiceOptions) -> Result<Instance, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("cannot bind loopback listener: {e}"))?;
+fn spawn(
+    opts: homelinter_service::ServiceOptions,
+    port: Option<u16>,
+) -> Result<Instance, String> {
+    let bind = match port {
+        Some(p) => format!("127.0.0.1:{p}"),
+        None => "127.0.0.1:0".to_string(),
+    };
+    let listener = std::net::TcpListener::bind(&bind).map_err(|e| match port {
+        Some(p) => format!("cannot bind loopback listener on 127.0.0.1:{p}: {e}"),
+        None => format!("cannot bind loopback listener: {e}"),
+    })?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("cannot set nonblocking: {e}"))?;
@@ -156,12 +165,15 @@ pub async fn web(opts: WebOptions) -> Result<u8, String> {
     };
     // The web command pre-seeds the session's default scan root with the
     // service home; scans may still override it per request.
-    let inst = spawn(homelinter_service::ServiceOptions {
-        cli_config: opts.config,
-        home_override: Some(root),
-        data_dir_override: None,
-        web_dir: resolve_web_dir(),
-    })?;
+    let inst = spawn(
+        homelinter_service::ServiceOptions {
+            cli_config: opts.config,
+            home_override: Some(root),
+            data_dir_override: None,
+            web_dir: resolve_web_dir(),
+        },
+        opts.port,
+    )?;
     if opts.verbosity >= 0 {
         output::note(&format!(
             "data dir: {} (cache and audit log)",
@@ -223,12 +235,15 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
             .ok_or_else(|| "cannot determine the home directory".to_string())?,
     };
 
-    let inst = spawn(homelinter_service::ServiceOptions {
-        cli_config: opts.config.clone(),
-        home_override: None,
-        data_dir_override: None,
-        web_dir: None,
-    })?;
+    let inst = spawn(
+        homelinter_service::ServiceOptions {
+            cli_config: opts.config.clone(),
+            home_override: None,
+            data_dir_override: None,
+            web_dir: None,
+        },
+        None,
+    )?;
     let client = inst.client.clone();
     wait_health(&client, Duration::from_secs(10)).await?;
 
@@ -272,12 +287,15 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
             .ok_or_else(|| "cannot determine the home directory".to_string())?,
     };
 
-    let inst = spawn(homelinter_service::ServiceOptions {
-        cli_config: opts.config.clone(),
-        home_override: None,
-        data_dir_override: None,
-        web_dir: None,
-    })?;
+    let inst = spawn(
+        homelinter_service::ServiceOptions {
+            cli_config: opts.config.clone(),
+            home_override: None,
+            data_dir_override: None,
+            web_dir: None,
+        },
+        None,
+    )?;
     let client = inst.client.clone();
     wait_health(&client, Duration::from_secs(10)).await?;
 

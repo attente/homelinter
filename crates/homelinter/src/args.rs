@@ -48,6 +48,7 @@ pub struct WebOptions {
     pub target_paths: BTreeMap<String, String>,
     pub cache_clear: bool,
     pub verbosity: i8,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +164,9 @@ struct WebArgs {
     /// Pre-seed the session's default scan root.
     #[arg(long, value_name = "PATH")]
     root: Option<PathBuf>,
+    /// Bind the loopback listener on this port instead of an ephemeral one.
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
     /// Include hidden files and directories in primary discovery.
     #[arg(long)]
     hidden: bool,
@@ -197,6 +201,7 @@ pub fn parse() -> Result<Mode, String> {
             target_paths: parse_target_paths(&web.target_path)?,
             cache_clear: web.cache_clear,
             verbosity: web.verbose as i8 - web.quiet as i8,
+            port: web.port,
         }));
     }
     if let Some(Commands::Tui(tui)) = &cli.command {
