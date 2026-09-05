@@ -440,7 +440,7 @@ async fn cache_clear_and_config_put() {
         &app,
         "POST",
         "/api/v1/config/validate",
-        Some(json!({ "llm": { "backend": "bogus" } })),
+        Some(json!({ "description": { "backend": "bogus" } })),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

@@ -35,6 +35,6 @@ Configuration is TOML, resolved by precedence: per-scan CLI options, then the co
 
 The default config path is `$HOME/.config/homelinter/config.toml` on Linux and macOS, and `%APPDATA%\homelinter\config.toml` on Windows; any file is merged over it (system-wide first, then user). Use `--config <path>` to select a specific file, and the SPA can edit the live config through its settings view.
 
-Key sections: `[target_paths]` maps each asset kind to a destination format string (for example `photo = "Pictures/%Y/%m/%f"`); `[llm]`, `[geocoder]`, and `[description]` configure optional content-description and location providers (all disabled by default); `[scan]` sets `exclude_paths` globs and (on Windows) the hidden-file definition; `[output]` selects pretty, JSON, or TOML reporting.
+Key sections: `[target_paths]` maps each asset kind to a destination format string (for example `photo = "Pictures/%Y/%m/%f"`); `[geocoder]` and `[description]` configure optional content-description and location providers (all disabled by default); `[scan]` sets `exclude_paths` globs and (on Windows) the hidden-file definition; `[output]` selects pretty, JSON, or TOML reporting.
 
 The scan root and hidden-file selection are per-scan settings, not config values; `scan.root` and `scan.hidden` in a config file are rejected. API keys and provider secrets are never written to logs or suggestions.

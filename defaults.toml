@@ -21,16 +21,6 @@ data       = "Data/%f"
 executable = "bin/%f"
 other      = "Other/%f"
 
-[llm]
-# Content descriptions via an LLM. Requires a reachable backend when
-# enabled; model is required then, api_key only for openrouter/openai.
-enabled = false
-backend = "ollama"          # ollama | openrouter | openai | custom
-endpoint = "http://localhost:11434"
-model = ""                  # required when enabled = true
-api_key = ""                # optional; sent as Authorization: Bearer
-max_tokens = 512
-
 [geocoder]
 # Reverse geocoding for GPS-tagged photos (%l). Public services are
 # rate-limited (nominatim: 1 req/s). google/mapbox require api_key.
@@ -42,11 +32,19 @@ language = "en"
 user_agent_contact = ""     # recommended for public services
 
 [description]
-# Provider for %s (content description). Only type = "llm" is implemented;
-# it reuses [llm]. Per-kind overrides: [description.photo] etc. with
-# enabled = false to suppress for that kind.
+# Content descriptions for %s via an LLM. Only type = "llm" is
+# implemented; image/video/custom are reserved. Requires a reachable
+# backend when enabled; model is required then, api_key only for
+# openrouter/openai. Per-kind overrides ([description.photo] etc.) inherit
+# unset keys from this base section, so an override needs only the model
+# it changes, and enabled = false suppresses descriptions for that kind.
 enabled = false
 type = "llm"
+backend = "ollama"          # ollama | openrouter | openai | custom
+endpoint = "http://localhost:11434"
+model = ""                  # required when enabled = true
+api_key = ""                # optional; sent as Authorization: Bearer
+max_tokens = 512
 
 [document_extraction]
 # Text extraction before description generation. {path} is the input file;

@@ -26,7 +26,6 @@ fn config_template_loads_and_validates() {
     let text = std::fs::read_to_string(&path).expect("template is readable");
     for section in [
         "target_paths",
-        "llm",
         "geocoder",
         "description",
         "document_extraction",

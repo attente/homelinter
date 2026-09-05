@@ -94,23 +94,6 @@ impl LlmBackend {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LlmConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub backend: Option<LlmBackend>,
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub max_tokens: Option<u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GeocoderService {
@@ -130,12 +113,6 @@ impl GeocoderService {
             GeocoderService::Mapbox => "https://api.mapbox.com",
             GeocoderService::Custom => "",
         }
-    }
-}
-
-impl LlmConfig {
-    pub fn llm_backend(&self) -> LlmBackend {
-        self.backend.unwrap_or(LlmBackend::Ollama)
     }
 }
 
@@ -163,7 +140,9 @@ impl GeocoderConfig {
 }
 
 /// A description provider entry: the base `[description]` table or one
-/// per-kind override such as `[description.photo]`.
+/// per-kind override such as `[description.photo]`. LLM transport settings
+/// (`backend`, `endpoint`, `model`, `api_key`, `max_tokens`) live directly
+/// on each entry; unset keys fall back to the base entry.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DescriptionProvider {
@@ -171,6 +150,64 @@ pub struct DescriptionProvider {
     pub enabled: Option<bool>,
     #[serde(default, rename = "type")]
     pub provider_type: Option<String>,
+    #[serde(default)]
+    pub backend: Option<LlmBackend>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
+
+/// The effective settings of a description provider entry after per-key
+/// fallback to the base entry.
+#[derive(Debug, Clone)]
+pub struct EffectiveDescription {
+    pub enabled: bool,
+    pub provider_type: String,
+    pub backend: LlmBackend,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub max_tokens: u64,
+}
+
+impl DescriptionProvider {
+    /// Effective settings for this entry, with unset keys inherited from
+    /// `base`. For the base entry itself, pass it as `base` as well.
+    pub fn effective(&self, base: &DescriptionProvider) -> EffectiveDescription {
+        EffectiveDescription {
+            enabled: self.enabled.or(base.enabled).unwrap_or(false),
+            provider_type: self
+                .provider_type
+                .clone()
+                .or_else(|| base.provider_type.clone())
+                .unwrap_or_else(|| "llm".into()),
+            backend: self.backend.or(base.backend).unwrap_or(LlmBackend::Ollama),
+            endpoint: self.endpoint.clone().or_else(|| base.endpoint.clone()),
+            model: self.model.clone().or_else(|| base.model.clone()),
+            api_key: self.api_key.clone().or_else(|| base.api_key.clone()),
+            max_tokens: self
+                .max_tokens
+                .or(base.max_tokens)
+                .unwrap_or(DEFAULT_MAX_TOKENS),
+        }
+    }
+}
+
+impl DescriptionConfig {
+    /// Effective settings of the base provider.
+    pub fn base_effective(&self) -> EffectiveDescription {
+        self.base.effective(&self.base)
+    }
+
+    /// Effective settings for one per-kind entry, if present.
+    pub fn kind_effective(&self, kind: &str) -> Option<EffectiveDescription> {
+        self.per_kind.get(kind).map(|p| p.effective(&self.base))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -273,8 +310,6 @@ pub struct RawConfig {
     #[serde(default)]
     pub target_paths: BTreeMap<String, String>,
     #[serde(default)]
-    pub llm: LlmConfig,
-    #[serde(default)]
     pub geocoder: GeocoderConfig,
     #[serde(default)]
     pub description: DescriptionConfig,
@@ -293,14 +328,6 @@ pub struct RawConfig {
 }
 
 impl RawConfig {
-    pub fn llm_backend(&self) -> LlmBackend {
-        self.llm.backend.unwrap_or(LlmBackend::Ollama)
-    }
-
-    pub fn llm_max_tokens(&self) -> u64 {
-        self.llm.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)
-    }
-
     pub fn geocoder_service(&self) -> GeocoderService {
         self.geocoder.service.unwrap_or(GeocoderService::Nominatim)
     }
@@ -558,80 +585,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             }
         });
 
-    // llm
-    let llm = &raw.llm;
-    if llm.enabled {
-        if llm.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            fields.push((
-                "llm.model".into(),
-                "model is required when llm is enabled".into(),
-            ));
-        }
-        if let Some(ep) = &llm.endpoint {
-            if ep.trim().is_empty() {
-                fields.push(("llm.endpoint".into(), "endpoint must not be empty".into()));
-            }
-        }
-        match llm.llm_backend() {
-            LlmBackend::Custom => {
-                if llm
-                    .endpoint
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    fields.push((
-                        "llm.endpoint".into(),
-                        "endpoint is required for the custom backend".into(),
-                    ));
-                }
-            }
-            LlmBackend::Openrouter | LlmBackend::Openai => {
-                if llm
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    fields.push((
-                        "llm.api_key".into(),
-                        format!(
-                            "api_key is required by the {:?} backend when enabled",
-                            llm.llm_backend()
-                        )
-                        .to_lowercase(),
-                    ));
-                }
-            }
-            LlmBackend::Ollama => {
-                if llm
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|s| !s.is_empty())
-                {
-                    fields.push((
-                        "llm.api_key".into(),
-                        "api_key is rejected for the ollama backend".into(),
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(ep) = &llm.endpoint {
-        if ep.trim().is_empty() {
-            fields.push(("llm.endpoint".into(), "endpoint must not be empty".into()));
-        }
-    }
-    if raw.llm_max_tokens() == 0 {
-        fields.push((
-            "llm.max_tokens".into(),
-            "max_tokens must be positive".into(),
-        ));
-    }
-
     // geocoder
     let geo = &raw.geocoder;
     if geo.enabled {
@@ -690,14 +643,9 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     }
 
-    // description
+    // description: every provider entry (base and per-kind) is validated
+    // on its effective settings, with unset keys inherited from the base.
     let desc = &raw.description;
-    let base_enabled = desc.base.enabled.unwrap_or(false);
-    let base_type = desc
-        .base
-        .provider_type
-        .clone()
-        .unwrap_or_else(|| "llm".into());
     asset_kind::validate_per_kind_description_keys(
         desc.per_kind
             .keys()
@@ -715,35 +663,91 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             );
         }
     });
-    if base_enabled && base_type != "llm" {
-        fields.push((
-            "description.type".into(),
-            "only 'llm' is implemented; 'image', 'video', and 'custom' are reserved and rejected until implemented".into(),
-        ));
-    }
-    for (kind, p) in &desc.per_kind {
-        let ty = p.provider_type.clone().unwrap_or_else(|| "llm".into());
-        if p.enabled.unwrap_or(false) && ty != "llm" {
+    fn check_provider(prefix: String, eff: EffectiveDescription, fields: &mut Vec<(String, String)>) {
+        if eff.enabled && eff.provider_type != "llm" {
             fields.push((
-                format!("description.{kind}.type"),
-                "only 'llm' is implemented; 'image', 'video', and 'custom' are reserved and rejected until implemented".into(),
+                format!("{prefix}.type"),
+                "only 'llm' is implemented; 'image', 'video', and 'custom' are reserved and rejected until implemented"
+                    .into(),
             ));
         }
-    }
-    let any_description_enabled =
-        base_enabled || desc.per_kind.values().any(|p| p.enabled.unwrap_or(false));
-    if any_description_enabled {
-        if !raw.llm.enabled {
+        if let Some(ep) = &eff.endpoint {
+            if ep.trim().is_empty() {
+                fields.push((
+                    format!("{prefix}.endpoint"),
+                    "endpoint must not be empty".into(),
+                ));
+            }
+        }
+        if eff.max_tokens == 0 {
             fields.push((
-                "description".into(),
-                "an enabled description provider requires llm.enabled = true (type = \"llm\" reuses the [llm] backend)".into(),
-            ));
-        } else if llm.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            fields.push((
-                "description".into(),
-                "an enabled description provider requires a model in [llm]".into(),
+                format!("{prefix}.max_tokens"),
+                "max_tokens must be positive".into(),
             ));
         }
+        if !eff.enabled {
+            return;
+        }
+        if eff.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            fields.push((
+                format!("{prefix}.model"),
+                "model is required when the description provider is enabled".into(),
+            ));
+        }
+        match eff.backend {
+            LlmBackend::Custom => {
+                if eff
+                    .endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    fields.push((
+                        format!("{prefix}.endpoint"),
+                        "endpoint is required for the custom backend".into(),
+                    ));
+                }
+            }
+            LlmBackend::Openrouter | LlmBackend::Openai => {
+                if eff
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    fields.push((
+                        format!("{prefix}.api_key"),
+                        format!(
+                            "api_key is required by the {:?} backend when enabled",
+                            eff.backend
+                        )
+                        .to_lowercase(),
+                    ));
+                }
+            }
+            LlmBackend::Ollama => {
+                if eff
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    fields.push((
+                        format!("{prefix}.api_key"),
+                        "api_key is rejected for the ollama backend".into(),
+                    ));
+                }
+            }
+        }
+    }
+    check_provider("description".into(), desc.base_effective(), &mut fields);
+    for kind in desc.per_kind.keys() {
+        let eff = desc
+            .kind_effective(kind)
+            .expect("per-kind key iterated from the same map");
+        check_provider(format!("description.{kind}"), eff, &mut fields);
     }
 
     // document_extraction
@@ -934,21 +938,6 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         serde_json::to_value(&raw.target_paths).unwrap_or(JsonValue::Null),
     );
     out.insert(
-        "llm".into(),
-        serde_json::json!({
-            "enabled": raw.llm.enabled,
-            "backend": match raw.llm_backend() {
-                LlmBackend::Ollama => "ollama",
-                LlmBackend::Openrouter => "openrouter",
-                LlmBackend::Openai => "openai",
-                LlmBackend::Custom => "custom",
-            },
-            "endpoint": raw.llm.endpoint.as_deref().unwrap_or(raw.llm_backend().default_endpoint()),
-            "model": raw.llm.model,
-            "max_tokens": raw.llm_max_tokens(),
-        }),
-    );
-    out.insert(
         "geocoder".into(),
         serde_json::json!({
             "enabled": raw.geocoder.enabled,
@@ -964,25 +953,40 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         }),
     );
     let mut desc = serde_json::Map::new();
+    let base_eff = raw.description.base_effective();
     if let Some(e) = desc_base_enabled(&raw.description) {
         desc.insert("enabled".into(), JsonValue::Bool(e));
     }
     desc.insert(
         "type".into(),
+        JsonValue::String(base_eff.provider_type.clone()),
+    );
+    desc.insert(
+        "backend".into(),
+        JsonValue::String(llm_backend_name(base_eff.backend).into()),
+    );
+    desc.insert(
+        "endpoint".into(),
         JsonValue::String(
-            raw.description
-                .base
-                .provider_type
+            base_eff
+                .endpoint
                 .clone()
-                .unwrap_or_else(|| "llm".into()),
+                .unwrap_or_else(|| base_eff.backend.default_endpoint().into()),
         ),
     );
+    desc.insert("model".into(), serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null));
+    desc.insert("max_tokens".into(), JsonValue::from(base_eff.max_tokens));
     for (kind, p) in &raw.description.per_kind {
+        let eff = p.effective(&raw.description.base);
         desc.insert(
             kind.clone(),
             serde_json::json!({
-                "enabled": p.enabled.unwrap_or(false),
-                "type": p.provider_type.clone().unwrap_or_else(|| "llm".into()),
+                "enabled": eff.enabled,
+                "type": eff.provider_type,
+                "backend": llm_backend_name(eff.backend),
+                "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.backend.default_endpoint().into()),
+                "model": eff.model,
+                "max_tokens": eff.max_tokens,
             }),
         );
     }
@@ -1039,6 +1043,15 @@ fn desc_base_enabled(d: &DescriptionConfig) -> Option<bool> {
     d.base.enabled
 }
 
+fn llm_backend_name(b: LlmBackend) -> &'static str {
+    match b {
+        LlmBackend::Ollama => "ollama",
+        LlmBackend::Openrouter => "openrouter",
+        LlmBackend::Openai => "openai",
+        LlmBackend::Custom => "custom",
+    }
+}
+
 /// Config hash used by `GET /session` for change detection.
 pub fn config_hash(raw: &RawConfig) -> String {
     use sha2::{Digest, Sha256};
@@ -1068,8 +1081,11 @@ mod tests {
             rc.duplication.large_file_threshold,
             DEFAULT_LARGE_FILE_THRESHOLD
         );
-        assert_eq!(rc.llm_max_tokens(), DEFAULT_MAX_TOKENS);
         assert_eq!(rc.provider_timeout(), DEFAULT_PROVIDER_TIMEOUT_SECONDS);
+        assert_eq!(
+            rc.description.base_effective().max_tokens,
+            DEFAULT_MAX_TOKENS
+        );
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
     }
@@ -1090,23 +1106,45 @@ mod tests {
     fn rejects_bad_description_kind() {
         let err = parse("[description.other]\nenabled = true\n");
         assert!(err.is_err());
-        let ok =
-            parse("[description.photo]\nenabled = true\n[llm]\nenabled = true\nmodel = \"m\"\n");
+        let ok = parse("[description.photo]\nenabled = true\nmodel = \"m\"\n");
         assert!(ok.is_ok());
     }
 
     #[test]
-    fn llm_key_requirements() {
-        assert!(parse("[llm]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err());
+    fn description_key_requirements() {
+        assert!(parse("[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err());
         assert!(parse(
-            "[llm]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\napi_key = \"k\"\n"
+            "[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\napi_key = \"k\"\n"
         )
         .is_ok());
         assert!(parse(
-            "[llm]\nenabled = true\nmodel = \"m\"\nbackend = \"ollama\"\napi_key = \"k\"\n"
+            "[description]\nenabled = true\nmodel = \"m\"\nbackend = \"ollama\"\napi_key = \"k\"\n"
         )
         .is_err());
-        assert!(parse("[llm]\nenabled = true\n").is_err());
+        assert!(parse("[description]\nenabled = true\n").is_err());
+    }
+
+    #[test]
+    fn description_per_kind_fallback() {
+        // A per-kind entry overrides only the keys it sets; enabled and
+        // model inherit from the base entry.
+        let rc = parse(
+            "[description]\nenabled = true\nmodel = \"base\"\n[description.photo]\nmodel = \"vision\"\n",
+        )
+        .unwrap();
+        let photo = rc.description.kind_effective("photo").unwrap();
+        assert!(photo.enabled);
+        assert_eq!(photo.model.as_deref(), Some("vision"));
+        assert_eq!(photo.backend, LlmBackend::Ollama);
+        // An explicitly disabled entry suppresses the base for that kind.
+        let rc = parse(
+            "[description]\nenabled = true\nmodel = \"base\"\n[description.audio]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(!rc.description.kind_effective("audio").unwrap().enabled);
+        // An enabled per-kind entry with no model anywhere is rejected on
+        // its effective settings while the disabled base stays valid.
+        assert!(parse("[description.photo]\nenabled = true\n").is_err());
     }
 
     #[test]
