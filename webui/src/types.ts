@@ -60,6 +60,9 @@ export interface Suggestion {
   selected: boolean;
   status: SuggestionStatus;
   rejection_reason?: string | null;
+  /** True while provider metadata (geocoder/description) is still in
+   * flight; such suggestions are visible but not executable. */
+  metadata_pending?: boolean;
   [key: string]: unknown;
 }
 

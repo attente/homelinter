@@ -43,6 +43,13 @@ pub struct AnalyzedFile {
     pub date_source: &'static str,
     /// Embedded title metadata when an extractor provided one.
     pub embedded_title: Option<String>,
+    /// Reverse-geocoded place name backing the `%l` placeholder. Resolved
+    /// asynchronously by the provider worker after the scan; `None` until
+    /// a provider (or the cache) supplies a value.
+    pub location: Option<String>,
+    /// Description/subject from a content provider, backing `%s`.
+    /// Resolved asynchronously by the provider worker.
+    pub subject: Option<String>,
 }
 
 /// One confirmed duplicate group: files with identical full-content
@@ -133,6 +140,8 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
             extracted_date: date,
             date_source: source,
             embedded_title,
+            location: None,
+            subject: None,
         });
     }
 

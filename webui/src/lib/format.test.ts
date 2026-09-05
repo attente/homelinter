@@ -90,6 +90,13 @@ describe('format', () => {
     expect(del.endsWith('delete')).toBe(true);
   });
 
+  it('row label marks pending provider metadata', () => {
+    const pending = rowLabel(sampleSuggestion({ metadata_pending: true }));
+    expect(pending).toContain('[metadata pending]');
+    const resolved = rowLabel(sampleSuggestion({ metadata_pending: false }));
+    expect(resolved).not.toContain('[metadata pending]');
+  });
+
 
   it('counts and entry lines render reports', () => {
     const entries: ReportEntry[] = [

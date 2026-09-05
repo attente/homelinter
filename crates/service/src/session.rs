@@ -53,6 +53,9 @@ pub struct Session {
     pub summary: Option<ScanSummary>,
     pub degraded_identity: bool,
     pub warnings: Vec<String>,
+    /// Context for refreshing suggestions with late provider results; set
+    /// when a scan publishes its batch, replaced by the next scan.
+    pub provider_ctx: Option<crate::providers::ProviderScanCtx>,
 }
 
 impl Session {
@@ -75,6 +78,7 @@ impl Session {
             summary: None,
             degraded_identity: false,
             warnings: Vec::new(),
+            provider_ctx: None,
         }
     }
 
@@ -192,8 +196,9 @@ impl Session {
     pub fn executable_ids(&self, ids: &[String]) -> Vec<String> {
         ids.iter()
             .filter(|id| {
-                self.suggestion_by_id(id)
-                    .is_some_and(|s| s.status == SuggestionStatus::Pending)
+                self.suggestion_by_id(id).is_some_and(|s| {
+                    s.status == SuggestionStatus::Pending && !s.metadata_pending
+                })
             })
             .cloned()
             .collect()

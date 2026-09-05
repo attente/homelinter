@@ -182,6 +182,25 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
     Ok(out)
 }
 
+/// Rebuild a single move suggestion after one file's provider metadata
+/// changed (location or subject arrived asynchronously). The moved file
+/// stays the same unit, so the suggestion id is stable; only the resolved
+/// `new_path` (and dependents derived from it) may change.
+pub fn rebuild_move_suggestion(
+    f: &AnalyzedFile,
+    fmt: Option<&FormatString>,
+    home: &Path,
+    symlinks: &SymlinkIndex,
+) -> Result<Option<Suggestion>, SuggestError> {
+    let mut by_canon: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, link) in symlinks.entries.iter().enumerate() {
+        if let Some(t) = &link.resolved_target {
+            by_canon.entry(t.clone()).or_default().push(i);
+        }
+    }
+    build_move_suggestion(f, fmt, home, &symlinks.entries, &by_canon)
+}
+
 fn build_move_suggestion(
     f: &AnalyzedFile,
     fmt: Option<&FormatString>,
@@ -266,8 +285,8 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         second,
         title: Some(title),
         author: None,
-        location: None,
-        subject: None,
+        location: f.location.clone(),
+        subject: f.subject.clone(),
         camera: None,
         remote_host: None,
         file_name: Some(

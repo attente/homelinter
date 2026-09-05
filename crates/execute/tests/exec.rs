@@ -348,6 +348,7 @@ fn suggestion_type_serde_roundtrip() {
         dependent_operations: vec![],
         selected: false,
         status: SuggestionStatus::Pending,
+        metadata_pending: false,
         rejection_reason: None,
         provenance: Default::default(),
     };

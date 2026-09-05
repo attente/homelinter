@@ -25,6 +25,9 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

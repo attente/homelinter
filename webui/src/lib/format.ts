@@ -26,8 +26,9 @@ export function rowLabel(s: Suggestion): string {
   const name = tail(s.target, 3);
   const dest = s.new_path ? tail(s.new_path, 3) : 'delete';
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
+  const pending = s.metadata_pending ? ' [metadata pending]' : '';
   const rejected = s.rejection_reason ? ' [rejected]' : '';
-  return `${marker} ${s.type.padEnd(6)} ${s.asset_kind.padEnd(8)} ${name} -> ${dest}${status}${rejected}`;
+  return `${marker} ${s.type.padEnd(6)} ${s.asset_kind.padEnd(8)} ${name} -> ${dest}${status}${pending}${rejected}`;
 }
 
 export interface ReportCounts {

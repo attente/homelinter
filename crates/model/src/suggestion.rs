@@ -27,6 +27,12 @@ pub struct Suggestion {
     pub dependent_operations: Vec<DependentOperation>,
     pub selected: bool,
     pub status: SuggestionStatus,
+    /// True while one or more provider requests (geocoder/description)
+    /// that this suggestion depends on are still in flight. Such
+    /// suggestions are visible but not executable until the requests
+    /// resolve.
+    #[serde(default)]
+    pub metadata_pending: bool,
     /// Machine-readable reason when `status == rejected` (batch validation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection_reason: Option<String>,
@@ -148,6 +154,7 @@ impl Suggestion {
             dependent_operations: dependents,
             selected: false,
             status: SuggestionStatus::Pending,
+            metadata_pending: false,
             rejection_reason: None,
             provenance,
         }
@@ -172,6 +179,7 @@ impl Suggestion {
             dependent_operations: dependents,
             selected: false,
             status: SuggestionStatus::Pending,
+            metadata_pending: false,
             rejection_reason: None,
             provenance,
         }

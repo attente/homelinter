@@ -1,0 +1,893 @@
+//! Provider requests decoupled from the scan pipeline.
+//!
+//! The scan never performs provider I/O (reverse geocoding, LLM
+//! descriptions) itself. It installs a `ProviderScanCtx` on the session and
+//! enqueues `ProviderJob`s into a `JobQueue`. Suggestions whose unit has
+//! outstanding provider requests are published immediately with
+//! `metadata_pending = true`: the user sees the full scan result at once,
+//! but a pending suggestion is not executable until every request it
+//! depends on resolves. A single background worker drains the queue and
+//! fetches requests serially per provider, paced by the provider's own
+//! minimum interval ("Geocoder rate limiting and identification" in
+//! DESIGN.md: nominatim once per second, photon its documented rate). The
+//! persistent cache is consulted before any network I/O and successes are
+//! stored in it afterward. When the last outstanding request of a unit
+//! resolves - on success or on definitive failure - the suggestion is
+//! updated in place: successes overlay their values into the rebuilt move,
+//! failures keep the generated fallbacks, and `metadata_pending` flips to
+//! `false`.
+//!
+//! A provider failure (non-2xx, timeout, malformed response) is never a
+//! scan error: the request is not cached, the suggestion stays published
+//! with its fallback values (no longer pending), and the next scan retries.
+//! Results carry the scan epoch; results for a superseded scan are dropped
+//! without touching the session.
+//!
+//! The scaffold implements the transport for the neutral `custom` geocoder
+//! contract only; the public nominatim/photon/google/mapbox backends and
+//! every description (LLM) backend return "not implemented yet" and thus
+//! behave as ordinary provider failures. `plan_provider_jobs` is a no-op:
+//! provider inputs (GPS coordinates, extracted document text) do not exist
+//! until the metadata extractors of the Analysis Pipeline land, and the
+//! providers are disabled by default, which is the zero-cost idle state.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::header::HeaderValue;
+use hyper::Method;
+use hyper::Request;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::rt::TokioExecutor;
+use serde_json::{json, Value};
+use tokio::sync::Notify;
+
+use homelinter_analyze::Analysis;
+use homelinter_model::asset_kind::AssetKind;
+use homelinter_model::config::{GeocoderService, RawConfig};
+use homelinter_model::format::FormatString;
+use homelinter_model::suggestion::Suggestion;
+use homelinter_scan::SymlinkIndex;
+use homelinter_suggest::rebuild_move_suggestion;
+
+use crate::cache::{cache_key, KIND_DESCRIPTION, KIND_GEOCODE};
+use crate::events::ServerEvent;
+use crate::pipeline::{App, AppHandle};
+
+/// What kind of provider a job fetches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Geocode,
+    Description,
+}
+
+impl ProviderKind {
+    fn kind_tag(self) -> &'static str {
+        match self {
+            ProviderKind::Geocode => KIND_GEOCODE,
+            ProviderKind::Description => KIND_DESCRIPTION,
+        }
+    }
+}
+
+/// Which one unit a provider job refreshes.
+#[derive(Debug, Clone)]
+pub struct UnitRef {
+    /// Scan epoch that produced the job; other epochs are stale.
+    pub epoch: u64,
+    /// Index into `ProviderScanCtx.analysis.files`.
+    pub index: usize,
+    /// The unit's path, re-verified when the result is applied.
+    pub path: PathBuf,
+}
+
+/// The request body for one provider call.
+#[derive(Debug, Clone)]
+pub enum ProviderInput {
+    Geocode {
+        latitude: f64,
+        longitude: f64,
+        language: Option<String>,
+    },
+    /// A description (LLM) request. `text` carries extracted plain text
+    /// when a document extractor produced it; otherwise the provider sees
+    /// the unit path and kind.
+    Describe { text: Option<String> },
+}
+
+/// Provider facts: cache identity, pacing, and transport.
+#[derive(Debug, Clone)]
+pub struct ProviderSettings {
+    /// Cache and pacing identity, e.g. `geocode:nominatim`.
+    pub provider_id: String,
+    /// Provider settings hash joining the cache key; changing the
+    /// endpoint/model/language invalidates prior results.
+    pub settings_hash: [u8; 32],
+    /// Minimum interval between requests to this provider; `0` = none.
+    pub min_interval: Duration,
+    /// Backend identifier (`nominatim`, `photon`, `google`, `mapbox`,
+    /// `custom` for the geocoder; LLM transport names for descriptions).
+    pub backend: String,
+    pub endpoint: String,
+    pub api_key: Option<String>,
+    pub language: Option<String>,
+    pub model: Option<String>,
+    pub max_tokens: Option<u64>,
+}
+
+/// A single queued provider request.
+#[derive(Debug, Clone)]
+pub struct ProviderJob {
+    pub kind: ProviderKind,
+    pub settings: ProviderSettings,
+    pub unit: UnitRef,
+    /// Canonical request tuple for the cache key.
+    pub input_hash: [u8; 32],
+    pub input: ProviderInput,
+}
+
+/// Everything the worker needs to refresh one completed scan's suggestions
+/// once provider results arrive. Installed on the session when the scan
+/// publishes its batch; replaced (with a new epoch) by the next scan.
+#[derive(Debug, Clone)]
+pub struct ProviderScanCtx {
+    pub epoch: u64,
+    pub analysis: Arc<Analysis>,
+    pub symlinks: SymlinkIndex,
+    pub formats: BTreeMap<AssetKind, FormatString>,
+    pub home: PathBuf,
+    /// Provider values per analyzed unit, overlaid on `analysis.files` when
+    /// a suggestion is rebuilt.
+    pub meta: BTreeMap<usize, ProviderUnitMeta>,
+    /// Outstanding provider requests per analyzed unit. A unit's suggestion
+    /// stays `metadata_pending` until this count reaches zero.
+    pub pending: BTreeMap<usize, u32>,
+}
+
+/// Latest provider-derived metadata for one analyzed unit.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderUnitMeta {
+    pub location: Option<String>,
+    pub subject: Option<String>,
+}
+
+/// FIFO queue of provider jobs. The pipeline enqueues synchronously (it may
+/// run on the blocking pool); the worker drains asynchronously.
+pub struct JobQueue {
+    jobs: Mutex<VecDeque<ProviderJob>>,
+    wake: Notify,
+}
+
+impl JobQueue {
+    pub fn new() -> Arc<JobQueue> {
+        Arc::new(JobQueue {
+            jobs: Mutex::new(VecDeque::new()),
+            wake: Notify::new(),
+        })
+    }
+
+    /// Enqueue one job; never waits on the worker.
+    pub fn enqueue(&self, job: ProviderJob) {
+        self.jobs.lock().unwrap().push_back(job);
+        self.wake.notify_waiters();
+    }
+
+    pub fn queued(&self) -> usize {
+        self.jobs.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queued() == 0
+    }
+
+    /// Wait until at least one job exists, then take the whole queue. The
+    /// `Notify` permit state makes an enqueue that lands between the
+    /// lock-check and the wait wake us on the next loop iteration.
+    async fn drain_ready(&self) -> Vec<ProviderJob> {
+        loop {
+            let notified = self.wake.notified();
+            {
+                let mut jobs = self.jobs.lock().unwrap();
+                if !jobs.is_empty() {
+                    return jobs.drain(..).collect();
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Spawn the provider worker to run for the service's lifetime.
+pub fn spawn(app: AppHandle) {
+    tokio::spawn(run_provider_worker(app));
+}
+
+/// The background request loop. One request in flight at a time, paced per
+/// provider, cache-first, failure-tolerant, session-applying on success.
+pub async fn run_provider_worker(app: AppHandle) {
+    let queue = app.provider_queue.clone();
+    let mut last_start: BTreeMap<String, Instant> = BTreeMap::new();
+    loop {
+        let jobs = queue.drain_ready().await;
+        for job in jobs {
+            if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
+                // The scan that produced this job has been superseded.
+                continue;
+            }
+            pace(&job.settings, &mut last_start).await;
+            let value = match cache_get(&app, &job).await {
+                Some(v) => Some(v),
+                None => {
+                    let timeout = provider_timeout(&app).await;
+                    match tokio::time::timeout(timeout, invoke(&job)).await {
+                        Ok(Ok(v)) => {
+                            cache_put(&app, &job, &v).await;
+                            Some(v)
+                        }
+                        // Failure or timeout: not cached, the pending
+                        // suggestion stays published with its fallbacks,
+                        // retried on the next scan.
+                        Ok(Err(_)) | Err(_) => None,
+                    }
+                }
+            };
+            // Both outcomes resolve the unit's pending request: success
+            // overlays the value, failure publishes the fallback.
+            resolve_provider_job(&app, &job, value.as_deref()).await;
+        }
+    }
+}
+
+/// Sleep so consecutive requests to the same provider are at least
+/// `min_interval` apart, then record the start time.
+async fn pace(settings: &ProviderSettings, last: &mut BTreeMap<String, Instant>) {
+    if settings.min_interval.is_zero() {
+        return;
+    }
+    if let Some(prev) = last.get(&settings.provider_id) {
+        let elapsed = prev.elapsed();
+        if elapsed < settings.min_interval {
+            tokio::time::sleep(settings.min_interval - elapsed).await;
+        }
+    }
+    last.insert(settings.provider_id.clone(), Instant::now());
+}
+
+async fn provider_timeout(app: &App) -> Duration {
+    let sess = app.session.lock().await;
+    Duration::from_secs(sess.config.provider_timeout())
+}
+
+async fn cache_get(app: &App, job: &ProviderJob) -> Option<String> {
+    let cache = app.cache.lock().await;
+    let key = cache_key(
+        job.kind.kind_tag(),
+        &job.settings.provider_id,
+        &job.settings.settings_hash,
+        &job.input_hash,
+    );
+    cache
+        .get(&key, &job.settings.provider_id)
+        .ok()
+        .flatten()
+}
+
+async fn cache_put(app: &App, job: &ProviderJob, value: &str) {
+    let cache = app.cache.lock().await;
+    let key = cache_key(
+        job.kind.kind_tag(),
+        &job.settings.provider_id,
+        &job.settings.settings_hash,
+        &job.input_hash,
+    );
+    let _ = cache.put(
+        &key,
+        job.kind.kind_tag(),
+        &job.settings.provider_id,
+        &job.input_hash,
+        value,
+    );
+}
+
+/// Exercise one provider request. The only implemented transport today is
+/// the `custom` geocoder neutral contract from "Provider Plugins": `POST
+/// endpoint` with `{"latitude", "longitude", "language"}` answering
+/// `{"name": ...}`. Everything else degrades to a provider failure.
+async fn invoke(job: &ProviderJob) -> Result<String, String> {
+    match job.kind {
+        ProviderKind::Geocode => {
+            let (lat, lon, language) = match &job.input {
+                ProviderInput::Geocode {
+                    latitude,
+                    longitude,
+                    language,
+                } => (*latitude, *longitude, language.as_deref()),
+                ProviderInput::Describe { .. } => {
+                    return Err("mismatched provider input".to_string())
+                }
+            };
+            match job.settings.backend.as_str() {
+                "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await,
+                backend => Err(format!("geocoder backend '{backend}' is not implemented yet")),
+            }
+        }
+        ProviderKind::Description => {
+            Err("description (LLM) backends are not implemented yet".to_string())
+        }
+    }
+}
+
+/// Reverse geocode against the neutral `custom` contract.
+async fn neutral_reverse_geocode(
+    s: &ProviderSettings,
+    latitude: f64,
+    longitude: f64,
+    language: Option<&str>,
+) -> Result<String, String> {
+    if s.endpoint.is_empty() {
+        return Err("custom geocoder needs an endpoint".to_string());
+    }
+    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let body: Value = json!({
+        "latitude": latitude,
+        "longitude": longitude,
+        "language": language.unwrap_or(""),
+    });
+    let uri: hyper::Uri = s
+        .endpoint
+        .parse()
+        .map_err(|e| format!("invalid geocoder endpoint: {e}"))?;
+    let mut builder = Request::builder().method(Method::POST).uri(uri);
+    if let Some(key) = &s.api_key {
+        builder = builder.header(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
+        );
+    }
+    let bytes = serde_json::to_vec(&body).map_err(|e| format!("geocoder serialize: {e}"))?;
+    builder = builder.header("content-type", "application/json");
+    let req = builder
+        .body(Full::new(Bytes::from(bytes)))
+        .map_err(|e| format!("geocoder request build: {e}"))?;
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| format!("geocoder transport error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("geocoder body read: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        return Err(format!("geocoder returned {}", status.as_u16()));
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "geocoder response is not JSON".to_string())?;
+    value["name"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "geocoder response has no 'name' field".to_string())
+}
+
+/// Resolve one provider job for a unit: record a successful value (when
+/// `Some`), decrement the unit's pending count, and - once the last
+/// outstanding request resolves - update the unit's suggestion in place:
+/// `metadata_pending` flips to `false`, and on success the move is rebuilt
+/// with the collected provider values (selection, status, and rejection
+/// reason are preserved). Clients receive an updated `suggestion.batch`
+/// only when something changed.
+///
+/// Returns `false` when nothing was updated (stale epoch, scan not yet
+/// published, unit mismatch, pending requests remain, or no suggestion for
+/// the unit).
+pub async fn resolve_provider_job(
+    app: &AppHandle,
+    job: &ProviderJob,
+    value: Option<&str>,
+) -> bool {
+    let mut sess = app.session.lock().await;
+    if sess.summary.is_none() {
+        // The scan has not published its batch yet.
+        return false;
+    }
+    // Phase 1: ctx bookkeeping - record the value and decrement the unit's
+    // pending count.
+    {
+        let Some(ctx) = &mut sess.provider_ctx else {
+            return false;
+        };
+        if ctx.epoch != job.unit.epoch {
+            return false;
+        }
+        let Some(f) = ctx.analysis.files.get(job.unit.index) else {
+            return false;
+        };
+        if f.path != job.unit.path {
+            return false;
+        }
+        if let Some(v) = value {
+            let unit = ctx.meta.entry(job.unit.index).or_default();
+            match job.kind {
+                ProviderKind::Geocode => unit.location = Some(v.to_string()),
+                ProviderKind::Description => unit.subject = Some(v.to_string()),
+            }
+        }
+        let Some(pending) = ctx.pending.get_mut(&job.unit.index) else {
+            // No outstanding job was tracked for this unit.
+            return false;
+        };
+        *pending = pending.saturating_sub(1);
+        if *pending > 0 {
+            // More requests for this unit are outstanding; stay pending.
+            return false;
+        }
+        ctx.pending.remove(&job.unit.index);
+    }
+
+    // Phase 2: the unit's last request resolved. Update its suggestion in
+    // place by stable id.
+    let (id, rebuilt) = {
+        let ctx = sess.provider_ctx.as_ref().unwrap();
+        let f = &ctx.analysis.files[job.unit.index];
+        let mut trial = f.clone();
+        if let Some(m) = ctx.meta.get(&job.unit.index) {
+            trial.location = m.location.clone().or(trial.location);
+            trial.subject = m.subject.clone().or(trial.subject);
+        }
+        let fmt = ctx.formats.get(&trial.kind);
+        let rebuilt = rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks);
+        (Suggestion::id_for_target(&f.path), rebuilt)
+    };
+    let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
+        return false;
+    };
+    match rebuilt {
+        // Rebuild error: keep the published fallback, just clear the
+        // pending flag.
+        Err(_) => {
+            sess.suggestions[pos].metadata_pending = false;
+        }
+        // The file now stays put: the move disappears from the batch.
+        Ok(None) => {
+            sess.suggestions.remove(pos);
+        }
+        Ok(Some(mut s)) => {
+            let prior = &sess.suggestions[pos];
+            s.selected = prior.selected;
+            s.status = prior.status;
+            s.rejection_reason = prior.rejection_reason.clone();
+            s.metadata_pending = false;
+            sess.suggestions[pos] = s;
+        }
+    }
+    let mut summary = sess.summary_of_batch();
+    if let Some(prev) = &sess.summary {
+        summary.total_files_scanned = prev.total_files_scanned;
+        summary.total_symlinks_indexed = prev.total_symlinks_indexed;
+    }
+    sess.summary = Some(summary);
+    let items = sess.suggestions.clone();
+    let total = items.len();
+    drop(sess);
+    app.events.publish(ServerEvent::SuggestionBatch { items, total });
+    true
+}
+
+/// Build the geocoder provider settings from the effective configuration.
+/// `None` when the geocoder is disabled.
+pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
+    if !cfg.geocoder.enabled {
+        return None;
+    }
+    let service = cfg.geocoder_service();
+    let (backend, built_in_endpoint, min_interval) = match service {
+        GeocoderService::Nominatim => (
+            "nominatim",
+            "https://nominatim.openstreetmap.org",
+            Duration::from_secs(1),
+        ),
+        GeocoderService::Photon => ("photon", "https://photon.komoot.io", Duration::from_secs(1)),
+        GeocoderService::Google => ("google", "https://maps.googleapis.com/maps/api", Duration::ZERO),
+        GeocoderService::Mapbox => ("mapbox", "https://api.mapbox.com", Duration::ZERO),
+        GeocoderService::Custom => ("custom", "", Duration::ZERO),
+    };
+    let endpoint = cfg
+        .geocoder
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| built_in_endpoint.to_string());
+    let mut provider_id = format!("geocode:{backend}");
+    if service == GeocoderService::Custom && !endpoint.is_empty() {
+        provider_id.push(':');
+        provider_id.push_str(&endpoint);
+    }
+    let language = cfg.geocoder.language.clone();
+    let api_key = cfg.geocoder.api_key.clone();
+    let settings_hash = sha256(&[
+        backend.as_bytes(),
+        endpoint.as_bytes(),
+        language.as_deref().unwrap_or("").as_bytes(),
+    ]);
+    Some(ProviderSettings {
+        provider_id,
+        settings_hash,
+        min_interval,
+        backend: backend.to_string(),
+        endpoint,
+        api_key,
+        language,
+        model: None,
+        max_tokens: None,
+    })
+}
+
+/// Plan provider work for a completed scan: the requests the cache does
+/// not already satisfy, one job per unit per enabled provider. The pipeline
+/// calls this before publishing the batch so units with jobs have their
+/// suggestions marked `metadata_pending`.
+///
+/// The scaffold has no provider inputs yet: GPS coordinates for photos and
+/// videos (the geocoder input) and extracted plain text for documents (the
+/// description input) both come from the Analysis Pipeline metadata
+/// extractors, which are not implemented, and every description backend is
+/// unimplemented, so this is currently a no-op. The signature is the
+/// contract the extractor work plugs into.
+pub fn plan_provider_jobs(
+    _app: &AppHandle,
+    _analysis: &Analysis,
+    _formats: &BTreeMap<AssetKind, FormatString>,
+    _epoch: u64,
+) -> Vec<ProviderJob> {
+    Vec::new()
+}
+
+/// Deterministic settings hash builder for cache keys. Any field change
+/// yields a different hash, invalidating prior cached results.
+pub fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in parts {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part);
+    }
+    h.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::SystemTime;
+
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    use homelinter_analyze::AnalyzedFile;
+    use homelinter_model::suggestion::{Provenance, ScanSummary, SessionState};
+    use homelinter_suggest::{generate_suggestions, GenerateInput};
+
+    use crate::build_service;
+    use crate::pipeline::AppHandle;
+    use crate::ServiceOptions;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "hl-prov-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A session primed like the end of a real scan: one photo whose move
+    /// suggestion resolves with an empty `%l`, ready for a late geocode.
+    async fn primed_app() -> (AppHandle, u64) {
+        let dir = tmp_dir("app");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let built = build_service(ServiceOptions {
+            home_override: Some(home.clone()),
+            data_dir_override: Some(dir.join("data")),
+            ..Default::default()
+        })
+        .unwrap();
+        let app = built.app;
+        let epoch = 1u64;
+        app.provider_epoch.store(epoch, Ordering::SeqCst);
+
+        let photo = home.join("IMG_0001.jpg");
+        std::fs::write(&photo, b"photo bytes").unwrap();
+
+        let file = AnalyzedFile {
+            path: photo.clone(),
+            kind: AssetKind::Photo,
+            size: 11,
+            modified: SystemTime::now(),
+            created: None,
+            full_hash: None,
+            provenance: Provenance::default(),
+            extracted_date: None,
+            date_source: "",
+            embedded_title: None,
+            location: None,
+            subject: None,
+        };
+        let analysis = Arc::new(Analysis {
+            files: vec![file],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%Y/%l/%f").unwrap(),
+        );
+        let symlinks = SymlinkIndex::default();
+
+        let input = GenerateInput {
+            analysis: &analysis,
+            symlinks: &symlinks,
+            formats: &formats,
+            home: &home,
+        };
+        let suggestions = generate_suggestions(&input).unwrap().suggestions;
+        assert_eq!(suggestions.len(), 1);
+        assert!(!suggestions[0].new_path.as_deref().unwrap().contains("paris"));
+
+        let mut sess = app.session.lock().await;
+        let mut suggestion = suggestions.into_iter().next().unwrap();
+        suggestion.metadata_pending = true;
+        sess.provider_ctx = Some(ProviderScanCtx {
+            epoch,
+            analysis: analysis.clone(),
+            symlinks: symlinks.clone(),
+            formats: formats.clone(),
+            home: home.clone(),
+            meta: Default::default(),
+            pending: BTreeMap::from([(0, 1)]),
+        });
+        sess.suggestions = vec![suggestion];
+        sess.summary = Some(ScanSummary::default());
+        sess.state = SessionState::Ready;
+        drop(sess);
+        (app, epoch)
+    }
+
+    /// A stub `custom` geocoder: POST / answers the neutral contract.
+    async fn stub_geocoder() -> u16 {
+        let router = Router::new()
+            .route("/", post(|Json(_body): Json<Value>| async move {
+                Json(json!({ "name": "paris" }))
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        port
+    }
+
+    async fn geocode_job(app: &AppHandle, port: u16, epoch: u64) -> ProviderJob {
+        let mut job = ProviderJob {
+            kind: ProviderKind::Geocode,
+            settings: ProviderSettings {
+                provider_id: format!("geocode:custom:{port}"),
+                settings_hash: sha256(&[b"custom", port.to_string().as_bytes()]),
+                min_interval: Duration::ZERO,
+                backend: "custom".to_string(),
+                endpoint: format!("http://127.0.0.1:{port}"),
+                api_key: None,
+                language: None,
+                model: None,
+                max_tokens: None,
+            },
+            unit: UnitRef {
+                epoch,
+                index: 0,
+                path: PathBuf::new(),
+            },
+            input_hash: sha256(&[&[1u8], b"latlon"]),
+            input: ProviderInput::Geocode {
+                latitude: 48.8566,
+                longitude: 2.3522,
+                language: None,
+            },
+        };
+        let sess = app.session.lock().await;
+        job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
+            .path
+            .clone();
+        drop(sess);
+        job
+    }
+
+    #[tokio::test]
+    async fn worker_fetches_applies_and_caches() {
+        let (app, epoch) = primed_app().await;
+        let port = stub_geocoder().await;
+        let queue = app.provider_queue.clone();
+        let job = geocode_job(&app, port, epoch).await;
+        queue.enqueue(job.clone());
+        spawn(app.clone());
+
+        // Wait for the pending flag to clear with the geocoded location.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut refreshed = false;
+        while Instant::now() < deadline {
+            let sess = app.session.lock().await;
+            let s = sess.suggestions.first().cloned();
+            refreshed = s.is_some_and(|s| {
+                !s.metadata_pending
+                    && s.new_path.as_deref().is_some_and(|p| p.contains("paris"))
+            });
+            drop(sess);
+            if refreshed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(refreshed, "geocoded path never appeared");
+
+        // The result was cached under the provider identity.
+        let cache = app.cache.lock().await;
+        let key = super::cache_key(
+            KIND_GEOCODE,
+            &job.settings.provider_id,
+            &job.settings.settings_hash,
+            &job.input_hash,
+        );
+        assert_eq!(
+            cache
+                .get(&key, &job.settings.provider_id)
+                .unwrap()
+                .as_deref(),
+            Some("paris")
+        );
+    }
+
+    #[tokio::test]
+    async fn pacing_respects_min_interval() {
+        let settings = ProviderSettings {
+            provider_id: "geocode:nominatim".to_string(),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::from_millis(150),
+            backend: "nominatim".into(),
+            endpoint: "x".into(),
+            api_key: None,
+            language: None,
+            model: None,
+            max_tokens: None,
+        };
+        let mut last = BTreeMap::new();
+        pace(&settings, &mut last).await;
+        let t0 = Instant::now();
+        pace(&settings, &mut last).await;
+        assert!(
+            t0.elapsed() >= Duration::from_millis(140),
+            "pacing fell short"
+        );
+
+        // A different provider is never held back.
+        let mut fast = settings.clone();
+        fast.provider_id = "geocode:custom".into();
+        fast.min_interval = Duration::ZERO;
+        let t1 = Instant::now();
+        pace(&fast, &mut last).await;
+        assert!(t1.elapsed() < Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn stale_epoch_result_is_dropped() {
+        let (app, epoch) = primed_app().await;
+        let job = geocode_job(&app, 9, epoch + 1).await; // wrong epoch
+        let applied = resolve_provider_job(&app, &job, Some("paris")).await;
+        assert!(!applied);
+        let sess = app.session.lock().await;
+        // Nothing changed: the suggestion stays pending and non-executable.
+        assert!(sess.suggestions[0].metadata_pending);
+        assert!(sess
+            .executable_ids(&[sess.suggestions[0].id.clone()])
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_until_all_jobs_resolve() {
+        let (app, epoch) = primed_app().await;
+        let port = stub_geocoder().await;
+        let mut geo = geocode_job(&app, port, epoch).await;
+        let mut desc = geo.clone();
+        desc.kind = ProviderKind::Description;
+        desc.input = ProviderInput::Describe { text: None };
+        desc.input_hash = sha256(&[&[2u8], b"desc"]);
+        desc.settings.provider_id = "describe:none".into();
+
+        // Two outstanding requests for unit 0.
+        {
+            let mut sess = app.session.lock().await;
+            sess.provider_ctx.as_mut().unwrap().pending.insert(0, 2);
+        }
+
+        // The geocode success alone must not clear the pending flag.
+        let resolved = resolve_provider_job(&app, &geo, Some("paris")).await;
+        assert!(!resolved);
+        let sess = app.session.lock().await;
+        assert!(sess.suggestions[0].metadata_pending);
+        assert!(sess
+            .executable_ids(&[sess.suggestions[0].id.clone()])
+            .is_empty());
+        drop(sess);
+
+        // The failing description resolves the unit: the suggestion
+        // publishes the geocoded location and becomes executable.
+        let resolved = resolve_provider_job(&app, &desc, None).await;
+        assert!(resolved);
+        let sess = app.session.lock().await;
+        assert!(!sess.suggestions[0].metadata_pending);
+        let p = sess.suggestions[0].new_path.clone().unwrap_or_default();
+        assert!(p.contains("paris"), "geocode overlay missing: {p}");
+        assert_eq!(
+            sess.executable_ids(&[sess.suggestions[0].id.clone()]),
+            vec![sess.suggestions[0].id.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_provider_clears_pending_keeps_fallback() {
+        let (app, epoch) = primed_app().await;
+        let job = geocode_job(&app, 1, epoch).await;
+        // The provider failed: the suggestion stays published with its
+        // fallback path and is no longer pending.
+        let resolved = resolve_provider_job(&app, &job, None).await;
+        assert!(resolved);
+        let sess = app.session.lock().await;
+        assert!(!sess.suggestions[0].metadata_pending);
+        assert!(sess.suggestions[0]
+            .new_path
+            .as_deref()
+            .unwrap()
+            .contains("unknown"));
+    }
+
+    #[test]
+    fn geocoder_settings_from_config() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+            language = "en"
+            "#,
+        )
+        .unwrap();
+        let s = geocoder_settings(&cfg).unwrap();
+        assert_eq!(s.backend, "custom");
+        assert_eq!(s.endpoint, "http://geo.local");
+        assert_eq!(s.min_interval, Duration::ZERO);
+        assert_eq!(s.language.as_deref(), Some("en"));
+
+        // Disabled -> None.
+        let off: RawConfig = toml::from_str("").unwrap();
+        assert!(geocoder_settings(&off).is_none());
+
+        // Nominatim carries the built-in public pace.
+        let nom: RawConfig =
+            toml::from_str("[geocoder]\nenabled = true\n").unwrap();
+        let s = geocoder_settings(&nom).unwrap();
+        assert_eq!(s.backend, "nominatim");
+        assert_eq!(s.min_interval, Duration::from_secs(1));
+    }
+}

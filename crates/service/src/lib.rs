@@ -10,6 +10,7 @@ pub mod cache;
 pub mod events;
 mod http;
 pub mod pipeline;
+pub mod providers;
 pub mod session;
 
 pub use http::router;
@@ -77,12 +78,16 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
     let audit = audit::AuditLog::open(data_dir.join("audit.ndjson"));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let provider_queue = providers::JobQueue::new();
+
     let app = Arc::new(App {
         session: Mutex::new(session),
         events: EventBus::new(),
         cache: Mutex::new(cache),
         audit,
         cancel: AtomicU64::new(0),
+        provider_epoch: AtomicU64::new(0),
+        provider_queue: provider_queue.clone(),
         cli_config: opts.cli_config,
         home_override: opts.home_override,
         web_dir: opts.web_dir,
@@ -104,6 +109,9 @@ pub async fn serve(
     app: Arc<App>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
+    // The provider worker (background geocoding/description fetcher) runs
+    // for the service's lifetime alongside the HTTP server.
+    providers::spawn(app.clone());
     axum::serve(listener, http::router(app))
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.changed().await;

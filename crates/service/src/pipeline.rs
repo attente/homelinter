@@ -43,6 +43,12 @@ pub struct App {
     /// Watch channel: a `POST /api/v1/shutdown` sends `true` here and the
     /// HTTP server shuts down gracefully.
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Background provider (geocoder/description) request queue drained by
+    /// the rate-limited worker spawned in `serve`.
+    pub provider_queue: Arc<crate::providers::JobQueue>,
+    /// Scan epoch for provider results: incremented per scan start; jobs
+    /// carrying an older epoch are dropped by the worker.
+    pub provider_epoch: AtomicU64,
 }
 
 pub type AppHandle = Arc<App>;
@@ -77,6 +83,9 @@ fn phase_progress(phase: &'static str, scanned: u64, start: Instant) -> ServerEv
 pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     let home = effective_home(&app);
     let cancel_token = app.cancel.load(Ordering::SeqCst);
+    // Provider results are gated by the epoch of the scan that enqueued
+    // them; superseded scans' outstanding jobs are dropped without effect.
+    let provider_epoch = app.provider_epoch.fetch_add(1, Ordering::SeqCst);
     let start = Instant::now();
 
     let (scan_opts, threshold) = {
@@ -128,7 +137,7 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     })
     .await;
     let analysis = match analysis {
-        Ok(a) => a,
+        Ok(a) => Arc::new(a),
         Err(e) => return fail(app.clone(), format!("analysis task panicked: {e}")).await,
     };
     if is_cancelled(&app, cancel_token) {
@@ -153,11 +162,12 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     let analysis2 = analysis.clone();
     let symlinks = scan.symlinks.clone();
     let home3 = home.clone();
+    let formats3 = formats.clone();
     let generated = tokio::task::spawn_blocking(move || {
         let input = GenerateInput {
             analysis: &analysis2,
             symlinks: &symlinks,
-            formats: &formats,
+            formats: &formats3,
             home: &home3,
         };
         generate_suggestions(&input)
@@ -202,16 +212,59 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     let total_files = analysis.files.len() as u64;
     let total_symlinks = scan.symlinks.entries.len() as u64;
 
+    // Plan provider work before publishing: suggestions whose unit has
+    // outstanding provider requests are published immediately but marked
+    // `metadata_pending`, so the user sees the full scan result yet can
+    // never execute a move built on incomplete metadata.
+    let provider_jobs = crate::providers::plan_provider_jobs(
+        &app,
+        &analysis,
+        &formats,
+        provider_epoch,
+    );
+    let mut pending: std::collections::BTreeMap<usize, u32> =
+        std::collections::BTreeMap::new();
+    for job in &provider_jobs {
+        *pending.entry(job.unit.index).or_default() += 1;
+    }
+
     {
         let mut sess = app.session.lock().await;
         sess.state = SessionState::Ready;
-        sess.suggestions = suggestions;
         sess.degraded_identity = analysis.degraded_identity;
         sess.warnings = analysis
             .groups
             .iter()
             .filter_map(|g| g.metadata_warning.clone())
             .collect();
+        // Provider context: lets the background worker refresh this scan's
+        // provider-dependent move suggestions when geocoder or description
+        // results arrive, without re-running the scan.
+        sess.provider_ctx = Some(crate::providers::ProviderScanCtx {
+            epoch: provider_epoch,
+            analysis: analysis.clone(),
+            symlinks: scan.symlinks.clone(),
+            formats: formats.clone(),
+            home: home.clone(),
+            meta: Default::default(),
+            pending: pending.clone(),
+        });
+        if !pending.is_empty() {
+            // Mark suggestions whose unit still has outstanding provider
+            // jobs as metadata-pending (non-executable until resolved).
+            let unit_of: std::collections::BTreeMap<String, usize> = analysis
+                .files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (Suggestion::id_for_target(&f.path), i))
+                .collect();
+            for s in suggestions.iter_mut() {
+                if unit_of.get(&s.id).is_some_and(|i| pending.contains_key(i)) {
+                    s.metadata_pending = true;
+                }
+            }
+        }
+        sess.suggestions = suggestions;
         let mut summary = sess.summary_of_batch();
         summary.total_files_scanned = total_files;
         summary.total_symlinks_indexed = total_symlinks;
@@ -231,6 +284,14 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
         });
         app.events.publish(ServerEvent::ScanComplete { summary });
         app.events.publish(ServerEvent::State(SessionState::Ready));
+    }
+
+    // Enqueue provider work (reverse geocoding, descriptions). The worker
+    // fetches these in the background with per-provider rate limiting and
+    // clears each suggestion's pending flag as its requests resolve; the
+    // scan itself was never blocked on them.
+    for job in provider_jobs {
+        app.provider_queue.enqueue(job);
     }
 }
 
@@ -334,7 +395,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                 .enumerate()
                 .find(|(_, s)| &s.id == id)
             {
-                if s.status == SuggestionStatus::Pending {
+                if s.status == SuggestionStatus::Pending && !s.metadata_pending {
                     batch.push((i, s.sort_key()));
                 }
             }

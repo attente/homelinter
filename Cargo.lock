@@ -720,6 +720,8 @@ dependencies = [
  "homelinter-scan",
  "homelinter-suggest",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "rand",
  "rusqlite",
  "serde",

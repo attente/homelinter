@@ -61,6 +61,7 @@ struct Row {
     reason: String,
     rejection: String,
     dependents: Vec<String>,
+    pending_meta: bool,
 }
 
 impl Row {
@@ -110,12 +111,13 @@ impl Row {
             new_path: str_field(v, "new_path"),
             reason: str_field(v, "reason"),
             rejection: v["rejection_reason"].as_str().unwrap_or("").to_string(),
+            pending_meta: v["metadata_pending"].as_bool().unwrap_or(false),
             dependents,
         }
     }
 
     fn is_executable(&self) -> bool {
-        self.status == "pending" || self.status == "executed"
+        (self.status == "pending" || self.status == "executed") && !self.pending_meta
     }
 }
 
@@ -1290,8 +1292,13 @@ fn row_label(r: &Row) -> Line<'static> {
     } else {
         " [rejected]".to_string()
     };
+    let pending = if r.pending_meta {
+        " [metadata pending]".to_string()
+    } else {
+        String::new()
+    };
     let text = format!(
-        "{marker} {:<6} {:<8} {name} -> {dest}{status}{reject}",
+        "{marker} {:<6} {:<8} {name} -> {dest}{status}{pending}{reject}",
         r.typ, r.kind
     );
     let color = if r.selected {
@@ -1497,6 +1504,15 @@ mod tests {
         assert_eq!(r.new_path, "/home/a/Pictures/2024/IMG_1.jpg");
         assert_eq!(r.dependents.len(), 1);
         assert!(r.dependents[0].contains("repair_symlink"));
+        assert!(r.is_executable());
+    }
+
+    #[test]
+    fn pending_metadata_is_not_executable() {
+        let mut r = sample_row();
+        r.pending_meta = true;
+        assert!(!r.is_executable());
+        r.pending_meta = false;
         assert!(r.is_executable());
     }
 
