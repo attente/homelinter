@@ -1,0 +1,80 @@
+# homelinter configuration template.
+# A working example validated against the current schema by the test in
+# crates/homelinter/tests/template.rs; it must be updated alongside any
+# configuration schema change.
+# Use with: homelinter --config defaults.toml
+# Placeholders: %f original filename, %F normalized name, %n stem, %e
+# extension, %Y/%m/%d date parts, %a artist/author, %t title, %s
+# description, %l location, %k asset kind. See DESIGN.md "Destination Path
+# Format Strings" for the full placeholder list and sanitization rules.
+
+[target_paths]
+# Destination per asset kind, relative to $HOME (or absolute). Each value
+# must contain at least one placeholder. Defaults shown for reference:
+document   = "Documents/%f"
+photo      = "Pictures/%Y/%m/%f"
+video      = "Videos/%Y/%m/%f"
+audio      = "Music/%f"
+repository = "Projects/%f"
+archive    = "Archives/%f"
+data       = "Data/%f"
+executable = "bin/%f"
+other      = "Other/%f"
+
+[llm]
+# Content descriptions via an LLM. Requires a reachable backend when
+# enabled; model is required then, api_key only for openrouter/openai.
+enabled = false
+backend = "ollama"          # ollama | openrouter | openai | custom
+endpoint = "http://localhost:11434"
+model = ""                  # required when enabled = true
+api_key = ""                # optional; sent as Authorization: Bearer
+max_tokens = 512
+
+[geocoder]
+# Reverse geocoding for GPS-tagged photos (%l). Public services are
+# rate-limited (nominatim: 1 req/s). google/mapbox require api_key.
+enabled = false
+service = "nominatim"       # nominatim | photon | google | mapbox | custom
+endpoint = "https://nominatim.openstreetmap.org"
+api_key = ""
+language = "en"
+user_agent_contact = ""     # recommended for public services
+
+[description]
+# Provider for %s (content description). Only type = "llm" is implemented;
+# it reuses [llm]. Per-kind overrides: [description.photo] etc. with
+# enabled = false to suppress for that kind.
+enabled = false
+type = "llm"
+
+[document_extraction]
+# Text extraction before description generation. {path} is the input file;
+# commands run directly, never through a shell. Empty array disables a
+# format. Defaults: pdftotext for pdf, pandoc for docx/odt/epub.
+# pdf  = ["pdftotext", "-layout", "{path}", "-"]
+# docx = ["pandoc", "{path}", "-t", "plain"]
+
+[duplication]
+# Files above this size (bytes) use the streamed full-content hash path.
+large_file_threshold = 104857600
+
+[scan]
+# Glob patterns for primary discovery. Patterns with a separator match
+# relative to the scan root; without one, match the filename at any depth.
+exclude_paths = [".cache/**", "build/**", "node_modules/**"]
+# Windows only: explorer (default) | attribute | dotfiles.
+# hidden_definition = "explorer"
+
+[output]
+format = "pretty"           # pretty | json | toml
+
+[cache]
+# Persistent provider cache in the per-user app-data directory.
+enabled = true
+
+[limits]
+# Bounds on external calls; never infinite. Overruns degrade gracefully.
+provider_timeout_seconds = 120
+tool_timeout_seconds = 30
+tool_stdout_max_bytes = 16777216
