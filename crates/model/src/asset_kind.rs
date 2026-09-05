@@ -68,7 +68,7 @@ impl AssetKind {
         match self {
             AssetKind::Document => "Documents/%f",
             AssetKind::Photo => "Pictures/%Y/%m/%f",
-            AssetKind::Video => "Videos/%Y/%f",
+            AssetKind::Video => "Videos/%Y/%m/%f",
             AssetKind::Audio => "Music/%f",
             AssetKind::Repository => "Projects/%f",
             AssetKind::Archive => "Archives/%f",

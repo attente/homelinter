@@ -220,7 +220,7 @@ When neither configuration nor inference supplies a format string for a kind, th
 |---|---|
 | `document` | `Documents/%f` |
 | `photo` | `Pictures/%Y/%m/%f` |
-| `video` | `Videos/%Y/%f` |
+| `video` | `Videos/%Y/%m/%f` |
 | `audio` | `Music/%f` |
 | `repository` | `Projects/%f` |
 | `archive` | `Archives/%f` |
@@ -245,7 +245,7 @@ audio = "Music/%a/%Y/%t.%e"
 CLI override:
 
 ```text
-homelinter --target-path photo='Pictures/%Y/%m/%f' --target-path video='Videos/%Y/%f'
+homelinter --target-path photo='Pictures/%Y/%m/%f' --target-path video='Videos/%Y/%m/%f'
 ```
 
 Locations and descriptions:
