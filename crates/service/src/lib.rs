@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod cache;
+mod document_text;
 pub mod events;
 mod http;
 pub mod pipeline;

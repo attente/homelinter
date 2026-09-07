@@ -27,6 +27,7 @@ pub use doc_pdfinfo::PdfInfoExtractor;
 pub use exiftool::ExifToolExtractor;
 pub use extractor::{merge_meta, EmbeddedMeta, ExtractionContext, MetadataExtractor};
 pub use repo::{RepoAnalyzer, RepoMeta};
+pub use tool_runner::run_capture;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -29,8 +29,10 @@
 //! behave as ordinary provider failures. Jobs are planned per unit only
 //! when the destination format for the unit's kind uses the corresponding
 //! placeholder (`%l` for the geocoder, `%s` for descriptions); provider
-//! inputs that do exist (GPS coordinates from EXIF) are wired in, while
-//! document-text extraction remains future extractor work.
+//! inputs that do exist (GPS coordinates from EXIF) are wired in, and
+//! document text for description prompts is extracted in the worker per
+//! the `[document_extraction]` section (configured commands, falling back
+//! to `pdftotext`/`pandoc` when on the PATH; see `document_text`).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -55,6 +57,7 @@ use homelinter_model::config::{GeocoderService, RawConfig};
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
 use homelinter_scan::SymlinkIndex;
+use homelinter_scan::ToolSet;
 use homelinter_suggest::rebuild_move_suggestion;
 
 use crate::cache::{cache_key, KIND_DESCRIPTION, KIND_GEOCODE};
@@ -214,6 +217,9 @@ pub fn spawn(app: AppHandle) {
 pub async fn run_provider_worker(app: AppHandle) {
     let queue = app.provider_queue.clone();
     let mut last_start: BTreeMap<String, Instant> = BTreeMap::new();
+    // Tool availability for document-text defaults; detected once per
+    // worker lifetime, exactly like the scan pipeline's ToolSet.
+    let tools = ToolSet::detect();
     loop {
         let jobs = queue.drain_ready().await;
         for job in jobs {
@@ -225,6 +231,10 @@ pub async fn run_provider_worker(app: AppHandle) {
             let value = match cache_get(&app, &job).await {
                 Some(v) => Some(v),
                 None => {
+                    // Cache miss: fetch the provider input first (document
+                    // text extraction runs off the async runtime, and only
+                    // when a provider call is actually needed), then call.
+                    let job = prepare_provider_job(&app, &job, &tools).await;
                     let timeout = provider_timeout(&app).await;
                     match tokio::time::timeout(timeout, invoke(&job)).await {
                         Ok(Ok(v)) => {
@@ -243,6 +253,32 @@ pub async fn run_provider_worker(app: AppHandle) {
             resolve_provider_job(&app, &job, value.as_deref()).await;
         }
     }
+}
+
+/// Materialize the provider input for a job about to be invoked: extract
+/// plain document text for a description job that does not carry any yet.
+/// The extraction config (commands plus `[limits]`) is snapshotted from
+/// the session at call time; a missing or failed extractor leaves the
+/// input unchanged (`text: None`) and the provider sees the unit path and
+/// kind only. Extraction is local and bounded, never a scan failure.
+async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> ProviderJob {
+    let mut job = job.clone();
+    if let ProviderInput::Describe { text: None } = &job.input {
+        let cfg = {
+            let sess = app.session.lock().await;
+            sess.config.clone()
+        };
+        let path = job.unit.path.clone();
+        let tools = tools.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            crate::document_text::extract_document_text(&cfg, &path, &tools)
+        })
+        .await
+        .ok()
+        .flatten();
+        job.input = ProviderInput::Describe { text };
+    }
+    job
 }
 
 /// Sleep so consecutive requests to the same provider are at least
