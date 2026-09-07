@@ -9,15 +9,21 @@
 //! Filename-derived dates are parsed here, conservatively, and never
 //! override an embedded date-taken.
 
+mod builtin_audio;
 mod builtin_exif;
 mod dateparse;
+mod doc_container;
+mod doc_pdfinfo;
 mod exiftool;
 mod extractor;
 mod repo;
 mod tool_runner;
 
+pub use builtin_audio::BuiltinAudioExtractor;
 pub use builtin_exif::BuiltinExifExtractor;
 pub use dateparse::{parse_exif_datetime, parse_filename_date, DateParts};
+pub use doc_container::DocumentContainerExtractor;
+pub use doc_pdfinfo::PdfInfoExtractor;
 pub use exiftool::ExifToolExtractor;
 pub use extractor::{merge_meta, EmbeddedMeta, ExtractionContext, MetadataExtractor};
 pub use repo::{RepoAnalyzer, RepoMeta};
@@ -67,6 +73,10 @@ pub struct AnalyzedFile {
     /// Description/subject from a content provider, backing `%s`.
     /// Resolved asynchronously by the provider worker.
     pub subject: Option<String>,
+    /// Informational embedded metadata surfaced in suggestion `metadata`.
+    pub bitrate_kbps: Option<u32>,
+    pub duration_secs: Option<u64>,
+    pub page_count: Option<u64>,
 }
 
 /// One confirmed duplicate group: files with identical full-content
@@ -171,6 +181,9 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
             longitude: merged.longitude,
             location: None,
             subject: None,
+            bitrate_kbps: merged.bitrate_kbps,
+            duration_secs: merged.duration_secs,
+            page_count: merged.page_count,
         });
     }
 

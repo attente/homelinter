@@ -19,7 +19,10 @@ use crate::tool_runner::run_capture;
 /// The exiftool shell-out only runs for containers exiftool understands;
 /// text, archives, and other kinds are never handed to it.
 fn applies(kind: AssetKind) -> bool {
-    matches!(kind, AssetKind::Photo | AssetKind::Video)
+    matches!(
+        kind,
+        AssetKind::Photo | AssetKind::Video | AssetKind::Audio
+    )
 }
 
 /// Derive a signed coordinate from a numeric value and an optional hemisphere
@@ -75,6 +78,8 @@ impl MetadataExtractor for ExifToolExtractor {
             "-json",
             "-DateTimeOriginal",
             "-CreateDate",
+            "-TrackCreateDate",
+            "-MediaCreateDate",
             "-GPSLatitude",
             "-GPSLatitudeRef",
             "-GPSLongitude",
@@ -82,8 +87,11 @@ impl MetadataExtractor for ExifToolExtractor {
             "-Model",
             "-Make",
             "-Artist",
+            "-Title",
             "-XPTitle",
             "-ImageDescription",
+            "-Bitrate",
+            "-Duration",
         ];
         args.push(path_str);
         let bytes = match run_capture(
@@ -116,14 +124,20 @@ impl MetadataExtractor for ExifToolExtractor {
                         .and_then(|raw| raw.trim().parse::<f64>().ok())
                 })
         };
-        let date = s("DateTimeOriginal").or_else(|| s("CreateDate"));
+        let date = s("DateTimeOriginal")
+            .or_else(|| s("CreateDate"))
+            .or_else(|| s("TrackCreateDate"))
+            .or_else(|| s("MediaCreateDate"));
         meta.date_taken = date.as_deref().and_then(parse_exif_datetime);
         let title = s("XPTitle")
+            .or_else(|| s("Title"))
             .or_else(|| s("ImageDescription"))
             .filter(|t| !t.trim().is_empty());
         meta.title = title;
         meta.author = s("Artist");
         meta.camera = s("Model").or_else(|| s("Make"));
+        meta.bitrate_kbps = f("Bitrate").map(|b| (b / 1000.0).round() as u32);
+        meta.duration_secs = f("Duration").map(|d| d.max(0.0) as u64);
         meta.latitude = signed_coordinate(
             f("GPSLatitude"),
             s("GPSLatitudeRef").as_deref(),

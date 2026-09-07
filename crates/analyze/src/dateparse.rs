@@ -9,6 +9,52 @@
 
 use std::time::SystemTime;
 
+/// Parse a full calendar date from a tag-style string (ID3 `TDRC`,
+/// Vorbis `DATE`, bulk XML `dc:date`). Only strings that name a month and
+/// a day are accepted: a year-only value carries no month/day and is left
+/// to the caller's fallback rather than emitting a placeholding `01`/`01`.
+/// Recognized forms are ISO-8601-ish: `2024-03-15T12:34:56`,
+/// `2024-03-15 12:34:56`, `2024-03-15`, `2024/03/15`, and the
+/// EXIF colon form `2024:03:15 12:34:56`.
+pub(crate) fn parse_tag_date_parts(s: &str) -> Option<DateParts> {
+    use chrono::{Datelike, Timelike};
+    let s = s.trim();
+    if let Some(dp) = parse_exif_datetime(s) {
+        return Some(dp);
+    }
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+    ];
+    for fmt in FORMATS {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            let p = DateParts {
+                year: ndt.year(),
+                month: ndt.month(),
+                day: ndt.day(),
+                hour: ndt.hour(),
+                minute: ndt.minute(),
+                second: ndt.second(),
+            };
+            return DateParts::valid_year(p.year).then_some(p);
+        }
+        if let Ok(nd) = chrono::NaiveDate::parse_from_str(s, fmt) {
+            let p = DateParts {
+                year: nd.year(),
+                month: nd.month(),
+                day: nd.day(),
+                hour: 0,
+                minute: 0,
+                second: 0,
+            };
+            return DateParts::valid_year(p.year).then_some(p);
+        }
+    }
+    None
+}
+
 /// Calendar parts used by `%Y %y %m %d %H %M %S` placeholders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DateParts {

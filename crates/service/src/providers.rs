@@ -51,7 +51,7 @@ use tokio::sync::Notify;
 
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::AssetKind;
-use homelinter_model::config::{GeocoderService, LlmBackend, RawConfig};
+use homelinter_model::config::{GeocoderService, RawConfig};
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
 use homelinter_scan::SymlinkIndex;
@@ -748,6 +748,9 @@ mod tests {
             longitude: None,
             location: None,
             subject: None,
+            bitrate_kbps: None,
+            duration_secs: None,
+            page_count: None,
         };
         let analysis = Arc::new(Analysis {
             files: vec![file],
@@ -932,7 +935,7 @@ mod tests {
     async fn pending_until_all_jobs_resolve() {
         let (app, epoch) = primed_app().await;
         let port = stub_geocoder().await;
-        let mut geo = geocode_job(&app, port, epoch).await;
+        let geo = geocode_job(&app, port, epoch).await;
         let mut desc = geo.clone();
         desc.kind = ProviderKind::Description;
         desc.input = ProviderInput::Describe { text: None };
@@ -1100,6 +1103,9 @@ mod tests {
             longitude: lon,
             location: None,
             subject: None,
+            bitrate_kbps: None,
+            duration_secs: None,
+            page_count: None,
         }
     }
 

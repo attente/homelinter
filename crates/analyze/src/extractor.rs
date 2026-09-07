@@ -4,8 +4,9 @@
 //! the first extractor that supplies a field wins that field. Every extractor
 //! failure degrades to missing metadata; analysis never fails because of one.
 //!
-//! The scaffold ships the `kamadak-exif` extractor; ID3, document extraction,
-//! LLM analysis, and reverse geocoding implement the same shape in later phases.
+//! The chain ships `exiftool` plus built-in EXIF, audio (`lofty`), and
+//! document (`pdfinfo` plus zip/XML container) readers; LLM analysis and
+//! reverse geocoding implement the same shape in later phases.
 
 use std::path::Path;
 use std::time::Duration;
@@ -46,6 +47,15 @@ pub struct EmbeddedMeta {
     /// negative. Backing input for the `%l` reverse-geocoder.
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Audio/video bitrate in kilobits per second when an extractor
+    /// supplies one (informational; no placeholder consumes it).
+    pub bitrate_kbps: Option<u32>,
+    /// Audio/video duration in whole seconds when an extractor supplies
+    /// one (informational; no placeholder consumes it).
+    pub duration_secs: Option<u64>,
+    /// Page count for printed documents when an extractor supplies one
+    /// (informational; no placeholder consumes it).
+    pub page_count: Option<u64>,
 }
 
 /// A metadata extractor for embedded content, consulted in priority order
@@ -77,5 +87,14 @@ pub fn merge_meta(acc: &mut EmbeddedMeta, m: &EmbeddedMeta) {
     }
     if acc.longitude.is_none() {
         acc.longitude = m.longitude.clone();
+    }
+    if acc.bitrate_kbps.is_none() {
+        acc.bitrate_kbps = m.bitrate_kbps;
+    }
+    if acc.duration_secs.is_none() {
+        acc.duration_secs = m.duration_secs;
+    }
+    if acc.page_count.is_none() {
+        acc.page_count = m.page_count;
     }
 }

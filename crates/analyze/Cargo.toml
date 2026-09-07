@@ -13,3 +13,6 @@ sha2 = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 kamadak-exif = "0.6.1"
+lofty = "0.22"
+quick-xml = "0.36"
+zip = "2"

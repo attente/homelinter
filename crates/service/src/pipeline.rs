@@ -13,8 +13,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use homelinter_analyze::{
-    analyze, AnalyzeOptions, BuiltinExifExtractor, ExifToolExtractor, ExtractionContext,
-    MetadataExtractor,
+    analyze, AnalyzeOptions, BuiltinAudioExtractor, BuiltinExifExtractor,
+    DocumentContainerExtractor, ExifToolExtractor, ExtractionContext, MetadataExtractor, PdfInfoExtractor,
 };
 use homelinter_model::config::{config_hash, RawConfig};
 use homelinter_model::suggestion::{
@@ -78,7 +78,12 @@ fn build_extractors(
     if toolset.has("exiftool") {
         extractors.push(Box::new(ExifToolExtractor {}));
     }
+    if toolset.has("pdfinfo") {
+        extractors.push(Box::new(PdfInfoExtractor {}));
+    }
+    extractors.push(Box::new(DocumentContainerExtractor {}));
     extractors.push(Box::new(BuiltinExifExtractor {}));
+    extractors.push(Box::new(BuiltinAudioExtractor {}));
     extractors
 }
 

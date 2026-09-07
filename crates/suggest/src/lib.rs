@@ -248,6 +248,15 @@ fn build_move_suggestion(
     if f.size > 0 {
         metadata.insert("size".into(), serde_json::Value::from(f.size));
     }
+    if let Some(b) = f.bitrate_kbps {
+        metadata.insert("bitrate_kbps".into(), serde_json::Value::from(b));
+    }
+    if let Some(d) = f.duration_secs {
+        metadata.insert("duration_secs".into(), serde_json::Value::from(d));
+    }
+    if let Some(p) = f.page_count {
+        metadata.insert("page_count".into(), serde_json::Value::from(p));
+    }
     let reason = format!("Moved to the {} destination.", f.kind.name());
     Ok(Some(Suggestion::new_move(
         f.kind,

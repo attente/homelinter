@@ -24,6 +24,7 @@ impl ToolSet {
             "hg",
             "svn",
             "pdftotext",
+            "pdfinfo",
             "pandoc",
             "mutool",
         ] {
