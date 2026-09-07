@@ -1100,7 +1100,7 @@ impl App {
             for e in &entries {
                 let result = str_field(e, "result");
                 *counts.entry(result.clone()).or_insert(0) += 1;
-                let mut line = format!("[{}] {}", result, str_field(e, "suggestion_id"));
+                let line = format!("[{}] {}", result, str_field(e, "suggestion_id"));
                 entry_lines.push(line);
             }
             let summary = if counts.is_empty() {

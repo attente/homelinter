@@ -44,23 +44,25 @@ impl<'a> RepoAnalyzer<'a> {
         if !self.tools.has("git") {
             return RepoMeta::default();
         }
-        let mut meta = RepoMeta::default();
-        meta.remote_url =
+        let remote_url =
             run_vcs("git", root, &["remote", "get-url", "origin"]).map(|s| s.trim().to_string());
-        if let Some(url) = &meta.remote_url {
-            meta.remote_host = parse_host(url);
-        }
-        meta.default_branch = run_vcs("git", root, &["symbolic-ref", "--short", "HEAD"])
+        let default_branch = run_vcs("git", root, &["symbolic-ref", "--short", "HEAD"])
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        meta.commit_count = run_vcs("git", root, &["rev-list", "--count", "HEAD"])
+        let commit_count = run_vcs("git", root, &["rev-list", "--count", "HEAD"])
             .and_then(|s| s.trim().parse::<u64>().ok());
-        meta.last_activity = run_vcs("git", root, &["log", "-1", "--format=%ct"]).and_then(|s| {
+        let last_activity = run_vcs("git", root, &["log", "-1", "--format=%ct"]).and_then(|s| {
             s.trim().parse::<i64>().ok().and_then(|secs| {
                 SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs.max(0) as u64))
             })
         });
-        meta
+        RepoMeta {
+            remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_url,
+            default_branch,
+            commit_count,
+            last_activity,
+        }
     }
 
     /// Mercurial: `hg paths default` for the remote URL, `hg branch` for the
@@ -73,26 +75,28 @@ impl<'a> RepoAnalyzer<'a> {
         if !self.tools.has("hg") {
             return RepoMeta::default();
         }
-        let mut meta = RepoMeta::default();
-        meta.remote_url = run_vcs("hg", root, &["paths", "default"])
+        let remote_url = run_vcs("hg", root, &["paths", "default"])
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        if let Some(url) = &meta.remote_url {
-            meta.remote_host = parse_host(url);
-        }
-        meta.default_branch = run_vcs("hg", root, &["branch"])
+        let default_branch = run_vcs("hg", root, &["branch"])
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        meta.commit_count = run_vcs("hg", root, &["log", "-r", "tip", "--template", "{rev}"])
+        let commit_count = run_vcs("hg", root, &["log", "-r", "tip", "--template", "{rev}"])
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(|rev| rev + 1);
-        meta.last_activity = run_vcs(
+        let last_activity = run_vcs(
             "hg",
             root,
             &["log", "-r", "tip", "--template", "{date|hgdate}"],
         )
         .and_then(|s| parse_hgdate(&s));
-        meta
+        RepoMeta {
+            remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_url,
+            default_branch,
+            commit_count,
+            last_activity,
+        }
     }
 
     /// Subversion: `svn info --xml` for the working-copy URL and the
@@ -110,14 +114,16 @@ impl<'a> RepoAnalyzer<'a> {
             None => return RepoMeta::default(),
         };
         let info = parse_svn_info(&xml);
-        let mut meta = RepoMeta::default();
-        meta.remote_url = info.url;
-        if let Some(url) = &meta.remote_url {
-            meta.remote_host = parse_host(url);
-            meta.default_branch = svn_branch_from_url(url);
+        let remote_url = info.url;
+        let default_branch = remote_url.as_ref().and_then(|url| svn_branch_from_url(url));
+        let last_activity = info.last_changed_date.and_then(|s| parse_iso_date(&s));
+        RepoMeta {
+            remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_url,
+            default_branch,
+            commit_count: None,
+            last_activity,
         }
-        meta.last_activity = info.last_changed_date.and_then(|s| parse_iso_date(&s));
-        meta
     }
 }
 
