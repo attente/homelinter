@@ -421,6 +421,39 @@ async fn cache_clear_and_config_put() {
     assert!(v.as_array().unwrap().is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_exposes_batch_config_staleness() {
+    let env = Env::new("stale");
+    let app = env.service();
+    seed_duplicates(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    // A freshly published batch carries the hash of the config it was
+    // scanned under; nothing changed yet, so it equals the live hash.
+    let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
+    let batch_hash = v["batch_config_hash"].as_str().unwrap().to_string();
+    assert_eq!(batch_hash, v["config_hash"].as_str().unwrap());
+
+    // A config save after the scan moves config_hash while the batch keeps
+    // the hash of the config that produced it: the batch is stale.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "duplication": { "large_file_threshold": 42 } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(v["batch_config_hash"].as_str().unwrap(), batch_hash);
+    assert_ne!(v["config_hash"].as_str().unwrap(), batch_hash);
+
+    // A new scan regenerates the batch under the current config: fresh again.
+    scan_to_ready(&app, &env.home).await;
+    let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(v["batch_config_hash"].as_str().unwrap(), v["config_hash"].as_str().unwrap());
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end HTTP + SSE + graceful shutdown on a real listener
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 //! phases (scan) and between top-level suggestions (execute), exactly as
 //! "Session Model > Cancellation" describes.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use homelinter_analyze::{
     analyze, AnalyzeOptions, BuiltinExifExtractor, ExifToolExtractor, ExtractionContext,
     MetadataExtractor,
 };
+use homelinter_model::config::{config_hash, RawConfig};
 use homelinter_model::suggestion::{
     ExecutionReport, ExecutionStatus, OperationKind, OperationStatus, SessionState, Suggestion,
     SuggestionStatus,
@@ -93,9 +95,18 @@ fn phase_progress(phase: &'static str, scanned: u64, start: Instant) -> ServerEv
 // ---------------------------------------------------------------------------
 
 /// Run the scan pipeline in the background. The caller has already checked
-/// the state machine under the session lock and set the session to
-/// `Scanning`.
-pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
+/// the state machine under the session lock, set the session to
+/// `Scanning`, and snapshotted the configuration (`cfg`) and per-scan
+/// target-path overrides (`target_paths`) at that moment: every phase runs
+/// against that one snapshot, so a config save during a scan never changes
+/// the running work and the batch reflects a single committed configuration.
+pub async fn start_scan(
+    app: AppHandle,
+    root: PathBuf,
+    hidden: bool,
+    cfg: RawConfig,
+    target_paths: BTreeMap<String, String>,
+) {
     let home = effective_home(&app);
     let cancel_token = app.cancel.load(Ordering::SeqCst);
     // Provider results are gated by the epoch of the scan that enqueued
@@ -103,18 +114,15 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     let provider_epoch = app.provider_epoch.fetch_add(1, Ordering::SeqCst);
     let start = Instant::now();
 
-    let (scan_opts, threshold) = {
-        let sess = app.session.lock().await;
-        (
-            DiscoveryOptions {
-                root: root.clone(),
-                hidden,
-                hidden_definition: sess.config.hidden_definition(),
-                exclude_patterns: sess.config.scan.exclude_paths.clone(),
-            },
-            sess.config.duplication.large_file_threshold,
-        )
-    };
+    let (scan_opts, threshold) = (
+        DiscoveryOptions {
+            root: root.clone(),
+            hidden,
+            hidden_definition: cfg.hidden_definition(),
+            exclude_patterns: cfg.scan.exclude_paths.clone(),
+        },
+        cfg.duplication.large_file_threshold,
+    );
     app.events.publish(phase_progress("discovery", 0, start));
 
     // Phase 1 + symlink pass: discovery. Runs on the blocking pool.
@@ -141,19 +149,16 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     // Phase 2: analysis.
     let files = scan.files.clone();
     let repos = scan.repos.clone();
-    let analyze_opts = {
-        let sess = app.session.lock().await;
-        AnalyzeOptions {
-            large_file_threshold: threshold,
-            toolset: ToolSet::detect(),
-            // The in-process kamadak-exif reader handles supported containers.
-            extractors: build_extractors(&sess.config),
-            ctx: ExtractionContext {
-                tool_timeout: std::time::Duration::from_secs(sess.config.tool_timeout()),
-                tool_stdout_max_bytes: sess.config.tool_stdout_max_bytes(),
-                config: Some(sess.config.clone()),
-            },
-        }
+    let analyze_opts = AnalyzeOptions {
+        large_file_threshold: threshold,
+        toolset: ToolSet::detect(),
+        // The in-process kamadak-exif reader handles supported containers.
+        extractors: build_extractors(&cfg),
+        ctx: ExtractionContext {
+            tool_timeout: std::time::Duration::from_secs(cfg.tool_timeout()),
+            tool_stdout_max_bytes: cfg.tool_stdout_max_bytes(),
+            config: Some(cfg.clone()),
+        },
     };
     let analysis =
         tokio::task::spawn_blocking(move || analyze(&files, &repos, &analyze_opts)).await;
@@ -171,13 +176,10 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     ));
 
     // Phase 3: suggestion generation.
-    let formats = {
-        let sess = app.session.lock().await;
-        match sess.config.resolved_target_paths(&sess.scan_target_paths) {
-            Ok(f) => f,
-            Err(e) => {
-                return fail(app.clone(), format!("invalid target_paths: {e}")).await;
-            }
+    let formats = match cfg.resolved_target_paths(&target_paths) {
+        Ok(f) => f,
+        Err(e) => {
+            return fail(app.clone(), format!("invalid target_paths: {e}")).await;
         }
     };
     let analysis2 = analysis.clone();
@@ -238,7 +240,7 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     // `metadata_pending`, so the user sees the full scan result yet can
     // never execute a move built on incomplete metadata.
     let provider_jobs =
-        crate::providers::plan_provider_jobs(&app, &analysis, &formats, provider_epoch).await;
+        crate::providers::plan_provider_jobs(&cfg, &analysis, &formats, provider_epoch).await;
     let mut pending: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
     for job in &provider_jobs {
         *pending.entry(job.unit.index).or_default() += 1;
@@ -247,6 +249,7 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     {
         let mut sess = app.session.lock().await;
         sess.state = SessionState::Ready;
+        sess.batch_config_hash = Some(config_hash(&cfg));
         sess.degraded_identity = analysis.degraded_identity;
         sess.warnings = analysis
             .groups

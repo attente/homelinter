@@ -362,6 +362,47 @@ textarea:focus {
   color: var(--bad);
 }
 
+.banner {
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  color: var(--bad);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--dim);
+  border-radius: 8px;
+  padding: 16px 20px;
+  max-width: 460px;
+}
+
+.modal h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.modal p {
+  margin: 0 0 12px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .error {
   color: var(--bad);
 }

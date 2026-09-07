@@ -68,7 +68,7 @@ export function ConfigView(props: ConfigViewProps) {
       }
       const effective = await api.configPut(doc);
       setSaved(effective);
-      pushToast('config saved and reloaded');
+      pushToast('config saved; applies to the next scan');
     } catch (e: unknown) {
       pushToast(`save failed: ${resolveApiError(e)}`);
     } finally {
@@ -103,6 +103,10 @@ export function ConfigView(props: ConfigViewProps) {
           effective config file: {String(saved['config_path'] ?? 'default')}
         </p>
       )}
+      <p className="note">
+        Changes apply to the next scan: existing suggestions keep the settings they were
+        scanned with, and an edit during a scan or execution never changes the running work.
+      </p>
       <textarea
         className="config-text"
         value={text}

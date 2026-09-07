@@ -601,13 +601,12 @@ pub fn description_settings(
 /// kind. A unit whose format never uses a placeholder never triggers a
 /// provider call.
 pub async fn plan_provider_jobs(
-    app: &AppHandle,
+    cfg: &RawConfig,
     analysis: &Analysis,
     formats: &BTreeMap<AssetKind, FormatString>,
     epoch: u64,
 ) -> Vec<ProviderJob> {
-    let cfg = app.session.lock().await.config.clone();
-    let geo = geocoder_settings(&cfg);
+    let geo = geocoder_settings(cfg);
     let mut jobs = Vec::new();
     for (i, f) in analysis.files.iter().enumerate() {
         let Some(fmt) = formats.get(&f.kind) else {
@@ -649,7 +648,7 @@ pub async fn plan_provider_jobs(
             }
         }
         if uses_subject {
-            if let Some(desc) = description_settings(&cfg, &f.kind) {
+            if let Some(desc) = description_settings(cfg, &f.kind) {
                 let input_hash = sha256(&[
                     b"describe",
                     f.path.as_os_str().as_encoded_bytes(),
@@ -1077,25 +1076,6 @@ mod tests {
         assert_eq!(photo.min_interval, Duration::from_millis(2000));
     }
 
-    /// Builds an app whose session atomically carries the given config.
-    async fn plan_app(config: RawConfig) -> AppHandle {
-        let dir = tmp_dir("plan");
-        let home = dir.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let built = build_service(ServiceOptions {
-            home_override: Some(home.clone()),
-            data_dir_override: Some(dir.join("data")),
-            ..Default::default()
-        })
-        .unwrap();
-        let app = built.app;
-        {
-            let mut sess = app.session.lock().await;
-            sess.config = config;
-        }
-        app
-    }
-
     fn file_at(
         dir: &PathBuf,
         name: &str,
@@ -1138,7 +1118,6 @@ mod tests {
             "#,
         )
         .unwrap();
-        let app = plan_app(cfg).await;
         let dir = tmp_dir("files");
 
         // Photo with a %l format and GPS: geocode planned.
@@ -1169,7 +1148,7 @@ mod tests {
             FormatString::parse("Music/%f").unwrap(),
         );
 
-        let jobs = plan_provider_jobs(&app, &analysis, &formats, 7).await;
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 7).await;
 
         let photo_jobs: Vec<&ProviderJob> =
             jobs.iter().filter(|j| j.unit.index == 0).collect();
@@ -1202,7 +1181,6 @@ mod tests {
     #[tokio::test]
     async fn disabled_providers_plan_nothing() {
         let cfg: RawConfig = toml::from_str("").unwrap(); // all disabled
-        let app = plan_app(cfg).await;
         let dir = tmp_dir("off");
         let photo = file_at(&dir, "IMG_0001.jpg", AssetKind::Photo, Some(48.8), Some(2.3));
         let analysis = Arc::new(Analysis {
@@ -1216,7 +1194,7 @@ mod tests {
             AssetKind::Photo,
             FormatString::parse("Pictures/%l/%s/%f").unwrap(),
         );
-        let jobs = plan_provider_jobs(&app, &analysis, &formats, 1).await;
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
         assert!(jobs.is_empty());
     }
 }

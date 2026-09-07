@@ -373,7 +373,11 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
         None => home.clone(),
     };
 
-    {
+    // Snapshot the configuration and the per-scan target-path overrides at
+    // the moment the scan is accepted; every pipeline phase runs against
+    // this one snapshot, so a config save during the scan never changes the
+    // running work (see "Session Model" in DESIGN.md).
+    let (cfg, target_paths) = {
         let mut sess = app.session.lock().await;
         if sess.state.in_progress() {
             return Err(err(
@@ -388,17 +392,25 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
         // The new scan replaces the session: previous suggestions,
         // selection, and the execution report are discarded.
         sess.suggestions.clear();
+        sess.batch_config_hash = None;
         sess.report = None;
         sess.report_batch = None;
         sess.summary = None;
         sess.failure = None;
         sess.degraded_identity = false;
         sess.warnings.clear();
-    }
+        (sess.config.clone(), sess.scan_target_paths.clone())
+    };
     app.events
         .publish(ServerEvent::State(SessionState::Scanning));
 
-    tokio::spawn(start_scan(app.clone(), root, body.hidden));
+    tokio::spawn(start_scan(
+        app.clone(),
+        root,
+        body.hidden,
+        cfg,
+        target_paths,
+    ));
     accepted(json!({ "state": "scanning" }))
 }
 
@@ -411,6 +423,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "scan_root": sess.scan_root,
         "platform": sess.platform,
         "config_hash": sess.config_hash,
+        "batch_config_hash": sess.batch_config_hash,
         "suggestions_total": suggestions_total,
         "selection_count": selection_count,
     });

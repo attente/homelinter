@@ -25,6 +25,7 @@ interface AppState {
   toasts: string[];
   configOpen: boolean;
   showScanForm: boolean;
+  pendingAction: 'run' | 'export' | null;
 }
 
 const POLL_MS = 2000;
@@ -42,6 +43,7 @@ export default function App() {
     toasts: [],
     configOpen: false,
     showScanForm: true,
+    pendingAction: null,
   });
   const sseRef = useRef<EventSourceClient | null>(null);
   const stRef = useRef(st);
@@ -173,9 +175,17 @@ export default function App() {
         case 'execution.complete':
           await fetchExecution();
           break;
-        case 'config.updated':
-          pushToast('config updated by another client');
+        case 'config.updated': {
+          pushToast('config updated by another client; applies to the next scan');
+          // Refresh the session so the stale-batch banner appears promptly.
+          try {
+            const session = await api.session();
+            setSt((prev) => ({ ...prev, session }));
+          } catch {
+            // The 2s poll will catch up.
+          }
           break;
+        }
         case 'cache.cleared':
           pushToast('cache cleared by another client');
           break;
@@ -287,9 +297,8 @@ export default function App() {
     void selectMany([]);
   }, [selectMany]);
 
-  const run = useCallback(
-    async () => {
-      const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+  const startRun = useCallback(
+    async (ids: string[]) => {
       if (ids.length === 0) {
         pushToast('no suggestions selected');
         return;
@@ -314,6 +323,34 @@ export default function App() {
     [pushToast],
   );
 
+  // The batch carries the hash of the config it was scanned under; when the
+  // live config hash moved past it, the destinations are stale. Ask before
+  // executing or exporting, and surface a banner while browsing.
+  const batchIsStale = useCallback((sess: Session | null, count: number) => {
+    return !!sess
+      && !!sess.batch_config_hash
+      && !!sess.config_hash
+      && sess.batch_config_hash !== sess.config_hash
+      && count > 0;
+  }, []);
+  const configDirty = batchIsStale(st.session, st.suggestions.length);
+
+  const run = useCallback(
+    async () => {
+      const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+      if (ids.length === 0) {
+        pushToast('no suggestions selected');
+        return;
+      }
+      if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
+        setSt((prev) => ({ ...prev, pendingAction: 'run' }));
+        return;
+      }
+      await startRun(ids);
+    },
+    [batchIsStale, pushToast, startRun],
+  );
+
   const cancel = useCallback(async () => {
     try {
       await api.cancel();
@@ -323,8 +360,7 @@ export default function App() {
     }
   }, [pushToast]);
 
-  const exportPlan = useCallback(async () => {
-    const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+  const doExport = useCallback(async (ids: string[]) => {
     if (ids.length === 0) {
       pushToast('no suggestions selected');
       return;
@@ -337,6 +373,40 @@ export default function App() {
       pushToast(`export failed: ${resolveApiError(e)}`);
     }
   }, [pushToast]);
+
+  const exportPlan = useCallback(async () => {
+    const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+    if (ids.length === 0) {
+      pushToast('no suggestions selected');
+      return;
+    }
+    if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
+      setSt((prev) => ({ ...prev, pendingAction: 'export' }));
+      return;
+    }
+    await doExport(ids);
+  }, [batchIsStale, doExport, pushToast]);
+
+  const dismissPending = useCallback(() => {
+    setSt((prev) => ({ ...prev, pendingAction: null }));
+  }, []);
+
+  const reScanFromModal = useCallback(() => {
+    patch({ pendingAction: null, showScanForm: true, phase: 'idle', configOpen: false });
+  }, [patch]);
+
+  // Execute/export anyway, accepting the stale destinations.
+  const proceedPending = useCallback(async () => {
+    const action = stRef.current.pendingAction;
+    if (!action) return;
+    setSt((prev) => ({ ...prev, pendingAction: null }));
+    const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+    if (action === 'run') {
+      await startRun(ids);
+    } else {
+      await doExport(ids);
+    }
+  }, [doExport, startRun]);
 
   const doneFromReport = useCallback(async () => {
     try {
@@ -397,14 +467,22 @@ export default function App() {
     );
   } else {
     body = (
-      <Browse
-        suggestions={st.suggestions}
-        onToggle={(id, sel) => void toggle(id, sel)}
-        onSelectMany={(ids) => void selectMany(ids)}
-        onClearSelection={clearSelection}
-        onRun={() => void run()}
-        onExport={() => void exportPlan()}
-      />
+      <>
+        {configDirty && (
+          <p className="banner warn" role="status">
+            Configuration changed after this scan: the current suggestions still use the settings
+            from the scan. Start a new scan to apply the changes.
+          </p>
+        )}
+        <Browse
+          suggestions={st.suggestions}
+          onToggle={(id, sel) => void toggle(id, sel)}
+          onSelectMany={(ids) => void selectMany(ids)}
+          onClearSelection={clearSelection}
+          onRun={() => void run()}
+          onExport={() => void exportPlan()}
+        />
+      </>
     );
   }
 
@@ -419,6 +497,30 @@ export default function App() {
         onConfig={() => patch({ configOpen: true })}
       />
       {body}
+      {st.pendingAction && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={dismissPending}
+        >
+          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <h2>Configuration changed since this scan</h2>
+            <p>
+              Destinations and provider settings still reflect the configuration from the scan;
+              the saved changes apply to the next scan.
+            </p>
+            <div className="modal-actions">
+              <button type="button" autoFocus onClick={() => void reScanFromModal()}>
+                re-scan
+              </button>
+              <button type="button" onClick={() => void proceedPending()}>
+                {st.pendingAction} anyway
+              </button>
+              <button type="button" onClick={dismissPending}>cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
       <Toasts toasts={st.toasts} onDismiss={dismissToast} />
     </div>
   );

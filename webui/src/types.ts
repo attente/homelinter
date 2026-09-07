@@ -24,6 +24,7 @@ export interface Session {
   scan_root: string | null;
   platform: string;
   config_hash: string | null;
+  batch_config_hash: string | null;
   suggestions_total: number;
   selection_count: number;
   failure?: ApiErrorBody['error'] | null;

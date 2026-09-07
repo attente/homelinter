@@ -39,6 +39,11 @@ pub struct Session {
     pub config_path: Option<PathBuf>,
     /// Effective config hash, for change detection in `GET /session`.
     pub config_hash: String,
+    /// Hash of the config snapshot the current suggestion batch was scanned
+    /// under; `None` until a scan publishes its batch. Clients compare it
+    /// against `config_hash` to flag a batch produced under an older
+    /// configuration (see "Session Model" in DESIGN.md).
+    pub batch_config_hash: Option<String>,
     /// Per-scan `target_paths` overrides from the scan request.
     pub scan_target_paths: BTreeMap<String, String>,
     pub hidden: bool,
@@ -69,6 +74,7 @@ impl Session {
             config,
             config_path,
             config_hash,
+            batch_config_hash: None,
             scan_target_paths: BTreeMap::new(),
             hidden: false,
             suggestions: Vec::new(),
