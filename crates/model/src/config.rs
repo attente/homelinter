@@ -141,10 +141,10 @@ pub struct GeocoderConfig {
     #[serde(default)]
     pub user_agent_contact: Option<String>,
     /// Minimum interval between requests in milliseconds, enforced between
-    /// request starts on the provider worker. Only meaningful for the
-    /// `custom` service: the built-in public services keep their documented
-    /// usage pace regardless (see "Provider Plugins" in DESIGN.md).
-    /// `0` (the default) means no built-in delay.
+    /// request starts on the provider worker. An additional floor on top of
+    /// the service's built-in pacing (see "Provider Plugins" in DESIGN.md):
+    /// the effective interval is `max(built-in, rate_limit_ms)`.
+    /// `0` (the default) means no additional delay.
     #[serde(default)]
     pub rate_limit_ms: Option<u64>,
 }
@@ -597,19 +597,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
     let geo = &raw.geocoder;
     if geo.enabled {
         let key = geo.api_key.as_deref().map(str::trim).unwrap_or("");
-        // The configured rate limit paces only the custom service; the
-        // built-in public services always enforce their documented usage pace.
-        let rate_warn = || {
-            if geo.rate_limit_ms.is_some() {
-                Some((
-                    "geocoder.rate_limit_ms".to_string(),
-                    "rate_limit_ms applies only to the custom service; built-in public services always enforce their documented usage pace"
-                        .to_string(),
-                ))
-            } else {
-                None
-            }
-        };
         match geo.geocoder_service() {
             GeocoderService::Google | GeocoderService::Mapbox => {
                 if key.is_empty() {
@@ -622,9 +609,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                         .to_lowercase(),
                     ));
                 }
-                if let Some(w) = rate_warn() {
-                    fields.push(w);
-                }
             }
             GeocoderService::Nominatim | GeocoderService::Photon => {
                 if !key.is_empty() {
@@ -636,9 +620,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                         )
                         .to_lowercase(),
                     ));
-                }
-                if let Some(w) = rate_warn() {
-                    fields.push(w);
                 }
             }
             GeocoderService::Custom => {

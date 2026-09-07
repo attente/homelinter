@@ -489,7 +489,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         return None;
     }
     let service = cfg.geocoder_service();
-    let (backend, built_in_endpoint, min_interval) = match service {
+    let (backend, built_in_endpoint, built_in_interval) = match service {
         GeocoderService::Nominatim => (
             "nominatim",
             "https://nominatim.openstreetmap.org",
@@ -502,11 +502,17 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
             "custom",
             "",
             // The custom/self-hosted service is the user's responsibility;
-            // the optional configured rate limit paces it like the built-in
-            // public services pace themselves (0 = no built-in delay).
-            Duration::from_millis(cfg.geocoder.rate_limit_ms.unwrap_or(0)),
+            // with no built-in pace it starts from zero and is paced purely
+            // by the optional configured rate limit (0 = no delay).
+            Duration::ZERO,
         ),
     };
+    // The optional configured rate limit is an additional floor on top of
+    // the service's built-in public pacing: it can only slow requests down,
+    // never exceed the documented usage pace (see "Geocoder rate limiting
+    // and identification" in DESIGN.md).
+    let min_interval = built_in_interval
+        .max(Duration::from_millis(cfg.geocoder.rate_limit_ms.unwrap_or(0)));
     let endpoint = cfg
         .geocoder
         .endpoint
@@ -1013,13 +1019,29 @@ mod tests {
         let off: RawConfig = toml::from_str("").unwrap();
         assert!(geocoder_settings(&off).is_none());
 
-        // Nominatim carries the built-in public pace; the configured rate
-        // limit never overrides it.
+        // Nominatim carries the built-in public pace; a configured rate
+        // limit below it is absorbed, above it raises the floor.
         let nom: RawConfig =
             toml::from_str("[geocoder]\nenabled = true\n").unwrap();
         let s = geocoder_settings(&nom).unwrap();
         assert_eq!(s.backend, "nominatim");
         assert_eq!(s.min_interval, Duration::from_secs(1));
+        let below: RawConfig = toml::from_str(
+            "[geocoder]\nenabled = true\nrate_limit_ms = 500\n",
+        )
+        .unwrap();
+        assert_eq!(
+            geocoder_settings(&below).unwrap().min_interval,
+            Duration::from_secs(1)
+        );
+        let above: RawConfig = toml::from_str(
+            "[geocoder]\nenabled = true\nrate_limit_ms = 2500\n",
+        )
+        .unwrap();
+        assert_eq!(
+            geocoder_settings(&above).unwrap().min_interval,
+            Duration::from_millis(2500)
+        );
     }
 
     /// Builds an app whose session atomically carries the given config.

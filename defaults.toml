@@ -30,8 +30,8 @@ endpoint = "https://nominatim.openstreetmap.org"
 api_key = ""
 language = "en"
 user_agent_contact = ""     # recommended for public services
-# Minimum milliseconds between requests for the custom service only (0 = none);
-# public services always enforce their documented usage pace.
+# Applies to every service as an additional floor on its built-in pacing
+# (e.g. nominatim 1 req/s -> 1000 ms); custom starts from zero. 0 = none.
 # rate_limit_ms = 0
 
 [description]
