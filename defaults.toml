@@ -41,7 +41,7 @@ user_agent_contact = ""     # recommended for public services
 # unset keys from this base section, so an override needs only the model
 # it changes, and enabled = false suppresses descriptions for that kind.
 enabled = false
-provider = "ollama"          # ollama | openrouter | openai | custom
+service = "ollama"          # ollama | openrouter | openai | custom
 endpoint = "http://localhost:11434"
 model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer

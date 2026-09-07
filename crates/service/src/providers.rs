@@ -551,11 +551,11 @@ pub fn description_settings(
     if !eff.enabled {
         return None;
     }
-    let backend = eff.provider.name();
+    let backend = eff.service.name();
     let endpoint = eff
         .endpoint
         .clone()
-        .unwrap_or_else(|| eff.provider.default_endpoint().to_string());
+        .unwrap_or_else(|| eff.service.default_endpoint().to_string());
     let mut provider_id = format!("describe:{backend}");
     if backend == "custom" && !endpoint.is_empty() {
         provider_id.push(':');
