@@ -426,6 +426,10 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "batch_config_hash": sess.batch_config_hash,
         "suggestions_total": suggestions_total,
         "selection_count": selection_count,
+        "scan_defaults": {
+            "hidden": app.default_hidden,
+            "target_paths": app.default_target_paths,
+        },
     });
     if let Some(f) = &sess.failure {
         v["failure"] = serde_json::to_value(f).unwrap_or(Value::Null);

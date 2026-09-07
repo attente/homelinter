@@ -1,8 +1,8 @@
 //! Command-line surface for the `homelinter` binary.
 //!
-//! Mirrors "Command-Line Interface Schema" in DESIGN.md: interactive mode is
-//! the default; `--execute` and `--export` select the
-//! non-interactive modes; `web` runs the standalone service.
+//! Mirrors "Command-Line Interface Schema" in DESIGN.md: a plain scan is
+//! the default and prints a review pointer; `--execute` and `--export`
+//! select the non-interactive modes; `web` runs the standalone service.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -85,7 +85,7 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     root: Option<PathBuf>,
 
-    /// Skip the pager and menu; execute all generated suggestions.
+    /// Execute all generated suggestions immediately, without review.
     #[arg(long, conflicts_with_all = ["export"])]
     execute: bool,
 
@@ -156,16 +156,16 @@ struct WebArgs {
     /// Select the configuration file.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Pre-seed the session's default scan root.
+    /// Pre-seed the session's default scan root and the SPA scan dialog.
     #[arg(long, value_name = "PATH")]
     root: Option<PathBuf>,
     /// Bind the loopback listener on this port instead of an ephemeral one.
     #[arg(long, value_name = "PORT")]
     port: Option<u16>,
-    /// Include hidden files and directories in primary discovery.
+    /// Pre-fill the SPA scan dialog with hidden files included.
     #[arg(long)]
     hidden: bool,
-    /// Override the destination format string for one Asset Kind; repeatable.
+    /// Pre-fill one target-path override in the SPA scan dialog; repeatable.
     #[arg(long = "target-path", value_name = "KIND=PATH", action = clap::ArgAction::Append)]
     target_path: Vec<String>,
     /// Clear the persistent metadata cache at startup.

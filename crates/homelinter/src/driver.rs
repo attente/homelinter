@@ -1,7 +1,7 @@
 //! Session drivers: the managed (ephemeral) flow and the standalone `web`
 //! flow share one service-spawning routine.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -161,13 +161,17 @@ pub async fn web(opts: WebOptions) -> Result<u8, String> {
             .ok_or_else(|| "cannot determine the home directory".to_string())?,
     };
     // The web command pre-seeds the session's default scan root with the
-    // service home; scans may still override it per request.
+    // service home; scans may still override it per request. `--hidden`
+    // and `--target-path` pre-fill the SPA scan dialog via `scan_defaults`
+    // in GET /session; the SPA still sends hidden/target_paths per scan.
     let inst = spawn(
         homelinter_service::ServiceOptions {
             cli_config: opts.config,
             home_override: Some(root),
             data_dir_override: None,
             web_dir: resolve_web_dir(),
+            default_hidden: opts.hidden,
+            default_target_paths: opts.target_paths,
         },
         opts.port,
     )?;
@@ -181,12 +185,6 @@ pub async fn web(opts: WebOptions) -> Result<u8, String> {
         output::note(&format!("web UI: serving {} (SPA)", web.display()));
     } else {
         output::note("web UI: no SPA found (API only)");
-    }
-    if opts.hidden || !opts.target_paths.is_empty() {
-        // Honest seam: the web command accepts --hidden and --target-path
-        // but this build does not persist session defaults for them. The
-        // SPA must pass hidden/target_paths per scan request.
-        output::note("warning: --hidden/--target-path session pre-seed is not wired for `web` in this build; pass them per scan");
     }
     if opts.cache_clear {
         inst.client
@@ -238,6 +236,7 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
             home_override: None,
             data_dir_override: None,
             web_dir: None,
+            ..Default::default()
         },
         None,
     )?;
@@ -270,7 +269,10 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
 
 pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     if matches!(opts.action, ManagedAction::Interactive) && !std::io::stdin().is_terminal() {
-        return Err("interactive mode requires a terminal; use --execute or --export".to_string());
+        return Err(
+            "interactive review requires a terminal; run `homelinter tui`, or pass --execute or --export to act without review"
+                .to_string(),
+        );
     }
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
@@ -287,6 +289,7 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
             home_override: None,
             data_dir_override: None,
             web_dir: None,
+            ..Default::default()
         },
         None,
     )?;
@@ -352,7 +355,7 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     }
 
     let result = match &opts.action {
-        ManagedAction::Interactive => interactive(client.clone(), &items, ids, format).await,
+        ManagedAction::Interactive => interactive_summary(&items),
         ManagedAction::Execute => run_execution(&client, &ids, format, verbosity).await,
         ManagedAction::Export(path) => {
             let path =
@@ -417,51 +420,23 @@ async fn run_execution(
     Ok(0)
 }
 
-/// Interactive review: list suggestions, then a menu loop.
-async fn interactive(
-    client: Client,
-    items: &[Value],
-    ids: Vec<String>,
-    format: OutputFormat,
-) -> Result<u8, String> {
-    output::print_suggestions(items);
-    println!("Suggestions can be reviewed, exported, or executed.");
-    let stdin = std::io::stdin();
-    loop {
-        print!("menu [review/export/execute/quit]: ");
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        let n = stdin
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| format!("cannot read input: {e}"))?;
-        if n == 0 {
-            return Err("end of input; nothing was executed".to_string());
-        }
-        let trimmed = line.trim();
-        let mut parts = trimmed.splitn(2, char::is_whitespace);
-        let action = parts.next().unwrap_or("").to_lowercase();
-        match action.as_str() {
-            "r" | "review" => output::print_suggestions(items),
-            "x" | "execute" => {
-                return run_execution(&client, &ids, format, 1).await;
-            }
-            "e" | "export" => {
-                if let Some(rest) = parts.next() {
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let p = to_absolute(std::path::Path::new(rest.trim()), &cwd)
-                        .map_err(|e| format!("invalid export path: {e}"))?;
-                    export_and_report(&client, &ids, &p, format).await?;
-                } else {
-                    println!("usage: export <path>");
-                }
-            }
-            "q" | "quit" | "exit" => {
-                println!("exiting without executing; review the exported script or run --execute to apply changes.");
-                return Ok(0);
-            }
-            "" => {}
-            other => println!("unknown command '{other}' (review, export, execute, quit)"),
-        }
-    }
+/// Demoted interactive review: the full-screen review experience lives in
+/// `homelinter tui`. A plain scan prints how many suggestions were generated
+/// and points the user at the review and non-interactive action entry points.
+fn interactive_summary(items: &[Value]) -> Result<u8, String> {
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    let _ = writeln!(
+        out,
+        "{} suggestion(s) generated; nothing was executed.",
+        items.len()
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Review and apply them in the full-screen TUI:");
+    let _ = writeln!(out, "  homelinter tui");
+    let _ = writeln!(out, "Or act on all suggestions without review:");
+    let _ = writeln!(out, "  homelinter scan --execute");
+    let _ = writeln!(out, "  homelinter scan --export <path>");
+    let _ = out.flush();
+    Ok(0)
 }

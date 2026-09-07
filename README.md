@@ -8,7 +8,7 @@ Design details, the full configuration schema, and the service API are specified
 
 ## What it does
 
-homelinter classifies files (photos, documents, repositories, and so on), extracts metadata like dates and content hashes, and suggests `move` and `delete` operations with per-plan destinations and reasons. It works in the interactive CLI, a full-screen TUI, and a web SPA, all clients of one shared service.
+homelinter classifies files (photos, documents, repositories, and so on), extracts metadata like dates and content hashes, and suggests `move` and `delete` operations with per-plan destinations and reasons. It works from a plain CLI, a full-screen TUI, and a web SPA, all clients of one shared service.
 
 Duplicated files and broken symlinks are detected and reported for repair. Suggestions are validated as a batch before presentation and re-validated before execution, with collisions rejected rather than guessed at.
 
@@ -16,7 +16,7 @@ Duplicated files and broken symlinks are detected and reported for repair. Sugge
 
 From the repo root, `cargo run -p homelinter -- <subcommand>` runs the `homelinter` binary directly. Build with `cargo build --release`; the binary is `target/release/homelinter`.
 
-- **Interactive CLI**: `cargo run -p homelinter` scans the default root (your home directory), shows suggestions for review, then exports or executes them on request.
+- **Plain scan**: `cargo run -p homelinter` scans the default root (your home directory) and prints a summary pointing at the review and action entry points; nothing is executed or exported. Full-screen interactive review lives in `tui`.
 - **Non-interactive**: `cargo run -p homelinter -- --execute` runs all suggestions immediately; `--export <path>` writes the plan to an executable script.
 - **TUI**: `cargo run -p homelinter -- tui` starts the full-screen terminal interface (needs an 80x24 terminal).
 - **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Session state is in memory, so a restart requires a new scan.

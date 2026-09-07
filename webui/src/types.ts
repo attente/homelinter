@@ -19,6 +19,11 @@ export interface ApiErrorBody {
   };
 }
 
+export interface ScanDefaults {
+  hidden: boolean;
+  target_paths: Record<string, string>;
+}
+
 export interface Session {
   state: SessionState;
   scan_root: string | null;
@@ -28,6 +33,7 @@ export interface Session {
   suggestions_total: number;
   selection_count: number;
   failure?: ApiErrorBody['error'] | null;
+  scan_defaults?: ScanDefaults;
   [key: string]: unknown;
 }
 

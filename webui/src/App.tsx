@@ -443,9 +443,18 @@ export default function App() {
   if (st.configOpen) {
     body = <ConfigView onClose={() => patch({ configOpen: false })} pushToast={pushToast} />;
   } else if (st.showScanForm) {
+    const defaults = st.session?.scan_defaults;
+    const defaultTargetPaths = defaults
+      ? Object.entries(defaults.target_paths)
+          .map(([kind, tmpl]) => `${kind}=${tmpl}`)
+          .join('\n')
+      : '';
     body = (
       <ScanForm
+        key={st.session ? 'session-loaded' : 'booting'}
         defaultRoot={st.session?.scan_root ?? ''}
+        defaultHidden={defaults?.hidden ?? false}
+        defaultTargetPaths={defaultTargetPaths}
         hasSuggestions={st.suggestions.length > 0}
         startDisabled={!canScan}
         onStart={startScan}

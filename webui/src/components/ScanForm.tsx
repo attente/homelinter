@@ -8,6 +8,8 @@ export interface ScanFormValues {
 
 interface ScanFormProps {
   defaultRoot: string;
+  defaultHidden?: boolean;
+  defaultTargetPaths?: string;
   hasSuggestions: boolean;
   startDisabled?: boolean;
   onStart: (values: ScanFormValues) => void;
@@ -15,10 +17,18 @@ interface ScanFormProps {
 }
 
 export function ScanForm(props: ScanFormProps) {
-  const { defaultRoot, hasSuggestions, startDisabled, onStart, onResume } = props;
+  const {
+    defaultRoot,
+    defaultHidden,
+    defaultTargetPaths,
+    hasSuggestions,
+    startDisabled,
+    onStart,
+    onResume,
+  } = props;
   const [root, setRoot] = useState(defaultRoot);
-  const [hidden, setHidden] = useState(false);
-  const [targets, setTargets] = useState('');
+  const [hidden, setHidden] = useState(defaultHidden ?? false);
+  const [targets, setTargets] = useState(defaultTargetPaths ?? '');
 
   return (
     <main className="scan-form">

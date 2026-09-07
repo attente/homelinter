@@ -2,6 +2,7 @@
 //! selection and validation rules, real execution with idempotency,
 //! export, config, cache, audit, and an end-to-end HTTP + SSE + shutdown run.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -55,6 +56,7 @@ impl Env {
             home_override: Some(self.home.clone()),
             data_dir_override: Some(self.data.clone()),
             web_dir: None,
+            ..Default::default()
         };
         build_service(opts).unwrap().app
     }
@@ -136,6 +138,39 @@ async fn wait_state(app: &AppHandle, want: &str) {
         "session never reached {want}; last state: {}",
         session_state(app).await
     );
+}
+
+#[tokio::test]
+async fn session_reports_scan_dialog_defaults() {
+    let env = Env::new("scan_defaults");
+    let opts = ServiceOptions {
+        cli_config: Some(env._config.clone()),
+        home_override: Some(env.home.clone()),
+        data_dir_override: Some(env.data.clone()),
+        web_dir: None,
+        default_hidden: true,
+        default_target_paths: BTreeMap::from([(
+            "photo".to_string(),
+            "Pictures/%Y/%m/%f".to_string(),
+        )]),
+    };
+    let app = build_service(opts).unwrap().app;
+    let (status, v) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["scan_defaults"]["hidden"], true);
+    assert_eq!(
+        v["scan_defaults"]["target_paths"]["photo"],
+        "Pictures/%Y/%m/%f"
+    );
+}
+
+#[tokio::test]
+async fn session_scan_defaults_default_to_off() {
+    let env = Env::new("scan_defaults_off");
+    let app = env.service();
+    let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(v["scan_defaults"]["hidden"], false);
+    assert_eq!(v["scan_defaults"]["target_paths"], json!({}));
 }
 
 /// Create two identical files with distinct mtimes; the older becomes the
@@ -469,6 +504,7 @@ async fn sse_snapshot_and_shutdown_over_http() {
         home_override: Some(env.home.clone()),
         data_dir_override: Some(env.data.clone()),
         web_dir: None,
+        ..Default::default()
     })
     .unwrap();
     let app = built.app.clone();
@@ -600,6 +636,7 @@ impl WebEnv {
             home_override: Some(self.home.clone()),
             data_dir_override: Some(self.data.clone()),
             web_dir: Some(self.web.clone()),
+            ..Default::default()
         };
         build_service(opts).unwrap().app
     }
@@ -733,6 +770,7 @@ async fn spa_rejects_path_traversal() {
         home_override: Some(env.home.clone()),
         data_dir_override: Some(env.data.clone()),
         web_dir: Some(env.web.clone()),
+        ..Default::default()
     })
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

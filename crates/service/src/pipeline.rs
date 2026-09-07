@@ -45,6 +45,11 @@ pub struct App {
     /// Directory containing the built SPA (index.html + assets). None
     /// disables static file serving (API-only mode).
     pub web_dir: Option<PathBuf>,
+    /// Scan dialog defaults for the SPA (see `ServiceOptions::default_hidden`
+    /// and `ServiceOptions::default_target_paths`). Exposed as
+    /// `scan_defaults` in `GET /session`; never applied server-side.
+    pub default_hidden: bool,
+    pub default_target_paths: BTreeMap<String, String>,
     /// Watch channel: a `POST /api/v1/shutdown` sends `true` here and the
     /// HTTP server shuts down gracefully.
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,

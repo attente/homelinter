@@ -63,36 +63,6 @@ pub fn emit_document(format: OutputFormat, value: &Value) -> std::io::Result<()>
     out.flush()
 }
 
-/// One suggestion as rendered by the interactive pager listing.
-fn suggestion_line(s: &Value) -> String {
-    let id = s["id"].as_str().unwrap_or("?");
-    let ty = s["type"].as_str().unwrap_or("?");
-    let kind = s["asset_kind"].as_str().unwrap_or("?");
-    let target = s["target"].as_str().unwrap_or("?");
-    let mut line = format!("[{ty}] {kind}: {target}");
-    if let Some(np) = s["new_path"].as_str() {
-        line.push_str(&format!("\n      -> {np}"));
-    }
-    if let Some(reason) = s["reason"].as_str() {
-        line.push_str(&format!("\n      {reason}"));
-    }
-    if let Some(st) = s["status"].as_str() {
-        line.push_str(&format!("\n      status: {st}"));
-    }
-    line.push_str(&format!("\n      id: {id}"));
-    line
-}
-
-/// Print the suggestion list for interactive review.
-pub fn print_suggestions(items: &[Value]) {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for (i, s) in items.iter().enumerate() {
-        let _ = writeln!(out, "--- {} ---\n{}", i + 1, suggestion_line(s));
-    }
-    let _ = out.flush();
-}
-
 /// Print an execution report per the selected format.
 pub fn emit_report(format: OutputFormat, report: &Value) -> std::io::Result<()> {
     match format {

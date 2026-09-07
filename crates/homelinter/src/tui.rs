@@ -1353,7 +1353,7 @@ pub async fn run(
 ) -> Result<u8, String> {
     if !io::stdin().is_terminal() {
         return Err(
-            "the tui requires a terminal; use the interactive mode, --execute, or --export without one"
+            "the tui requires a terminal; run a plain scan for a summary, or use --execute or --export to act without review"
                 .to_string(),
         );
     }

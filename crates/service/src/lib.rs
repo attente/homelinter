@@ -16,6 +16,7 @@ pub mod session;
 
 pub use http::router;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -41,6 +42,12 @@ pub struct ServiceOptions {
     /// Directory containing the built SPA (index.html + assets). When set,
     /// the HTTP server also serves static files and the SPA index fallback.
     pub web_dir: Option<PathBuf>,
+    /// Scan dialog defaults surfaced to the SPA via `GET /session`
+    /// (`scan_defaults`): the `web` command pre-fills the scan form with
+    /// them. They are never applied server-side; the SPA sends `hidden` and
+    /// `target_paths` per scan request as today.
+    pub default_hidden: bool,
+    pub default_target_paths: BTreeMap<String, String>,
 }
 
 /// A fully wired service instance ready to serve HTTP.
@@ -92,6 +99,8 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         cli_config: opts.cli_config,
         home_override: opts.home_override,
         web_dir: opts.web_dir,
+        default_hidden: opts.default_hidden,
+        default_target_paths: opts.default_target_paths,
         shutdown_tx,
     });
 
