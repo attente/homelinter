@@ -11,7 +11,10 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 
-use homelinter_analyze::{analyze, AnalyzeOptions};
+use homelinter_analyze::{
+    analyze, AnalyzeOptions, BuiltinExifExtractor, ExifToolExtractor, ExtractionContext,
+    MetadataExtractor,
+};
 use homelinter_model::suggestion::{
     ExecutionReport, ExecutionStatus, OperationKind, OperationStatus, SessionState, Suggestion,
     SuggestionStatus,
@@ -62,6 +65,19 @@ pub fn effective_home(app: &App) -> PathBuf {
 
 pub fn is_cancelled(app: &App, token: u64) -> bool {
     app.cancel.load(Ordering::SeqCst) != token
+}
+
+/// Assemble the analysis extractor set for one scan.
+fn build_extractors(
+    _cfg: &homelinter_model::config::RawConfig,
+) -> Vec<Box<dyn MetadataExtractor + Send + Sync>> {
+    let toolset = ToolSet::detect();
+    let mut extractors: Vec<Box<dyn MetadataExtractor + Send + Sync>> = Vec::new();
+    if toolset.has("exiftool") {
+        extractors.push(Box::new(ExifToolExtractor {}));
+    }
+    extractors.push(Box::new(BuiltinExifExtractor {}));
+    extractors
 }
 
 fn phase_progress(phase: &'static str, scanned: u64, start: Instant) -> ServerEvent {
@@ -125,16 +141,22 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     // Phase 2: analysis.
     let files = scan.files.clone();
     let repos = scan.repos.clone();
-    let analysis = tokio::task::spawn_blocking(move || {
-        let opts = AnalyzeOptions {
+    let analyze_opts = {
+        let sess = app.session.lock().await;
+        AnalyzeOptions {
             large_file_threshold: threshold,
             toolset: ToolSet::detect(),
-            extractors: Vec::new(),
-            ctx: Default::default(),
-        };
-        analyze(&files, &repos, &opts)
-    })
-    .await;
+            // The in-process kamadak-exif reader handles supported containers.
+            extractors: build_extractors(&sess.config),
+            ctx: ExtractionContext {
+                tool_timeout: std::time::Duration::from_secs(sess.config.tool_timeout()),
+                tool_stdout_max_bytes: sess.config.tool_stdout_max_bytes(),
+                config: Some(sess.config.clone()),
+            },
+        }
+    };
+    let analysis =
+        tokio::task::spawn_blocking(move || analyze(&files, &repos, &analyze_opts)).await;
     let analysis = match analysis {
         Ok(a) => Arc::new(a),
         Err(e) => return fail(app.clone(), format!("analysis task panicked: {e}")).await,

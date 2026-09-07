@@ -498,7 +498,14 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         GeocoderService::Photon => ("photon", "https://photon.komoot.io", Duration::from_secs(1)),
         GeocoderService::Google => ("google", "https://maps.googleapis.com/maps/api", Duration::ZERO),
         GeocoderService::Mapbox => ("mapbox", "https://api.mapbox.com", Duration::ZERO),
-        GeocoderService::Custom => ("custom", "", Duration::ZERO),
+        GeocoderService::Custom => (
+            "custom",
+            "",
+            // The custom/self-hosted service is the user's responsibility;
+            // the optional configured rate limit paces it like the built-in
+            // public services pace themselves (0 = no built-in delay).
+            Duration::from_secs(cfg.geocoder.rate_limit_seconds.unwrap_or(0)),
+        ),
     };
     let endpoint = cfg
         .geocoder
@@ -727,6 +734,8 @@ mod tests {
             extracted_date: None,
             date_source: "",
             embedded_title: None,
+            embedded_author: None,
+            camera_model: None,
             latitude: None,
             longitude: None,
             location: None,
@@ -987,11 +996,22 @@ mod tests {
         assert_eq!(s.min_interval, Duration::ZERO);
         assert_eq!(s.language.as_deref(), Some("en"));
 
+        // A configured rate limit paces the custom service.
+        let paced: RawConfig = toml::from_str(
+            "[geocoder]\nenabled = true\nservice = \"custom\"\nendpoint = \"http://geo.local\"\nrate_limit_seconds = 3\n"
+        )
+        .unwrap();
+        assert_eq!(
+            geocoder_settings(&paced).unwrap().min_interval,
+            Duration::from_secs(3)
+        );
+
         // Disabled -> None.
         let off: RawConfig = toml::from_str("").unwrap();
         assert!(geocoder_settings(&off).is_none());
 
-        // Nominatim carries the built-in public pace.
+        // Nominatim carries the built-in public pace; the configured rate
+        // limit never overrides it.
         let nom: RawConfig =
             toml::from_str("[geocoder]\nenabled = true\n").unwrap();
         let s = geocoder_settings(&nom).unwrap();
@@ -1036,6 +1056,8 @@ mod tests {
             extracted_date: None,
             date_source: "",
             embedded_title: None,
+            embedded_author: None,
+            camera_model: None,
             latitude: lat,
             longitude: lon,
             location: None,

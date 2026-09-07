@@ -3,16 +3,23 @@
 //!
 //! Embedded-media extraction (EXIF, ID3, document titles) and provider
 //! analysis (LLM descriptions, reverse geocoding) plug in behind
-//! `MetadataExtractor`; the scaffold ships a no-op extractor set so scans
-//! run without external tools. Filename-derived dates are parsed here,
-//! conservatively, and never override higher-priority sources.
+//! `MetadataExtractor`. The scaffold ships a `kamadak-exif` fallback;
+//! extractors are consulted in priority order per file and the first value
+//! wins per field.
+//! Filename-derived dates are parsed here, conservatively, and never
+//! override an embedded date-taken.
 
+mod builtin_exif;
 mod dateparse;
+mod exiftool;
 mod extractor;
 mod repo;
+mod tool_runner;
 
-pub use dateparse::{parse_filename_date, DateParts};
-pub use extractor::{ExtractionContext, MetadataExtractor};
+pub use builtin_exif::BuiltinExifExtractor;
+pub use dateparse::{parse_exif_datetime, parse_filename_date, DateParts};
+pub use exiftool::ExifToolExtractor;
+pub use extractor::{merge_meta, EmbeddedMeta, ExtractionContext, MetadataExtractor};
 pub use repo::{RepoAnalyzer, RepoMeta};
 
 use std::collections::BTreeMap;
@@ -43,6 +50,12 @@ pub struct AnalyzedFile {
     pub date_source: &'static str,
     /// Embedded title metadata when an extractor provided one.
     pub embedded_title: Option<String>,
+    /// Embedded author/artist when an extractor provided one (EXIF Artist),
+    /// backing the `%a` placeholder.
+    pub embedded_author: Option<String>,
+    /// Camera model/make when an extractor provided one (EXIF Model or
+    /// Make), backing the `%c` placeholder.
+    pub camera_model: Option<String>,
     /// Raw GPS coordinates when an extractor found them (EXIF for photos
     /// and videos). Backing input for the `%l` reverse-geocoder.
     pub latitude: Option<f64>,
@@ -93,7 +106,13 @@ impl Default for AnalyzeOptions {
             large_file_threshold: homelinter_model::config::DEFAULT_LARGE_FILE_THRESHOLD,
             toolset: homelinter_scan::ToolSet::detect(),
             extractors: Vec::new(),
-            ctx: ExtractionContext::default(),
+            ctx: ExtractionContext {
+                tool_timeout: std::time::Duration::from_secs(
+                    homelinter_model::config::DEFAULT_TOOL_TIMEOUT_SECONDS,
+                ),
+                tool_stdout_max_bytes: homelinter_model::config::DEFAULT_TOOL_STDOUT_MAX_BYTES,
+                config: None,
+            },
         }
     }
 }
@@ -103,14 +122,16 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
     let mut degraded = false;
     for f in files {
         let kind = classify_path(&f.path);
-        let (date, source) = extract_date(f, kind, opts);
-        let mut embedded_title = None;
+        // Merge all configured extractors, first value wins per field.
+        let mut merged = EmbeddedMeta::default();
         for ex in &opts.extractors {
-            if let Some(t) = ex.extract_title(&f.path, kind, &opts.ctx) {
-                embedded_title = Some(t);
-                break;
-            }
+            let m = ex.extract(&f.path, kind, &opts.ctx);
+            merge_meta(&mut merged, &m);
         }
+        let (date, source) = match merged.date_taken.clone() {
+            Some(d) => (Some(d), "embedded"),
+            None => filename_date(f),
+        };
         let mut prov = Provenance::default();
         prov.size = f.size;
         if let Ok(m) = f.modified.duration_since(std::time::UNIX_EPOCH) {
@@ -143,9 +164,11 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
             provenance: prov,
             extracted_date: date,
             date_source: source,
-            embedded_title,
-            latitude: None,
-            longitude: None,
+            embedded_title: merged.title,
+            embedded_author: merged.author,
+            camera_model: merged.camera,
+            latitude: merged.latitude,
+            longitude: merged.longitude,
             location: None,
             subject: None,
         });
@@ -167,14 +190,10 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
     }
 }
 
-fn extract_date(
-    f: &FileEntry,
-    kind: AssetKind,
-    _opts: &AnalyzeOptions,
-) -> (Option<DateParts>, &'static str) {
-    // Higher-priority embedded extraction is a no-op in the scaffold; parse
-    // the filename conservatively for date-bearing names.
-    let _ = kind;
+/// Date parsed conservatively from the filename, used only when no embedded
+/// or content-provider date is available (the modification-time fallback
+/// lives downstream).
+fn filename_date(f: &FileEntry) -> (Option<DateParts>, &'static str) {
     let name = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match parse_filename_date(name) {
         Some(d) => (Some(d), "filename"),

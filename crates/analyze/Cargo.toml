@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+kamadak-exif = "0.6.1"

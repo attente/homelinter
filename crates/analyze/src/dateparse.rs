@@ -200,9 +200,77 @@ fn parse_separated(bytes: &[u8]) -> Option<DateParts> {
     Some(d)
 }
 
+/// Parse an EXIF-style date-time string into `DateParts`.
+///
+/// EXIF stores `YYYY:MM:DD HH:MM:SS` (the separator is `:`, the date and
+/// time are space-separated); date-only values, `-`/`/` separators, and a
+/// `T` date/time separator are tolerated. The calendar is validated with
+/// the same conservative rules as filename dates.
+pub fn parse_exif_datetime(s: &str) -> Option<DateParts> {
+    let b = s.as_bytes();
+    if b.len() < 10 || !b[0..4].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut parts = DateParts {
+        year: digits(&b[0..4])? as i32,
+        month: digits(&b[5..7])?,
+        day: digits(&b[8..10])?,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    };
+    if !parts.valid() {
+        return None;
+    }
+    // Optional time following a space or `T`: HH, HH:MM, or HH:MM:SS.
+    if b.len() >= 13 && (b[10] == b' ' || b[10] == b'T') {
+        if b.len() >= 16 && b[13] == b':' {
+            parts.hour = digits(&b[11..13])?;
+            parts.minute = digits(&b[14..16])?;
+            parts.second = if b.len() >= 19 && b[16] == b':' {
+                digits(&b[17..19])?
+            } else {
+                0
+            };
+        } else if b.len() >= 15 && b[13] == b':' {
+            parts.hour = digits(&b[11..13])?;
+            parts.minute = digits(&b[14..16])?;
+        } else {
+            parts.hour = digits(&b[11..13])?;
+        }
+        if parts.hour >= 24 || parts.minute >= 60 || parts.second >= 60 {
+            return None;
+        }
+    }
+    Some(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_exif_datetimes() {
+        assert_eq!(
+            parse_exif_datetime("2024:03:15 15:30:45").unwrap(),
+            DateParts {
+                year: 2024,
+                month: 3,
+                day: 15,
+                hour: 15,
+                minute: 30,
+                second: 45
+            }
+        );
+        assert_eq!(
+            parse_exif_datetime("2024-03-15T15:30:45").unwrap().hour,
+            15
+        );
+        assert_eq!(parse_exif_datetime("2024/03/15").unwrap().day, 15);
+        assert!(parse_exif_datetime("2024:13:01 00:00:00").is_none());
+        assert!(parse_exif_datetime("2024:02:31 00:00:00").is_none());
+        assert!(parse_exif_datetime("junk").is_none());
+    }
 
     #[test]
     fn parses_common_forms() {

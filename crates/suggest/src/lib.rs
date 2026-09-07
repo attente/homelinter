@@ -284,10 +284,10 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         minute,
         second,
         title: Some(title),
-        author: None,
+        author: f.embedded_author.clone(),
         location: f.location.clone(),
         subject: f.subject.clone(),
-        camera: None,
+        camera: f.camera_model.clone(),
         remote_host: None,
         file_name: Some(
             f.path
