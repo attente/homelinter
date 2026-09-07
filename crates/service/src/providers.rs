@@ -119,7 +119,7 @@ pub struct ProviderSettings {
     pub api_key: Option<String>,
     pub language: Option<String>,
     pub model: Option<String>,
-    pub max_tokens: Option<u64>,
+    pub max_words: Option<u64>,
 }
 
 /// A single queued provider request.
@@ -533,7 +533,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         api_key,
         language,
         model: None,
-        max_tokens: None,
+        max_words: None,
     })
 }
 
@@ -566,6 +566,9 @@ pub fn description_settings(
         endpoint.as_bytes(),
         eff.model.as_deref().unwrap_or("").as_bytes(),
         eff.api_key.as_deref().unwrap_or("").as_bytes(),
+        // The word budget governs the request, so a different cap must not
+        // reuse cached descriptions from another budget.
+        eff.max_words.to_le_bytes().as_slice(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -576,7 +579,7 @@ pub fn description_settings(
         api_key: eff.api_key,
         language: None,
         model: eff.model,
-        max_tokens: Some(eff.max_tokens),
+        max_words: Some(eff.max_words),
     })
 }
 
@@ -809,7 +812,7 @@ mod tests {
                 api_key: None,
                 language: None,
                 model: None,
-                max_tokens: None,
+                max_words: None,
             },
             unit: UnitRef {
                 epoch,
@@ -886,7 +889,7 @@ mod tests {
             api_key: None,
             language: None,
             model: None,
-            max_tokens: None,
+            max_words: None,
         };
         let mut last = BTreeMap::new();
         pace(&settings, &mut last).await;

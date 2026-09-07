@@ -45,7 +45,7 @@ provider = "ollama"          # ollama | openrouter | openai | custom
 endpoint = "http://localhost:11434"
 model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer
-max_tokens = 512
+max_words = 8                   # maximum words in the generated description
 
 [document_extraction]
 # Text extraction before description generation. {path} is the input file;

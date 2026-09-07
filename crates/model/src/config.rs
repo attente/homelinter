@@ -18,7 +18,7 @@ use crate::error::ApiError;
 use crate::format::FormatString;
 
 pub const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 104_857_600;
-pub const DEFAULT_MAX_TOKENS: u64 = 512;
+pub const DEFAULT_MAX_WORDS: u64 = 8;
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 120;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_TOOL_STDOUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -157,7 +157,7 @@ impl GeocoderConfig {
 
 /// A description provider entry: the base `[description]` table or one
 /// per-kind override such as `[description.photo]`. LLM transport settings
-/// (`provider`, `endpoint`, `model`, `api_key`, `max_tokens`) live directly
+/// (`provider`, `endpoint`, `model`, `api_key`, `max_words`) live directly
 /// on each entry; unset keys fall back to the base entry.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -173,7 +173,7 @@ pub struct DescriptionProvider {
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
-    pub max_tokens: Option<u64>,
+    pub max_words: Option<u64>,
 }
 
 /// The effective settings of a description provider entry after per-key
@@ -185,7 +185,7 @@ pub struct EffectiveDescription {
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
-    pub max_tokens: u64,
+    pub max_words: u64,
 }
 
 impl DescriptionProvider {
@@ -198,10 +198,10 @@ impl DescriptionProvider {
             endpoint: self.endpoint.clone().or_else(|| base.endpoint.clone()),
             model: self.model.clone().or_else(|| base.model.clone()),
             api_key: self.api_key.clone().or_else(|| base.api_key.clone()),
-            max_tokens: self
-                .max_tokens
-                .or(base.max_tokens)
-                .unwrap_or(DEFAULT_MAX_TOKENS),
+            max_words: self
+                .max_words
+                .or(base.max_words)
+                .unwrap_or(DEFAULT_MAX_WORDS),
         }
     }
 }
@@ -699,10 +699,10 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                 ));
             }
         }
-        if eff.max_tokens == 0 {
+        if eff.max_words == 0 {
             fields.push((
-                format!("{prefix}.max_tokens"),
-                "max_tokens must be positive".into(),
+                format!("{prefix}.max_words"),
+                "max_words must be positive".into(),
             ));
         }
         if !eff.enabled {
@@ -992,7 +992,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         ),
     );
     desc.insert("model".into(), serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null));
-    desc.insert("max_tokens".into(), JsonValue::from(base_eff.max_tokens));
+    desc.insert("max_words".into(), JsonValue::from(base_eff.max_words));
     for (kind, p) in &raw.description.per_kind {
         let eff = p.effective(&raw.description.base);
         desc.insert(
@@ -1002,7 +1002,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "provider": llm_backend_name(eff.provider),
                 "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.provider.default_endpoint().into()),
                 "model": eff.model,
-                "max_tokens": eff.max_tokens,
+                "max_words": eff.max_words,
             }),
         );
     }
@@ -1099,8 +1099,8 @@ mod tests {
         );
         assert_eq!(rc.provider_timeout(), DEFAULT_PROVIDER_TIMEOUT_SECONDS);
         assert_eq!(
-            rc.description.base_effective().max_tokens,
-            DEFAULT_MAX_TOKENS
+            rc.description.base_effective().max_words,
+            DEFAULT_MAX_WORDS
         );
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
