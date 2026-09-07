@@ -20,6 +20,7 @@ export interface FilterState {
 
 interface BrowseProps {
   suggestions: Suggestion[];
+  actionsDisabled?: boolean;
   onToggle: (id: string, select: boolean) => void;
   onSelectMany: (ids: string[]) => void;
   onClearSelection: () => void;
@@ -28,7 +29,7 @@ interface BrowseProps {
 }
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
+  const { suggestions, actionsDisabled, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
   const [filter, setFilter] = useState<Filter>(ALL_FILTER);
   const [cursor, setCursor] = useState(0);
 
@@ -82,10 +83,20 @@ export function Browse(props: BrowseProps) {
             select none
           </button>
           <span className="sep" />
-          <button type="button" onClick={() => onRun()}>
+          <button
+            type="button"
+            onClick={() => onRun()}
+            disabled={actionsDisabled}
+            title={actionsDisabled ? 'execute is only available from a ready or done session' : undefined}
+          >
             execute
           </button>
-          <button type="button" onClick={() => onExport()}>
+          <button
+            type="button"
+            onClick={() => onExport()}
+            disabled={actionsDisabled}
+            title={actionsDisabled ? 'export is only available from a ready or done session' : undefined}
+          >
             export
           </button>
         </div>

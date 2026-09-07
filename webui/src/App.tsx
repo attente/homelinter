@@ -82,6 +82,11 @@ export default function App() {
 
   const startScan = useCallback(
     async (values: ScanFormValues) => {
+      const curState = stRef.current.session?.state;
+      if (curState === 'scanning' || curState === 'analyzing' || curState === 'executing') {
+        pushToast('a scan or execution is already in progress');
+        return;
+      }
       setSt((prev) => ({
         ...prev,
         busy: true,
@@ -419,6 +424,15 @@ export default function App() {
 
   const selectedCount = st.suggestions.filter((s) => s.selected).length;
   const state = st.session?.state ?? 'unknown';
+  // Mirror the backend's state guards so controls are disabled when the
+  // service would reject the request (see "Session Model" in DESIGN.md):
+  // a new scan is only accepted outside scanning/analyzing/executing, and
+  // execute/export only from a ready or done session. Cancel is only
+  // meaningful while something is in progress.
+  const inProgress = (s: string) => s === 'scanning' || s === 'analyzing' || s === 'executing';
+  const canScan = !inProgress(state);
+  const canAct = state === 'ready' || state === 'done';
+  const canCancel = inProgress(state);
   const counts = {
     suggestions: st.suggestions.length,
     shown: st.suggestions.length,
@@ -433,6 +447,7 @@ export default function App() {
       <ScanForm
         defaultRoot={st.session?.scan_root ?? ''}
         hasSuggestions={st.suggestions.length > 0}
+        startDisabled={!canScan}
         onStart={startScan}
         onResume={() => patch({ showScanForm: false, phase: 'browse' })}
       />
@@ -448,7 +463,9 @@ export default function App() {
             </span>
           )}
           <div className="toolbar">
-            <button type="button" onClick={() => void cancel()}>cancel</button>
+            <button type="button" onClick={() => void cancel()} disabled={!canCancel}>
+              cancel
+            </button>
           </div>
         </div>
       </main>
@@ -461,6 +478,7 @@ export default function App() {
         log={st.runLog}
         report={st.report}
         error={st.runError}
+        cancelDisabled={!canCancel}
         onCancel={() => void cancel()}
         onDone={() => void doneFromReport()}
       />
@@ -476,6 +494,7 @@ export default function App() {
         )}
         <Browse
           suggestions={st.suggestions}
+          actionsDisabled={!canAct}
           onToggle={(id, sel) => void toggle(id, sel)}
           onSelectMany={(ids) => void selectMany(ids)}
           onClearSelection={clearSelection}
@@ -493,6 +512,7 @@ export default function App() {
         root={st.session?.scan_root ?? null}
         counts={counts}
         busy={st.busy}
+        scanDisabled={!canScan}
         onNewScan={() => patch({ showScanForm: true, phase: 'idle', configOpen: false })}
         onConfig={() => patch({ configOpen: true })}
       />

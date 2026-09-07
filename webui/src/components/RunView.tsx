@@ -7,6 +7,7 @@ interface RunViewProps {
   log: string[];
   report: ExecutionReport | null;
   error: string | null;
+  cancelDisabled?: boolean;
   onCancel: () => void;
   onDone: () => void;
 }
@@ -14,7 +15,7 @@ interface RunViewProps {
 const TOTAL_RESULTS: EntryResult[] = ['executed', 'failed', 'skipped'];
 
 export function RunView(props: RunViewProps) {
-  const { state, progress, log, report, error, onCancel, onDone } = props;
+  const { state, progress, log, report, error, cancelDisabled, onCancel, onDone } = props;
   const spinner = '|/-\\'[Math.floor(Date.now() / 120) % 4];
 
   return (
@@ -27,7 +28,14 @@ export function RunView(props: RunViewProps) {
           </span>
         )}
         <div className="toolbar">
-          <button type="button" onClick={onCancel}>cancel</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={cancelDisabled}
+            title={cancelDisabled ? 'nothing is in progress to cancel' : undefined}
+          >
+            cancel
+          </button>
         </div>
       </div>
       <pre className="log">

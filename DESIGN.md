@@ -579,6 +579,8 @@ State transitions: a new scan replaces the session from `idle`, `ready`, `done`,
 
 A restart requires a new scan: session state is never persisted. The scan root is captured when the scan starts and is retained with the session (see "Scan Root and Path Representation").
 
+**Guarded actions**: the service rejects requests that contradict the state machine with 409 (a new scan during `scanning`/`analyzing`/`executing`, execute/export outside `ready`/`done`, cancel when nothing is in progress). Clients mirror these guards so the controls are disabled before the user attempts them: the SPA derives disabled states from `GET /session` (scan/start disabled while a scan or execution is in progress, execute/export disabled unless the session is `ready` or `done`, cancel disabled otherwise) and the TUI only dispatches the matching keys in the phase where the action is legal (see "User Interfaces").
+
 **Configuration snapshot per scan**: the service snapshots the effective configuration and the per-scan `target_paths` overrides at the moment a scan is accepted. Every phase of that scan (discovery, analysis, suggestion generation, provider planning) runs against that one snapshot, so a config save during a scan never changes the running work and the published batch reflects a single committed configuration. Edits saved mid-scan affect only the next scan. The session exposes both the live effective config hash (`config_hash`) and `batch_config_hash`, the hash of the snapshot the current batch was scanned under; clients compare the two to flag a stale batch and offer a re-scan before execute or export (see "Service API > Session & Scan").
 
 ### Data Types

@@ -9,12 +9,13 @@ export interface ScanFormValues {
 interface ScanFormProps {
   defaultRoot: string;
   hasSuggestions: boolean;
+  startDisabled?: boolean;
   onStart: (values: ScanFormValues) => void;
   onResume: () => void;
 }
 
 export function ScanForm(props: ScanFormProps) {
-  const { defaultRoot, hasSuggestions, onStart, onResume } = props;
+  const { defaultRoot, hasSuggestions, startDisabled, onStart, onResume } = props;
   const [root, setRoot] = useState(defaultRoot);
   const [hidden, setHidden] = useState(false);
   const [targets, setTargets] = useState('');
@@ -62,7 +63,13 @@ export function ScanForm(props: ScanFormProps) {
           />
         </label>
         <div className="toolbar">
-          <button type="submit">scan</button>
+          <button
+            type="submit"
+            disabled={startDisabled}
+            title={startDisabled ? 'a scan or execution is already in progress' : undefined}
+          >
+            scan
+          </button>
         </div>
       </form>
     </main>
