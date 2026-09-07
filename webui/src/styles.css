@@ -418,7 +418,7 @@ textarea:focus {
   overflow-y: auto;
 }
 
-/* Config view (settings) */
+/* Config view (read-only) */
 
 .config-view {
   display: flex;
@@ -435,28 +435,15 @@ textarea:focus {
   font-size: 14px;
 }
 
-.settings {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  max-width: 900px;
-}
-
-.settings section {
+.config-doc {
+  margin: 0;
+  padding: 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 10px 12px;
-}
-
-.settings h3 {
-  margin: 0 0 8px;
-  font-size: 13px;
-}
-
-.settings textarea {
-  width: 100%;
   background: var(--bg);
-  font: inherit;
+  font-size: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .field-grid {

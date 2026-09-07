@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
@@ -74,7 +74,7 @@ pub fn app_data_dir() -> Option<PathBuf> {
 // the session-scoped `scan.root` and `scan.hidden`) are rejected.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmBackend {
     Ollama,
@@ -100,7 +100,7 @@ impl LlmBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GeocoderService {
     Nominatim,
@@ -122,7 +122,7 @@ impl GeocoderService {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GeocoderConfig {
     #[serde(default)]
@@ -156,7 +156,7 @@ impl GeocoderConfig {
 /// per-kind override such as `[description.photo]`. LLM transport settings
 /// (`service`, `endpoint`, `model`, `api_key`, `max_words`, `rate_limit_ms`)
 /// live directly on each entry; unset keys fall back to the base entry.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DescriptionProvider {
     #[serde(default)]
@@ -224,7 +224,7 @@ impl DescriptionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DescriptionConfig {
     /// Base provider fields; the base entry is the default provider for
     /// every content kind without an explicit per-kind override.
@@ -237,7 +237,7 @@ pub struct DescriptionConfig {
     pub per_kind: BTreeMap<String, DescriptionProvider>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicationConfig {
     #[serde(default = "default_large_file_threshold")]
@@ -256,7 +256,7 @@ fn default_large_file_threshold() -> u64 {
     DEFAULT_LARGE_FILE_THRESHOLD
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HiddenDefinition {
     Explorer,
@@ -264,7 +264,7 @@ pub enum HiddenDefinition {
     Dotfiles,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     #[serde(default)]
@@ -273,7 +273,7 @@ pub struct ScanConfig {
     pub hidden_definition: Option<HiddenDefinition>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Pretty,
@@ -281,14 +281,14 @@ pub enum OutputFormat {
     Toml,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default)]
     pub format: Option<OutputFormat>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     #[serde(default = "default_true")]
@@ -305,7 +305,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     #[serde(default)]
@@ -318,7 +318,7 @@ pub struct LimitsConfig {
 
 /// The complete merged configuration file content. Each section defaults to
 /// an absent section; accessor methods apply the documented defaults.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
     #[serde(default)]
@@ -936,6 +936,25 @@ pub fn merge_and_validate_config(
     Ok(raw)
 }
 
+/// Apply a partial per-scan configuration overlay (the `config` member of
+/// `POST /session/scan`) on top of the effective configuration. The overlay
+/// uses the same shape and merge semantics as `PUT /config` - tables merge
+/// by key, scalars and arrays replace, `null` deletes the key so the
+/// built-in default applies - but nothing is persisted: the result is the
+/// configuration snapshot for that one scan only.
+pub fn overlay_scan_config(base: &RawConfig, overlay: &JsonValue) -> Result<RawConfig, ApiError> {
+    if !overlay.is_object() {
+        return Err(ApiError::validation("configuration must be a table"));
+    }
+    let mut json = serde_json::to_value(base)
+        .map_err(|e| ApiError::validation(format!("cannot serialize configuration: {e}")))?;
+    deep_merge_json(&mut json, overlay.clone());
+    let raw: RawConfig = serde_json::from_value(json)
+        .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
+    validate_config(&raw)?;
+    Ok(raw)
+}
+
 /// Lossy JSON -> TOML conversion for the PUT / config persistence path
 /// (JSON booleans/strings/integers map onto TOML cleanly).
 pub fn json_to_toml(v: &JsonValue) -> Option<TomlValue> {
@@ -1162,7 +1181,8 @@ mod tests {
     #[test]
     fn description_key_requirements() {
         assert!(
-            parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n").is_err()
+            parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n")
+                .is_err()
         );
         assert!(parse(
             "[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\napi_key = \"k\"\n"
@@ -1245,10 +1265,65 @@ mod tests {
         assert_eq!(base["geocoder"]["enabled"], serde_json::json!(false));
         assert!(base["target_paths"].get("photo").is_none());
         assert_eq!(base["target_paths"]["audio"], serde_json::json!("Music/%f"));
+        assert_eq!(base["scan"]["exclude_paths"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn overlay_scan_config_overrides_and_resets() {
+        let mut base = RawConfig::default();
+        base.geocoder.enabled = true;
+        base.geocoder.language = Some("fr".into());
+        base.geocoder.api_key = Some("stored-key".into());
+        base.scan.exclude_paths = vec!["old/**".into()];
+        base.target_paths
+            .insert("photo".into(), "Pics/%Y/%f".into());
+
+        let overlay = serde_json::json!({
+            "geocoder": {
+                "service": "custom",
+                "endpoint": "http://geo.local",
+                "language": null,
+                "api_key": "per-scan-key",
+            },
+            "scan": { "exclude_paths": ["new/**"] },
+            "target_paths": { "photo": null, "audio": "Music/%f" },
+            "limits": { "tool_timeout_seconds": 7 },
+        });
+        let raw = overlay_scan_config(&base, &overlay).unwrap();
+        assert_eq!(raw.geocoder_service(), GeocoderService::Custom);
+        assert_eq!(raw.geocoder.language, None);
+        assert_eq!(raw.geocoder.api_key.as_deref(), Some("per-scan-key"));
+        assert!(raw.geocoder.enabled);
+        assert_eq!(raw.scan.exclude_paths, vec!["new/**"]);
+        assert!(!raw.target_paths.contains_key("photo"));
         assert_eq!(
-            base["scan"]["exclude_paths"],
-            serde_json::json!([])
+            raw.target_paths.get("audio").map(String::as_str),
+            Some("Music/%f")
         );
+        assert_eq!(raw.limits.tool_timeout_seconds, Some(7));
+        // The base is untouched.
+        assert_eq!(base.geocoder.api_key.as_deref(), Some("stored-key"));
+    }
+
+    #[test]
+    fn overlay_scan_config_rejects_bad_documents() {
+        let base = RawConfig::default();
+        // Non-table overlay.
+        assert!(overlay_scan_config(&base, &serde_json::json!(5)).is_err());
+        // Session-scoped keys stay rejected.
+        assert!(
+            overlay_scan_config(&base, &serde_json::json!({ "scan": { "root": "/x" } })).is_err()
+        );
+        // Unknown keys are rejected by the section schemas.
+        assert!(
+            overlay_scan_config(&base, &serde_json::json!({ "geocoder": { "bogus": 1 } })).is_err()
+        );
+        // Invalid target-path template.
+        assert!(overlay_scan_config(
+            &base,
+            &serde_json::json!({ "target_paths": { "photo": "no placeholders" } })
+        )
+        .is_err());
     }
 
     #[test]

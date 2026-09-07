@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{
     config_hash, effective_config_json, merge_and_validate_config, merge_and_write_config,
-    platform_name,
+    overlay_scan_config, platform_name,
 };
 use homelinter_model::error::{ApiError, ErrorCode};
 use homelinter_model::format::FormatString;
@@ -71,6 +71,12 @@ struct ScanBody {
     hidden: bool,
     #[serde(default)]
     target_paths: BTreeMap<String, String>,
+    /// Optional per-scan configuration overlay: a partial configuration
+    /// document with the same shape and merge semantics as `PUT /config`.
+    /// It is merged over the effective configuration for this scan only and
+    /// never persisted.
+    #[serde(default)]
+    config: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -376,7 +382,10 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
     // Snapshot the configuration and the per-scan target-path overrides at
     // the moment the scan is accepted; every pipeline phase runs against
     // this one snapshot, so a config save during the scan never changes the
-    // running work (see "Session Model" in DESIGN.md).
+    // running work (see "Session Model" in DESIGN.md). The optional
+    // per-scan config overlay is applied to the snapshot here, before any
+    // state change, so an invalid overlay is a 422 that leaves the session
+    // untouched.
     let (cfg, target_paths) = {
         let mut sess = app.session.lock().await;
         if sess.state.in_progress() {
@@ -385,6 +394,10 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
                 "a scan or execution is already in progress",
             ));
         }
+        let cfg = match &body.config {
+            Some(overlay) => overlay_scan_config(&sess.config, overlay).map_err(api_err)?,
+            None => sess.config.clone(),
+        };
         sess.state = SessionState::Scanning;
         sess.scan_root = Some(root.clone());
         sess.hidden = body.hidden;
@@ -399,7 +412,7 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
         sess.failure = None;
         sess.degraded_identity = false;
         sess.warnings.clear();
-        (sess.config.clone(), sess.scan_target_paths.clone())
+        (cfg, sess.scan_target_paths.clone())
     };
     app.events
         .publish(ServerEvent::State(SessionState::Scanning));

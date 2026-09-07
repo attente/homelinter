@@ -108,6 +108,10 @@ export default function App() {
           root: values.root.length > 0 ? values.root : undefined,
           hidden: values.hidden,
           target_paths: Object.keys(targetPaths).length > 0 ? targetPaths : undefined,
+          config:
+            values.config && Object.keys(values.config).length > 0
+              ? values.config
+              : undefined,
         });
       } catch (e: unknown) {
         pushToast(`scan failed to start: ${resolveApiError(e)}`);

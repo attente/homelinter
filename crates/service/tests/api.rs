@@ -338,6 +338,73 @@ async fn scan_produces_validated_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scan_config_overlay_applies_for_one_scan_only() {
+    let env = Env::new("scan_overlay");
+    let app = env.service();
+    seed_duplicates(&env.home);
+
+    // Overlay excluding the Downloads tree: the duplicates are not found.
+    let (status, v) = request(
+        &app,
+        "POST",
+        "/api/v1/session/scan",
+        Some(json!({
+            "root": env.home.to_string_lossy(),
+            "config": { "scan": { "exclude_paths": ["Downloads"] } },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "ready").await;
+    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(sess["suggestions_total"], 0);
+
+    // The overlay was not persisted: the effective config is unchanged.
+    let (_, cfg) = request(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(cfg["scan"]["exclude_paths"], json!([]));
+
+    // A scan without the overlay finds the duplicates again.
+    scan_to_ready(&app, &env.home).await;
+    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
+    assert!(sess["suggestions_total"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scan_config_overlay_validated_before_state_change() {
+    let env = Env::new("scan_overlay_bad");
+    let app = env.service();
+    seed_duplicates(&env.home);
+
+    // Session-scoped scan keys stay rejected through the overlay.
+    let (status, v) = request(
+        &app,
+        "POST",
+        "/api/v1/session/scan",
+        Some(json!({
+            "root": env.home.to_string_lossy(),
+            "config": { "scan": { "root": "/tmp" } },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Non-table overlay.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/session/scan",
+        Some(json!({ "root": env.home.to_string_lossy(), "config": 5 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Nothing changed: the session is still idle and a normal scan works.
+    assert_eq!(session_state(&app).await, "idle");
+    scan_to_ready(&app, &env.home).await;
+    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
+    assert!(sess["suggestions_total"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     let env = Env::new("exec");
     let app = env.service();

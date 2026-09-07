@@ -138,6 +138,9 @@ export interface ScanRequest {
   root?: string;
   hidden: boolean;
   target_paths?: Record<string, string>;
+  /** Partial per-scan config overlay; merged over the effective config
+   *  for this scan only (never persisted). */
+  config?: Record<string, unknown>;
 }
 
 export type SseEventName =
