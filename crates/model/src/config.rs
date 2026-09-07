@@ -164,8 +164,6 @@ impl GeocoderConfig {
 pub struct DescriptionProvider {
     #[serde(default)]
     pub enabled: Option<bool>,
-    #[serde(default, rename = "type")]
-    pub provider_type: Option<String>,
     #[serde(default)]
     pub backend: Option<LlmBackend>,
     #[serde(default)]
@@ -183,7 +181,6 @@ pub struct DescriptionProvider {
 #[derive(Debug, Clone)]
 pub struct EffectiveDescription {
     pub enabled: bool,
-    pub provider_type: String,
     pub backend: LlmBackend,
     pub endpoint: Option<String>,
     pub model: Option<String>,
@@ -197,11 +194,6 @@ impl DescriptionProvider {
     pub fn effective(&self, base: &DescriptionProvider) -> EffectiveDescription {
         EffectiveDescription {
             enabled: self.enabled.or(base.enabled).unwrap_or(false),
-            provider_type: self
-                .provider_type
-                .clone()
-                .or_else(|| base.provider_type.clone())
-                .unwrap_or_else(|| "llm".into()),
             backend: self.backend.or(base.backend).unwrap_or(LlmBackend::Ollama),
             endpoint: self.endpoint.clone().or_else(|| base.endpoint.clone()),
             model: self.model.clone().or_else(|| base.model.clone()),
@@ -699,13 +691,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     });
     fn check_provider(prefix: String, eff: EffectiveDescription, fields: &mut Vec<(String, String)>) {
-        if eff.enabled && eff.provider_type != "llm" {
-            fields.push((
-                format!("{prefix}.type"),
-                "only 'llm' is implemented; 'image', 'video', and 'custom' are reserved and rejected until implemented"
-                    .into(),
-            ));
-        }
         if let Some(ep) = &eff.endpoint {
             if ep.trim().is_empty() {
                 fields.push((
@@ -994,10 +979,6 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         desc.insert("enabled".into(), JsonValue::Bool(e));
     }
     desc.insert(
-        "type".into(),
-        JsonValue::String(base_eff.provider_type.clone()),
-    );
-    desc.insert(
         "backend".into(),
         JsonValue::String(llm_backend_name(base_eff.backend).into()),
     );
@@ -1018,7 +999,6 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             kind.clone(),
             serde_json::json!({
                 "enabled": eff.enabled,
-                "type": eff.provider_type,
                 "backend": llm_backend_name(eff.backend),
                 "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.backend.default_endpoint().into()),
                 "model": eff.model,
@@ -1200,7 +1180,7 @@ mod tests {
             .parse()
             .unwrap();
         let higher: TomlValue =
-            "[description.photo]\nenabled = true\ntype = \"llm\"\n[scan]\nexclude_paths = []\n"
+            "[description.photo]\nenabled = true\n[scan]\nexclude_paths = []\n"
                 .parse()
                 .unwrap();
         deep_merge_toml(&mut base, higher);
