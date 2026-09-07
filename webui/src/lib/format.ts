@@ -64,10 +64,6 @@ export function countsSummary(counts: ReportCounts): string {
 
 /** One display line for a report entry (top-level result only). */
 export function entryLine(e: ReportEntry): string {
-  const s = e.suggestion;
-  if (s?.target && s.new_path) {
-    return `[${e.result}] ${s.target} -> ${s.new_path}`;
-  }
   return `[${e.result}] ${e.suggestion_id}`;
 }
 

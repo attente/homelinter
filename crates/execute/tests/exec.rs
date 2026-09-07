@@ -1,6 +1,6 @@
 //! Executor integration tests: real filesystem operations in a temp tree.
 
-use homelinter_execute::{execute_batch, ExecuteOptions};
+use homelinter_execute::execute_batch;
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::hash;
 use homelinter_model::suggestion::{
@@ -63,7 +63,7 @@ fn move_executes_same_fs() {
     s.selected = true;
 
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries.len(), 1);
     assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
     assert!(items[0].status == SuggestionStatus::Executed);
@@ -91,7 +91,7 @@ fn move_refuses_existing_destination() {
     );
     s.selected = true;
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
     let op = &report.entries[0].operations[0];
     assert_eq!(op.status, OperationStatus::Failed);
@@ -123,7 +123,7 @@ fn delete_verifies_hash_then_removes() {
     s.selected = true;
 
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
     assert!(!b.exists());
     assert!(a.exists());
@@ -154,36 +154,9 @@ fn delete_refuses_when_content_changed() {
     std::fs::write(&b, b"mutated-content").unwrap();
 
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
     assert!(b.exists(), "changed file must not be deleted");
-    std::fs::remove_dir_all(&base).ok();
-}
-
-#[test]
-fn dry_run_touches_nothing() {
-    let base = tmpdir("dry");
-    let src = base.join("a.txt");
-    let dst = base.join("b.txt");
-    write(&src, b"hello");
-
-    let mut s = Suggestion::new_move(
-        AssetKind::Document,
-        &src,
-        &dst,
-        "test".into(),
-        Default::default(),
-        vec![],
-        provenance_for(&src),
-    );
-    s.selected = true;
-    let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions { dry_run: true });
-    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
-    assert!(report.dry_run);
-    assert!(src.exists());
-    assert!(!dst.exists());
-    assert!(report.entries[0].suggestion.is_some());
     std::fs::remove_dir_all(&base).ok();
 }
 
@@ -224,7 +197,7 @@ fn move_repairs_dependent_symlink() {
     );
     s.selected = true;
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
     // The link now points at the moved file.
     let target = std::fs::read_link(&link).unwrap();
@@ -274,7 +247,7 @@ fn repair_refused_when_link_changed() {
     );
     s.selected = true;
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     // Parent succeeded, dependent failed -> partial.
     assert!(report.partial);
     assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
@@ -304,7 +277,7 @@ fn unselected_and_rejected_are_skipped() {
     s.selected = false; // excluded from this batch
 
     let mut items = vec![s];
-    let report = execute_batch(&mut items, &base, true, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries.len(), 0);
     assert!(src.exists());
     std::fs::remove_dir_all(&base).ok();
@@ -328,7 +301,7 @@ fn move_without_selected_only_runs_everything_pending() {
     );
     let mut items = vec![s];
     // selected_only = false: every pending suggestion is executed.
-    let report = execute_batch(&mut items, &base, false, &ExecuteOptions::default());
+    let report = execute_batch(&mut items, &base, false);
     assert_eq!(report.entries.len(), 1);
     assert!(!src.exists());
     assert!(dst.exists());

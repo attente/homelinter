@@ -39,7 +39,6 @@ export function RunView(props: RunViewProps) {
       {report && (
         <section className="report">
           <h2>Run finished</h2>
-          {report.dry_run && <p className="note">dry run: nothing was written to the filesystem</p>}
           {report.partial && <p className="note warn">partial: some dependent repairs failed</p>}
           {error && <p className="error">{error}</p>}
           <RunReport report={report} onDone={onDone} />
@@ -75,9 +74,5 @@ function RunReport({ report, onDone }: { report: ExecutionReport; onDone: () => 
 }
 
 function resultLine(e: ReportEntry): string {
-  const s = e.suggestion as { target?: string; new_path?: string } | undefined;
-  if (s?.target && s.new_path) {
-    return `[${e.result}] ${s.target} -> ${s.new_path}`;
-  }
   return `[${e.result}] ${e.suggestion_id}`;
 }

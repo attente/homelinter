@@ -8,7 +8,7 @@
 //!
 //! Screens: a scanning/progress screen while the batch is generated, a
 //! two-pane suggestion browser with client-side filtering and server-side
-//! selection, a live operation log during execution and dry runs, and a
+//! selection, a live operation log during execution, and a
 //! report view when a run finishes. Confirmation and text-input dialogs are
 //! modal overlays. A terminal of at least 80x24 is required.
 
@@ -145,7 +145,7 @@ enum Phase {
 #[derive(Debug, Clone)]
 enum ConfirmAction {
     Quit,
-    Run { dry: bool },
+    Run,
 }
 
 struct Confirm {
@@ -370,16 +370,16 @@ impl App {
         }
     }
 
-    /// Start an execution or dry run for the current selection.
-    async fn run_selected(&mut self, dry: bool) -> Result<(), String> {
+    /// Start an execution for the current selection.
+    async fn run_selected(&mut self) -> Result<(), String> {
         let ids = self.ensure_selection().await?;
         if ids.is_empty() {
             self.toast = Some("nothing to run: the batch is empty".to_string());
             return Ok(());
         }
-        let label = if dry { "dry run" } else { "execution" };
+        let label = "execution";
         self.client
-            .execute(Some(ids), dry)
+            .execute(Some(ids))
             .await
             .map_err(|e| format!("cannot start {label}: {e}"))?;
         self.run = RunView::default();
@@ -738,23 +738,7 @@ impl App {
                     self.confirm = Some(Confirm {
                         title: "Execute".to_string(),
                         message: format!("Run {n} suggestion(s)? The filesystem will be modified."),
-                        yes: ConfirmAction::Run { dry: false },
-                    });
-                }
-            }
-            KeyCode::Char('r') => {
-                let n = self.executable_count();
-                if n == 0 {
-                    self.toast = Some(
-                        "nothing to dry-run: select suggestions with space or 'a'".to_string(),
-                    );
-                } else {
-                    self.confirm = Some(Confirm {
-                        title: "Dry run".to_string(),
-                        message: format!(
-                            "Dry-run {n} suggestion(s)? The filesystem will not be modified."
-                        ),
-                        yes: ConfirmAction::Run { dry: true },
+                        yes: ConfirmAction::Run,
                     });
                 }
             }
@@ -811,8 +795,8 @@ impl App {
                     self.cancel_in_flight().await;
                     self.quit = true;
                 }
-                ConfirmAction::Run { dry } => {
-                    if let Err(e) = self.run_selected(dry).await {
+                ConfirmAction::Run => {
+                    if let Err(e) = self.run_selected().await {
                         self.toast = Some(e);
                     }
                 }
@@ -1109,7 +1093,6 @@ impl App {
             text.lines.push(Line::from(msg.as_str()));
         }
         if let Some(report) = &self.run.report {
-            let dry = report["dry_run"].as_bool().unwrap_or(false);
             let partial = report["partial"].as_bool().unwrap_or(false);
             let entries = report["entries"].as_array().cloned().unwrap_or_default();
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -1118,20 +1101,6 @@ impl App {
                 let result = str_field(e, "result");
                 *counts.entry(result.clone()).or_insert(0) += 1;
                 let mut line = format!("[{}] {}", result, str_field(e, "suggestion_id"));
-                if let Some(s) = e["suggestion"].as_object() {
-                    let target = s
-                        .get("target")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let dest = s
-                        .get("new_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("delete");
-                    if !target.is_empty() {
-                        line = format!("[{}] {target} -> {dest}", result);
-                    }
-                }
                 entry_lines.push(line);
             }
             let summary = if counts.is_empty() {
@@ -1144,8 +1113,7 @@ impl App {
                     .join("  ")
             };
             text.lines.push(Line::from(format!(
-                " mode: {}   partial: {}   root: {}",
-                if dry { "dry run" } else { "execution" },
+                " mode: execution   partial: {}   root: {}",
                 partial,
                 report["scan_root"].as_str().unwrap_or("")
             )));
@@ -1171,7 +1139,7 @@ impl App {
 
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  r dry-run  e export  n scan  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  e export  n scan  ? help  q quit",
         )];
         if let Some(t) = &self.toast {
             lines.push(Line::from(vec![Span::styled(
@@ -1224,7 +1192,6 @@ impl App {
             Line::from(" u                   cycle the status filter"),
             Line::from(" c                   clear all filters"),
             Line::from(" x                   execute the selection (asks for confirmation)"),
-            Line::from(" r                   dry-run the selection (filesystem untouched)"),
             Line::from(" e                   export the selection to a shell script"),
             Line::from(" n                   scan another root (edit root, Tab toggles hidden)"),
             Line::from(" ?                   show this help"),
@@ -1386,7 +1353,7 @@ pub async fn run(
 ) -> Result<u8, String> {
     if !io::stdin().is_terminal() {
         return Err(
-            "the tui requires a terminal; use the interactive mode or --dry-run/--execute/--export without one"
+            "the tui requires a terminal; use the interactive mode, --execute, or --export without one"
                 .to_string(),
         );
     }

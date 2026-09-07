@@ -1,5 +1,5 @@
 //! Service API integration tests: session contract, scan -> ready pipeline,
-//! selection and validation rules, dry-run/real execution with idempotency,
+//! selection and validation rules, real execution with idempotency,
 //! export, config, cache, audit, and an end-to-end HTTP + SSE + shutdown run.
 
 use std::path::{Path, PathBuf};
@@ -303,40 +303,6 @@ async fn scan_produces_validated_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dry_run_touches_nothing_and_reports() {
-    let env = Env::new("dryrun");
-    let app = env.service();
-    let (older, newer) = seed_duplicates(&env.home);
-    scan_to_ready(&app, &env.home).await;
-
-    let ids = suggestion_ids(&app, "pending").await;
-    assert!(!ids.is_empty());
-    let (status, v) = request(
-        &app,
-        "POST",
-        "/api/v1/execute",
-        Some(json!({ "ids": ids, "dry_run": true })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(v["state"], "executing");
-    wait_state(&app, "done").await;
-
-    // Files untouched.
-    assert!(older.exists());
-    assert!(newer.exists());
-
-    let (status, report) = request(&app, "GET", "/api/v1/execution", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(report["dry_run"], true);
-    assert!(!report["entries"].as_array().unwrap().is_empty());
-
-    // Suggestion statuses are restored to pending after a dry run.
-    let pending = suggestion_ids(&app, "pending").await;
-    assert_eq!(pending.len(), ids.len());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     let env = Env::new("exec");
     let app = env.service();
@@ -355,7 +321,6 @@ async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     assert!(!older.exists());
 
     let (_, report) = request(&app, "GET", "/api/v1/execution", None).await;
-    assert_eq!(report["dry_run"], false);
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|e| e["result"] == "executed"));
@@ -629,7 +594,13 @@ async fn request_raw(
         .expect("oneshot response");
     let status = resp.status();
     let headers = resp.headers().clone();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, headers, bytes)
 }
 
@@ -639,7 +610,12 @@ async fn spa_serves_index_with_csp() {
     let app = env.service();
     let (status, headers, bytes) = request_raw(&app, "GET", "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+    assert!(headers
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("text/html"));
     assert_eq!(
         headers.get("content-security-policy").unwrap().to_str().unwrap(),
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -657,7 +633,12 @@ async fn spa_serves_hashed_assets_immutable() {
     let app = env.service();
     let (status, headers, bytes) = request_raw(&app, "GET", "/assets/app.js").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("javascript"));
+    assert!(headers
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("javascript"));
     assert_eq!(
         headers.get("cache-control").unwrap().to_str().unwrap(),
         "public, max-age=31536000, immutable"
@@ -672,7 +653,12 @@ async fn spa_falls_back_to_index_for_routes() {
     // Deep link with no file extension renders the SPA shell.
     let (status, headers, bytes) = request_raw(&app, "GET", "/some/deep/route").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(headers.get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+    assert!(headers
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("text/html"));
     assert!(String::from_utf8_lossy(&bytes).contains("homelinter"));
 }
 
@@ -719,9 +705,15 @@ async fn spa_rejects_path_traversal() {
         let _ = homelinter_service::serve(listener, built.app.clone(), built.shutdown_rx).await;
     });
     let resp = raw_http_get(addr, "/../secret.txt").await;
-    assert!(!resp.contains("TOP-SECRET"), "traversal served outside file: {resp}");
+    assert!(
+        !resp.contains("TOP-SECRET"),
+        "traversal served outside file: {resp}"
+    );
     let resp2 = raw_http_get(addr, "/%2e%2e/secret.txt").await;
-    assert!(!resp2.contains("TOP-SECRET"), "encoded traversal served outside file: {resp2}");
+    assert!(
+        !resp2.contains("TOP-SECRET"),
+        "encoded traversal served outside file: {resp2}"
+    );
     let _ = serve.abort();
 }
 

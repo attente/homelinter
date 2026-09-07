@@ -288,7 +288,7 @@ export default function App() {
   }, [selectMany]);
 
   const run = useCallback(
-    async (kind: 'execute' | 'dry-run') => {
+    async () => {
       const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
       if (ids.length === 0) {
         pushToast('no suggestions selected');
@@ -303,7 +303,7 @@ export default function App() {
         busy: true,
       }));
       try {
-        await api.run(ids, kind);
+        await api.run(ids);
         setSt((prev) => ({ ...prev, busy: false }));
         pushToast(`running ${ids.length} suggestion(s)`);
       } catch (e: unknown) {
@@ -402,7 +402,7 @@ export default function App() {
         onToggle={(id, sel) => void toggle(id, sel)}
         onSelectMany={(ids) => void selectMany(ids)}
         onClearSelection={clearSelection}
-        onRun={(kind) => void run(kind)}
+        onRun={() => void run()}
         onExport={() => void exportPlan()}
       />
     );

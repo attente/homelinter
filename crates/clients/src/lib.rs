@@ -353,12 +353,8 @@ impl Client {
     }
 
     /// POST /api/v1/execute. `ids` is optional (defaults to the selection).
-    pub async fn execute(
-        &self,
-        ids: Option<Vec<String>>,
-        dry_run: bool,
-    ) -> Result<Value, ClientsError> {
-        let body = json!({ "ids": ids, "dry_run": dry_run });
+    pub async fn execute(&self, ids: Option<Vec<String>>) -> Result<Value, ClientsError> {
+        let body = json!({ "ids": ids });
         let (_, v) = self
             .json(Method::POST, "/api/v1/execute", Some(body))
             .await?;

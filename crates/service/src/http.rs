@@ -77,8 +77,6 @@ struct ScanBody {
 struct IdsBody {
     #[serde(default)]
     ids: Option<Vec<String>>,
-    #[serde(default)]
-    dry_run: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -656,25 +654,14 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
         }
     };
 
-    if body.dry_run {
-        // Dry runs always run fresh (they consume no idempotency) but are
-        // still validated first.
-        let mut sess = app.session.lock().await;
-        let executable = sess.executable_ids(&request_ids);
-        let rejected = sess.validate_ids(&executable);
-        drop(sess);
-        if !rejected.is_empty() {
-            publish_validated(&app, rejected);
-        }
-    } else {
-        // Idempotent re-run: exact previous batch -> stored report.
-        let re_run_stored = {
-            let sess = app.session.lock().await;
-            sess.executable_ids(&request_ids).is_empty()
-                && sess.report_batch.as_ref() == Some(&BatchIdentity::of(&request_ids))
-                && sess.report.is_some()
-        };
-        if re_run_stored {
+    // Idempotent re-run: exact previous batch -> stored report.
+    let re_run_stored = {
+        let sess = app.session.lock().await;
+        sess.executable_ids(&request_ids).is_empty()
+            && sess.report_batch.as_ref() == Some(&BatchIdentity::of(&request_ids))
+            && sess.report.is_some()
+    };
+    if re_run_stored {
         let (report,) = {
             let sess = app.session.lock().await;
             (sess.report.clone().expect("checked above"),)
@@ -713,7 +700,6 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
             return accepted(json!({ "state": "done" }));
         }
     }
-    }
 
     {
         let mut sess = app.session.lock().await;
@@ -721,10 +707,7 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
     }
     app.events
         .publish(ServerEvent::State(SessionState::Executing));
-    let req = ExecuteRequest {
-        ids: request_ids,
-        dry_run: body.dry_run,
-    };
+    let req = ExecuteRequest { ids: request_ids };
     tokio::spawn(run_execute(app.clone(), req));
     accepted(json!({ "state": "executing" }))
 }

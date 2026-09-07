@@ -2,7 +2,7 @@
 
 homelinter organizes home directories: it scans files, analyzes them, generates reorganization suggestions, and executes those suggestions automatically or interactively.
 
-It never overwrites an existing object, never modifies file contents, and never executes a stale or colliding operation. Anything destructive requires explicit authorization; scanning, analysis, planning, and dry-runs are read-only.
+It never overwrites an existing object, never modifies file contents, and never executes a stale or colliding operation. Anything destructive requires explicit authorization; scanning, analysis, and planning are read-only.
 
 Design details, the full configuration schema, and the service API are specified in `DESIGN.md`.
 
@@ -17,11 +17,11 @@ Duplicated files and broken symlinks are detected and reported for repair. Sugge
 From the repo root, `cargo run -p homelinter -- <subcommand>` runs the `homelinter` binary directly. Build with `cargo build --release`; the binary is `target/release/homelinter`.
 
 - **Interactive CLI**: `cargo run -p homelinter` scans the default root (your home directory), shows suggestions for review, then exports or executes them on request.
-- **Non-interactive**: `cargo run -p homelinter -- --dry-run` reports what would happen without touching the filesystem; `--execute` runs all suggestions immediately; `--export <path>` writes the plan to an executable script.
+- **Non-interactive**: `cargo run -p homelinter -- --execute` runs all suggestions immediately; `--export <path>` writes the plan to an executable script.
 - **TUI**: `cargo run -p homelinter -- tui` starts the full-screen terminal interface (needs an 80x24 terminal).
 - **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Session state is in memory, so a restart requires a new scan.
 
-Per-scan options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute`, `--dry-run`, and `--export` are mutually exclusive.
+Per-scan options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute`, `--export` are mutually exclusive.
 
 ### Developing the SPA
 

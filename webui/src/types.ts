@@ -101,12 +101,10 @@ export interface ReportEntry {
   suggestion_id: string;
   result: EntryResult;
   operations?: OperationOutcome[];
-  suggestion?: Suggestion | null;
 }
 
 export interface ExecutionReport {
   entries: ReportEntry[];
-  dry_run: boolean;
   partial: boolean;
   scan_root: string;
   platform: string;
@@ -124,11 +122,9 @@ export interface ExportResult {
   text: string;
 }
 
-export type RunKind = 'execute' | 'dry-run';
 
 export interface ExecuteRequest {
   ids?: string[];
-  dry_run: boolean;
 }
 
 export interface ScanRequest {

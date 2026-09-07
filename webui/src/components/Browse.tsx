@@ -23,7 +23,7 @@ interface BrowseProps {
   onToggle: (id: string, select: boolean) => void;
   onSelectMany: (ids: string[]) => void;
   onClearSelection: () => void;
-  onRun: (kind: 'execute' | 'dry-run') => void;
+  onRun: () => void;
   onExport: () => void;
 }
 
@@ -82,10 +82,7 @@ export function Browse(props: BrowseProps) {
             select none
           </button>
           <span className="sep" />
-          <button type="button" onClick={() => onRun('dry-run')}>
-            dry run
-          </button>
-          <button type="button" onClick={() => onRun('execute')}>
+          <button type="button" onClick={() => onRun()}>
             execute
           </button>
           <button type="button" onClick={() => onExport()}>

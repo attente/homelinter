@@ -33,27 +33,14 @@ use homelinter_model::suggestion::{
     OperationStatus, ReportEntry, Suggestion, SuggestionStatus, SuggestionType,
 };
 
-pub struct ExecuteOptions {
-    /// Validate and report every operation without touching the filesystem.
-    pub dry_run: bool,
-}
-
-impl Default for ExecuteOptions {
-    fn default() -> Self {
-        ExecuteOptions { dry_run: false }
-    }
-}
-
 /// Execute the given suggestions (already batch-validated and sorted by
 /// sort key). `selected_only` restricts execution to `selected == true`.
 pub fn execute_batch(
     items: &mut [Suggestion],
     scan_root: &Path,
     selected_only: bool,
-    opts: &ExecuteOptions,
 ) -> ExecutionReport {
     let mut report = ExecutionReport::empty(scan_root);
-    report.dry_run = opts.dry_run;
 
     // Deterministic order: the caller sorts, but a defensive re-sort keeps
     // validation and dependency order identical to generation.
@@ -66,7 +53,7 @@ pub fn execute_batch(
         if s.status != SuggestionStatus::Pending {
             continue;
         }
-        let mut entry = execute_one(s, opts);
+        let mut entry = execute_one(s);
         // Classify the entry from its operations: a failed parent is a
         // failure; a completed parent with one or more failed dependent
         // repairs is partial (executed, flag raised); nothing attempted is
@@ -106,51 +93,31 @@ pub fn execute_batch(
     report
 }
 
-fn execute_one(s: &mut Suggestion, opts: &ExecuteOptions) -> ReportEntry {
+fn execute_one(s: &mut Suggestion) -> ReportEntry {
     let operations: Vec<OperationOutcome> = Vec::new();
     let mut entry = ReportEntry {
         suggestion_id: s.id.clone(),
         result: ExecutionStatus::Skipped,
         operations,
-        suggestion: None,
     };
 
-    // Dry runs include the full suggestion payload so the report is a
-    // self-contained preview (no session state required to render it).
-    if opts.dry_run {
-        if let Ok(v) = serde_json::to_value(&*s) {
-            entry.suggestion = Some(v);
-        }
-    }
-
     let parent = match s.suggestion_type {
-        SuggestionType::Move => run_move(s, opts),
-        SuggestionType::Delete => run_delete(s, opts),
+        SuggestionType::Move => run_move(s),
+        SuggestionType::Delete => run_delete(s),
     };
 
     match parent {
         Ok(mut ops) => {
             entry.operations.append(&mut ops);
             // Dependents run only when the parent succeeded.
-            if !opts.dry_run {
-                let parent_ok = entry
-                    .operations
-                    .iter()
-                    .all(|o| o.status == OperationStatus::Completed);
-                if parent_ok {
-                    for dep in &s.dependent_operations {
-                        entry.operations.push(repair_symlink(dep, opts.dry_run));
-                    }
-                } else {
-                    for dep in &s.dependent_operations {
-                        entry.operations.push(OperationOutcome {
-                            operation: OperationKind::RepairSymlink,
-                            source: Some(dep.link_path.clone()),
-                            destination: Some(dep.replacement_target.clone()),
-                            status: OperationStatus::Skipped,
-                            detail: Some("parent operation did not complete".into()),
-                        });
-                    }
+
+            let parent_ok = entry
+                .operations
+                .iter()
+                .all(|o| o.status == OperationStatus::Completed);
+            if parent_ok {
+                for dep in &s.dependent_operations {
+                    entry.operations.push(repair_symlink(dep));
                 }
             } else {
                 for dep in &s.dependent_operations {
@@ -159,7 +126,7 @@ fn execute_one(s: &mut Suggestion, opts: &ExecuteOptions) -> ReportEntry {
                         source: Some(dep.link_path.clone()),
                         destination: Some(dep.replacement_target.clone()),
                         status: OperationStatus::Skipped,
-                        detail: Some("dry run: no filesystem changes".into()),
+                        detail: Some("parent operation did not complete".into()),
                     });
                 }
             }
@@ -184,20 +151,11 @@ fn execute_one(s: &mut Suggestion, opts: &ExecuteOptions) -> ReportEntry {
 // Moves
 // ---------------------------------------------------------------------------
 
-fn run_move(s: &Suggestion, opts: &ExecuteOptions) -> Result<Vec<OperationOutcome>, String> {
+fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
     let src = s.target_path();
     let Some(dst) = s.new_path_path() else {
         return Err("move suggestion missing new_path".into());
     };
-    if opts.dry_run {
-        return Ok(vec![OperationOutcome {
-            operation: OperationKind::Move,
-            source: Some(src.to_string_lossy().into_owned()),
-            destination: Some(dst.to_string_lossy().into_owned()),
-            status: OperationStatus::Completed,
-            detail: Some("dry run: would move (preconditions simulated)".into()),
-        }]);
-    }
 
     // --- Preflight: the source must still be the analyzed object. ---
     preflight_source(src, s)?;
@@ -248,17 +206,8 @@ fn run_move(s: &Suggestion, opts: &ExecuteOptions) -> Result<Vec<OperationOutcom
 // Deletes
 // ---------------------------------------------------------------------------
 
-fn run_delete(s: &Suggestion, opts: &ExecuteOptions) -> Result<Vec<OperationOutcome>, String> {
+fn run_delete(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
     let src = s.target_path();
-    if opts.dry_run {
-        return Ok(vec![OperationOutcome {
-            operation: OperationKind::Delete,
-            source: Some(src.to_string_lossy().into_owned()),
-            destination: None,
-            status: OperationStatus::Completed,
-            detail: Some("dry run: would delete (preconditions simulated)".into()),
-        }]);
-    }
 
     // --- Preflight: identity of the object itself. ---
     preflight_source(src, s)?;
@@ -293,7 +242,7 @@ fn run_delete(s: &Suggestion, opts: &ExecuteOptions) -> Result<Vec<OperationOutc
 // Dependent symlink repairs
 // ---------------------------------------------------------------------------
 
-fn repair_symlink(dep: &DependentOperation, dry_run: bool) -> OperationOutcome {
+fn repair_symlink(dep: &DependentOperation) -> OperationOutcome {
     let link_path = PathBuf::from(&dep.link_path);
     let outcome = |status, detail| OperationOutcome {
         operation: OperationKind::RepairSymlink,
@@ -302,13 +251,6 @@ fn repair_symlink(dep: &DependentOperation, dry_run: bool) -> OperationOutcome {
         status,
         detail,
     };
-
-    if dry_run {
-        return outcome(
-            OperationStatus::Completed,
-            Some("dry run: would repair symlink".into()),
-        );
-    }
 
     // Re-validate against the scan-time record, immediately before repair.
     match validate_link_before_repair(&link_path, dep) {

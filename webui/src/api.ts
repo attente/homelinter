@@ -6,7 +6,6 @@ import type {
   ExecutionReport,
   ExecuteRequest,
   ExportResult,
-  RunKind,
   ScanRequest,
   ScanSummary,
   Session,
@@ -123,8 +122,8 @@ export const api = {
     });
   },
 
-  async execute(ids: string[], dryRun: boolean): Promise<void> {
-    const body: ExecuteRequest = { ids, dry_run: dryRun };
+  async execute(ids: string[]): Promise<void> {
+    const body: ExecuteRequest = { ids };
     await request<void>('/execute', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -143,8 +142,8 @@ export const api = {
     return request<ScanSummary>('/report/summary');
   },
 
-  async run(ids: string[], kind: RunKind): Promise<void> {
-    await this.execute(ids, kind === 'execute');
+  async run(ids: string[]): Promise<void> {
+    await this.execute(ids);
   },
 
   async exportScript(ids: string[]): Promise<ExportResult> {

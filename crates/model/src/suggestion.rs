@@ -211,10 +211,6 @@ pub struct ReportEntry {
     pub result: ExecutionStatus,
     /// Per-operation outcomes including dependent repair steps.
     pub operations: Vec<OperationOutcome>,
-    /// When the report came from a dry run, every entry carries the full
-    /// suggestion data so the report is a self-contained preview.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,11 +249,10 @@ pub enum OperationStatus {
     Skipped,
 }
 
-/// The report for the most recent execution or dry-run.
+/// The report for the most recent execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub entries: Vec<ReportEntry>,
-    pub dry_run: bool,
     /// True when a parent succeeded but a dependent repair failed.
     pub partial: bool,
     pub scan_root: String,
@@ -268,7 +263,6 @@ impl ExecutionReport {
     pub fn empty(scan_root: &Path) -> ExecutionReport {
         ExecutionReport {
             entries: Vec::new(),
-            dry_run: false,
             partial: false,
             scan_root: scan_root.to_string_lossy().into_owned(),
             platform: crate::config::platform_name().to_string(),

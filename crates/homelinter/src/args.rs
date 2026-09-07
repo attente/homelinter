@@ -1,7 +1,7 @@
 //! Command-line surface for the `homelinter` binary.
 //!
 //! Mirrors "Command-Line Interface Schema" in DESIGN.md: interactive mode is
-//! the default; `--execute`, `--dry-run`, and `--export` select the
+//! the default; `--execute` and `--export` select the
 //! non-interactive modes; `web` runs the standalone service.
 
 use std::collections::BTreeMap;
@@ -36,7 +36,6 @@ pub struct ManagedOptions {
 pub enum ManagedAction {
     Interactive,
     Execute,
-    DryRun,
     Export(PathBuf),
 }
 
@@ -87,15 +86,11 @@ pub struct Cli {
     root: Option<PathBuf>,
 
     /// Skip the pager and menu; execute all generated suggestions.
-    #[arg(long, conflicts_with_all = ["dry_run", "export"])]
+    #[arg(long, conflicts_with_all = ["export"])]
     execute: bool,
 
-    /// Scan, dry-run the batch, and report without touching the filesystem.
-    #[arg(long, conflicts_with_all = ["execute", "export"])]
-    dry_run: bool,
-
     /// Scan and write the executable plan script to this path.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["execute", "dry_run"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["execute"])]
     export: Option<PathBuf>,
 
     /// Include hidden files and directories in primary discovery.
@@ -223,8 +218,6 @@ pub fn parse() -> Result<Mode, String> {
 
     let action = if cli.execute {
         ManagedAction::Execute
-    } else if cli.dry_run {
-        ManagedAction::DryRun
     } else if let Some(path) = &cli.export {
         ManagedAction::Export(path.clone())
     } else {

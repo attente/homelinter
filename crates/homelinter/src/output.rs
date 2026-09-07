@@ -94,15 +94,11 @@ pub fn print_suggestions(items: &[Value]) {
 }
 
 /// Print an execution report per the selected format.
-pub fn emit_report(format: OutputFormat, report: &Value, dry_run: bool) -> std::io::Result<()> {
+pub fn emit_report(format: OutputFormat, report: &Value) -> std::io::Result<()> {
     match format {
         OutputFormat::Pretty => {
             let mut out = std::io::stdout().lock();
-            if dry_run {
-                writeln!(out, "Dry-run report (filesystem untouched):")?;
-            } else {
-                writeln!(out, "Execution report:")?;
-            }
+            writeln!(out, "Execution report:")?;
             writeln!(
                 out,
                 "  scan_root: {}",
@@ -113,7 +109,6 @@ pub fn emit_report(format: OutputFormat, report: &Value, dry_run: bool) -> std::
                 "  platform:  {}",
                 report["platform"].as_str().unwrap_or("?")
             )?;
-            writeln!(out, "  dry_run:   {}", report["dry_run"])?;
             writeln!(out, "  partial:   {}", report["partial"])?;
             writeln!(
                 out,

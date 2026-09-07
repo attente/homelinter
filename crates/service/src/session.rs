@@ -44,7 +44,7 @@ pub struct Session {
     pub hidden: bool,
     /// Top-level suggestions in deterministic order.
     pub suggestions: Vec<Suggestion>,
-    /// Most recent execution or dry-run report, retained until the next
+    /// Most recent execution report, retained until the next
     /// scan.
     pub report: Option<ExecutionReport>,
     /// Batch identity of the stored report (idempotency key).
@@ -196,9 +196,8 @@ impl Session {
     pub fn executable_ids(&self, ids: &[String]) -> Vec<String> {
         ids.iter()
             .filter(|id| {
-                self.suggestion_by_id(id).is_some_and(|s| {
-                    s.status == SuggestionStatus::Pending && !s.metadata_pending
-                })
+                self.suggestion_by_id(id)
+                    .is_some_and(|s| s.status == SuggestionStatus::Pending && !s.metadata_pending)
             })
             .cloned()
             .collect()

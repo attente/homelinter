@@ -50,10 +50,7 @@ fn resolve_web_dir() -> Option<PathBuf> {
     None
 }
 
-fn spawn(
-    opts: homelinter_service::ServiceOptions,
-    port: Option<u16>,
-) -> Result<Instance, String> {
+fn spawn(opts: homelinter_service::ServiceOptions, port: Option<u16>) -> Result<Instance, String> {
     let bind = match port {
         Some(p) => format!("127.0.0.1:{p}"),
         None => "127.0.0.1:0".to_string(),
@@ -273,10 +270,7 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
 
 pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     if matches!(opts.action, ManagedAction::Interactive) && !std::io::stdin().is_terminal() {
-        return Err(
-            "interactive mode requires a terminal; use --execute, --dry-run, or --export"
-                .to_string(),
-        );
+        return Err("interactive mode requires a terminal; use --execute or --export".to_string());
     }
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
@@ -359,8 +353,7 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
 
     let result = match &opts.action {
         ManagedAction::Interactive => interactive(client.clone(), &items, ids, format).await,
-        ManagedAction::Execute => run_execution(&client, &ids, false, format, verbosity).await,
-        ManagedAction::DryRun => run_execution(&client, &ids, true, format, verbosity).await,
+        ManagedAction::Execute => run_execution(&client, &ids, format, verbosity).await,
         ManagedAction::Export(path) => {
             let path =
                 to_absolute(path, &cwd).map_err(|e| format!("invalid --export path: {e}"))?;
@@ -405,19 +398,14 @@ async fn export_and_report(
 async fn run_execution(
     client: &Client,
     ids: &[String],
-    dry_run: bool,
     format: OutputFormat,
     verbosity: i8,
 ) -> Result<u8, String> {
     if verbosity >= 0 {
-        output::note(if dry_run {
-            "dry-run requested; the filesystem will not be modified"
-        } else {
-            "executing suggestions"
-        });
+        output::note("executing suggestions");
     }
     client
-        .execute(Some(ids.to_vec()), dry_run)
+        .execute(Some(ids.to_vec()))
         .await
         .map_err(|e| format!("cannot start execution: {e}"))?;
     wait_for(client, &["done"], Duration::from_secs(1800)).await?;
@@ -425,8 +413,7 @@ async fn run_execution(
         .execution_report()
         .await
         .map_err(|e| format!("cannot read execution report: {e}"))?;
-    output::emit_report(format, &report, dry_run)
-        .map_err(|e| format!("cannot write output: {e}"))?;
+    output::emit_report(format, &report).map_err(|e| format!("cannot write output: {e}"))?;
     Ok(0)
 }
 
@@ -457,7 +444,7 @@ async fn interactive(
         match action.as_str() {
             "r" | "review" => output::print_suggestions(items),
             "x" | "execute" => {
-                return run_execution(&client, &ids, false, format, 1).await;
+                return run_execution(&client, &ids, format, 1).await;
             }
             "e" | "export" => {
                 if let Some(rest) = parts.next() {

@@ -12,7 +12,6 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use homelinter_analyze::{analyze, AnalyzeOptions};
-use homelinter_execute::ExecuteOptions;
 use homelinter_model::suggestion::{
     ExecutionReport, ExecutionStatus, OperationKind, OperationStatus, SessionState, Suggestion,
     SuggestionStatus,
@@ -216,15 +215,9 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, hidden: bool) {
     // outstanding provider requests are published immediately but marked
     // `metadata_pending`, so the user sees the full scan result yet can
     // never execute a move built on incomplete metadata.
-    let provider_jobs = crate::providers::plan_provider_jobs(
-        &app,
-        &analysis,
-        &formats,
-        provider_epoch,
-    )
-    .await;
-    let mut pending: std::collections::BTreeMap<usize, u32> =
-        std::collections::BTreeMap::new();
+    let provider_jobs =
+        crate::providers::plan_provider_jobs(&app, &analysis, &formats, provider_epoch).await;
+    let mut pending: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
     for job in &provider_jobs {
         *pending.entry(job.unit.index).or_default() += 1;
     }
@@ -316,7 +309,6 @@ pub async fn fail(app: AppHandle, reason: String) {
 pub struct ExecuteRequest {
     /// Requested suggestion ids (batch identity, in request order).
     pub ids: Vec<String>,
-    pub dry_run: bool,
 }
 
 /// Execute one top-level suggestion on the blocking pool. Returns the
@@ -326,22 +318,19 @@ async fn run_one(
     app: &App,
     s: Suggestion,
     root: &std::path::Path,
-    dry_run: bool,
 ) -> Result<(Suggestion, homelinter_model::suggestion::ReportEntry), String> {
-    let opts = ExecuteOptions { dry_run };
     let bus = app.events.clone();
     let id = s.id.clone();
     let root_owned = root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut items = vec![s];
-        let report = homelinter_execute::execute_batch(&mut items, &root_owned, false, &opts);
+        let report = homelinter_execute::execute_batch(&mut items, &root_owned, false);
         let s = items.pop().expect("one suggestion in");
         let entry = report.entries.into_iter().next().unwrap_or_else(|| {
             homelinter_model::suggestion::ReportEntry {
                 suggestion_id: id.clone(),
                 result: ExecutionStatus::Skipped,
                 operations: Vec::new(),
-                suggestion: None,
             }
         });
         for op in &entry.operations {
@@ -381,7 +370,6 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         sess.root().unwrap_or(&sess.home).to_path_buf()
     };
     let mut report = ExecutionReport::empty(&root);
-    report.dry_run = req.dry_run;
 
     // Deterministic execution order: batch ids sorted by suggestion sort key.
     // Only Pending suggestions run; already-executed or rejected ids are
@@ -404,15 +392,6 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     }
     batch.sort_by(|a, b| a.1.cmp(&b.1));
 
-    // Statuses before the run, restored after a dry run.
-    let prior: Vec<(usize, SuggestionStatus)> = {
-        let sess = app.session.lock().await;
-        batch
-            .iter()
-            .map(|(i, _)| (*i, sess.suggestions[*i].status))
-            .collect()
-    };
-
     let mut pos = 0usize;
     while pos < batch.len() {
         let (i, _) = batch[pos];
@@ -428,7 +407,6 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                         suggestion_id: sess.suggestions[*j].id.clone(),
                         result: ExecutionStatus::Skipped,
                         operations: Vec::new(),
-                        suggestion: None,
                     });
             }
             break;
@@ -437,7 +415,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
             let sess = app.session.lock().await;
             sess.suggestions[i].clone()
         };
-        let (s, entry) = match run_one(&app, s, &root, req.dry_run).await {
+        let (s, entry) = match run_one(&app, s, &root).await {
             Ok(v) => v,
             Err(reason) => {
                 let mut sess = app.session.lock().await;
@@ -470,7 +448,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         {
             let mut sess = app.session.lock().await;
             sess.suggestions[i].status = s.status;
-            if !req.dry_run && s.status == SuggestionStatus::Executed {
+            if s.status == SuggestionStatus::Executed {
                 let audit = AuditEntry {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: match s.suggestion_type {
@@ -489,14 +467,6 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         }
         report.entries.push(entry);
         pos += 1;
-    }
-
-    // A dry run leaves every suggestion status untouched.
-    if req.dry_run {
-        let mut sess = app.session.lock().await;
-        for (i, status) in prior {
-            sess.suggestions[i].status = status;
-        }
     }
 
     {
