@@ -579,7 +579,7 @@ pub fn description_settings(
     Some(ProviderSettings {
         provider_id,
         settings_hash,
-        min_interval: Duration::ZERO,
+        min_interval: Duration::from_millis(eff.rate_limit_ms),
         backend: backend.to_string(),
         endpoint,
         api_key: eff.api_key,
@@ -1042,6 +1042,39 @@ mod tests {
             geocoder_settings(&above).unwrap().min_interval,
             Duration::from_millis(2500)
         );
+    }
+
+    #[test]
+    fn description_settings_carry_rate_limit() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            model = "m"
+            rate_limit_ms = 750
+            "#,
+        )
+        .unwrap();
+        let s = description_settings(&cfg, &AssetKind::Document).unwrap();
+        assert_eq!(s.min_interval, Duration::from_millis(750));
+
+        // Unset -> no delay; a per-kind override inherits the base and
+        // can raise the floor for its own kind.
+        let cfg2: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            model = "m"
+
+            [description.photo]
+            rate_limit_ms = 2000
+            "#,
+        )
+        .unwrap();
+        let base = description_settings(&cfg2, &AssetKind::Document).unwrap();
+        assert_eq!(base.min_interval, Duration::ZERO);
+        let photo = description_settings(&cfg2, &AssetKind::Photo).unwrap();
+        assert_eq!(photo.min_interval, Duration::from_millis(2000));
     }
 
     /// Builds an app whose session atomically carries the given config.

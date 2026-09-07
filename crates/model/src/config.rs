@@ -157,8 +157,8 @@ impl GeocoderConfig {
 
 /// A description provider entry: the base `[description]` table or one
 /// per-kind override such as `[description.photo]`. LLM transport settings
-/// (`service`, `endpoint`, `model`, `api_key`, `max_words`) live directly
-/// on each entry; unset keys fall back to the base entry.
+/// (`service`, `endpoint`, `model`, `api_key`, `max_words`, `rate_limit_ms`)
+/// live directly on each entry; unset keys fall back to the base entry.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DescriptionProvider {
@@ -174,6 +174,13 @@ pub struct DescriptionProvider {
     pub api_key: Option<String>,
     #[serde(default)]
     pub max_words: Option<u64>,
+    /// Minimum interval between requests in milliseconds, enforced between
+    /// request starts on the provider worker. Description backends have no
+    /// built-in pacing; the value only ever adds delay, and requests remain
+    /// serialized one-in-flight on the worker regardless (see "Provider
+    /// Plugins" in DESIGN.md). `0` (the default) means no delay.
+    #[serde(default)]
+    pub rate_limit_ms: Option<u64>,
 }
 
 /// The effective settings of a description provider entry after per-key
@@ -186,6 +193,7 @@ pub struct EffectiveDescription {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub max_words: u64,
+    pub rate_limit_ms: u64,
 }
 
 impl DescriptionProvider {
@@ -202,6 +210,7 @@ impl DescriptionProvider {
                 .max_words
                 .or(base.max_words)
                 .unwrap_or(DEFAULT_MAX_WORDS),
+            rate_limit_ms: self.rate_limit_ms.or(base.rate_limit_ms).unwrap_or(0),
         }
     }
 }
@@ -974,6 +983,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
     );
     desc.insert("model".into(), serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null));
     desc.insert("max_words".into(), JsonValue::from(base_eff.max_words));
+    desc.insert(
+        "rate_limit_ms".into(),
+        JsonValue::from(base_eff.rate_limit_ms),
+    );
     for (kind, p) in &raw.description.per_kind {
         let eff = p.effective(&raw.description.base);
         desc.insert(
@@ -984,6 +997,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.service.default_endpoint().into()),
                 "model": eff.model,
                 "max_words": eff.max_words,
+                "rate_limit_ms": eff.rate_limit_ms,
             }),
         );
     }
