@@ -32,3 +32,4 @@ http-body-util = "0.1"
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
+zip = "2"

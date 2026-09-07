@@ -7,15 +7,20 @@
 //! cached description is reused without re-reading the document.
 //!
 //! The command for a format is the configured argv when present; an empty
-//! array disables extraction for that format; otherwise a runtime default
-//! is selected when the tool is on the PATH (`pdftotext` for PDF, `pandoc`
-//! for docx/odt/epub). The literal `{path}` argument is replaced by the
-//! absolute input path; commands run directly without a shell under the
-//! `[limits]` discipline (`tool_timeout_seconds`, `tool_stdout_max_bytes`,
-//! sanitized environment). Any failure - spawn error, non-zero exit,
-//! timeout, output over the cap, missing tool - degrades to no text:
-//! the description provider sees the unit path and kind only and `%s`
-//! resolves to its fallback while analysis continues.
+//! array disables extraction for that format entirely (including the
+//! built-in fallback); otherwise a runtime default is selected when the
+//! tool is on the PATH (`pdftotext` for PDF, `pandoc` for docx/odt/epub),
+//! and an in-process reader in `homelinter-analyze` runs as the last
+//! fallback when no tool is available (`pdf-extract` for PDF, native
+//! zip/XML readers for docx/odt/epub). The literal `{path}` argument of a
+//! configured command is replaced by the absolute input path; commands run
+//! directly without a shell under the `[limits]` discipline
+//! (`tool_timeout_seconds`, `tool_stdout_max_bytes`, sanitized
+//! environment). Any failure - spawn error, non-zero exit, timeout,
+//! output over the cap, missing tool, or a failed or unsupported built-in
+//! read - degrades to no text: the description provider sees the unit
+//! path and kind only and `%s` resolves to its fallback while analysis
+//! continues.
 
 use std::path::Path;
 use std::time::Duration;
@@ -26,20 +31,34 @@ use homelinter_scan::ToolSet;
 
 /// Extract plain text from `path` for the description provider. `None`
 /// when extraction is disabled for the format, no command is configured
-/// and no default tool is available, the file has no extension, or the
-/// command fails; never an error.
+/// and neither a default tool nor a built-in reader is available, the
+/// file has no extension, or the extraction fails; never an error.
 pub fn extract_document_text(cfg: &RawConfig, path: &Path, tools: &ToolSet) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    let argv = match cfg.document_extraction.get(&ext) {
-        // An empty array explicitly disables extraction for this format.
+    match cfg.document_extraction.get(&ext) {
+        // An empty array explicitly disables extraction for this format,
+        // including the built-in fallback: the user opted out.
         Some(argv) if argv.is_empty() => return None,
-        Some(argv) => argv.clone(),
-        None => default_argv(&ext, tools)?,
-    };
+        Some(argv) => return run_command(argv, path, cfg),
+        None => {}
+    }
+    if let Some(argv) = default_argv(&ext, tools) {
+        return run_command(&argv, path, cfg);
+    }
+    // No configured command and no default tool on the PATH: fall back to
+    // the in-process readers when one exists for the format. The built-in
+    // budget mirrors the external stdout cap, so both paths fail the same
+    // way on oversized output.
+    homelinter_analyze::extract_builtin_text(path, &ext, cfg.tool_stdout_max_bytes())
+}
+
+/// Run a configured or default argv against `path`, substituting the
+/// standalone `{path}` argument (validated at config time to be a
+/// complete argument of its own, occurring exactly once) and capturing
+/// stdout under the `[limits]` discipline.
+fn run_command(argv: &[String], path: &Path, cfg: &RawConfig) -> Option<String> {
     let program = argv.first()?;
     let path_str = path.to_str()?.to_string();
-    // `{path}` is validated at config time to be a complete argument of
-    // its own and to occur exactly once; substitute it verbatim.
     let args: Vec<String> = argv
         .iter()
         .map(|a| {
@@ -70,9 +89,8 @@ pub fn extract_document_text(cfg: &RawConfig, path: &Path, tools: &ToolSet) -> O
 /// The argv mirrors the shipped `defaults.toml` `[document_extraction]`
 /// entries so an unconfigured install behaves identically to the template:
 /// `pdftotext -layout` writes to stdout with `-` as the output file, and
-/// `pandoc -t plain` renders office/e-book text to stdout. Built-in Rust
-/// text-extraction fallbacks (pdf-extract, docx-rs) are future work behind
-/// this same seam.
+/// `pandoc -t plain` renders office/e-book text to stdout. When the tool
+/// is absent the caller falls back to the in-process readers.
 fn default_argv(ext: &str, tools: &ToolSet) -> Option<Vec<String>> {
     match ext {
         "pdf" if tools.has("pdftotext") => Some(vec![
@@ -151,16 +169,46 @@ mod tests {
     }
 
     #[test]
-    fn default_pdf_requires_pdftotext() {
+    fn default_pdf_prefers_pdftotext_then_builtin() {
         let cfg = RawConfig::default();
+        // /tmp/x.pdf does not exist, so any path (missing default tool or
+        // the built-in fallback that takes over without pdftotext) still
+        // degrades to None.
         let path = PathBuf::from("/tmp/x.pdf");
-        // pdftotext is the only default for pdf; without it there is no
-        // command and extraction degrades to None.
         assert_eq!(
             extract_document_text(&cfg, &path, &tools_with(&["pandoc"])),
             None
         );
-        let _ = extract_document_text(&cfg, &path, &tools_with(&["pdftotext"]));
+        assert_eq!(
+            extract_document_text(&cfg, &path, &tools_with(&["pdftotext"])),
+            None
+        );
+    }
+
+    #[test]
+    fn builtin_fallback_runs_when_no_tool_is_available() {
+        // A docx without pandoc on the PATH falls back to the in-process
+        // container reader in homelinter-analyze.
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("hl-docx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("memo.docx");
+        let f = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        zw.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zw.write_all(
+            br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Invoice for march</w:t></w:r></w:p></w:body></w:document>"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+        let cfg = RawConfig::default();
+        let text = extract_document_text(&cfg, &path, &tools_with(&[])).unwrap();
+        assert_eq!(text, "Invoice for march");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -31,8 +31,9 @@
 //! placeholder (`%l` for the geocoder, `%s` for descriptions); provider
 //! inputs that do exist (GPS coordinates from EXIF) are wired in, and
 //! document text for description prompts is extracted in the worker per
-//! the `[document_extraction]` section (configured commands, falling back
-//! to `pdftotext`/`pandoc` when on the PATH; see `document_text`).
+//! the `[document_extraction]` section (configured commands, default tools
+//! when on the PATH, then the in-process readers in `homelinter-analyze`;
+//! see `document_text`).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;

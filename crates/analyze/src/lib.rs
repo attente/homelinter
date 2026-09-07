@@ -11,6 +11,7 @@
 
 mod builtin_audio;
 mod builtin_exif;
+mod builtin_text;
 mod dateparse;
 mod doc_container;
 mod doc_pdfinfo;
@@ -21,6 +22,7 @@ mod tool_runner;
 
 pub use builtin_audio::BuiltinAudioExtractor;
 pub use builtin_exif::BuiltinExifExtractor;
+pub use builtin_text::extract_builtin_text;
 pub use dateparse::{parse_exif_datetime, parse_filename_date, DateParts};
 pub use doc_container::DocumentContainerExtractor;
 pub use doc_pdfinfo::PdfInfoExtractor;
