@@ -418,7 +418,7 @@ textarea:focus {
   overflow-y: auto;
 }
 
-/* Config view */
+/* Config view (settings) */
 
 .config-view {
   display: flex;
@@ -427,6 +427,7 @@ textarea:focus {
   min-height: 0;
   padding: 10px 14px;
   gap: 10px;
+  overflow-y: auto;
 }
 
 .config-view .toolbar h2 {
@@ -434,14 +435,78 @@ textarea:focus {
   font-size: 14px;
 }
 
-.config-text {
-  flex: 1 1 auto;
-  min-height: 0;
-  resize: none;
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 900px;
+}
+
+.settings section {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.settings h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.settings textarea {
+  width: 100%;
   background: var(--bg);
   font: inherit;
-  font-size: 13px;
-  white-space: pre;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0 16px;
+}
+
+.field select,
+.field input[type="password"],
+.field input[type="number"] {
+  width: 100%;
+}
+
+.field input:disabled {
+  opacity: 0.5;
+}
+
+.hint {
+  color: var(--dim);
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+.config-json {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.config-json summary {
+  cursor: pointer;
+  color: var(--dim);
+}
+
+.config-json pre {
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.scan-paths {
+  margin-bottom: 16px;
+}
+
+.scan-paths summary {
+  color: var(--dim);
+  cursor: pointer;
+  margin-bottom: 8px;
 }
 
 /* Toasts */

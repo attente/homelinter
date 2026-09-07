@@ -442,8 +442,10 @@ pub fn deep_merge_toml(base: &mut TomlValue, higher: TomlValue) {
     }
 }
 
-/// Deep merge of two JSON values with identical semantics, used by
-/// `PUT /config` which merges submitted values into the existing file.
+/// Deep merge of two JSON values with the semantics `PUT /config` needs:
+/// tables merge by key, scalars and arrays replace, empty tables contribute
+/// nothing, and a `null` value deletes the key from the base object (the
+/// only way a caller can unset a previously persisted value).
 pub fn deep_merge_json(base: &mut JsonValue, higher: JsonValue) {
     match base {
         JsonValue::Object(base_o) => {
@@ -452,6 +454,10 @@ pub fn deep_merge_json(base: &mut JsonValue, higher: JsonValue) {
                 return;
             };
             for (key, high_val) in high_o {
+                if high_val.is_null() {
+                    base_o.remove(key.as_str());
+                    continue;
+                }
                 let empty_object = high_val.as_object().is_some_and(|o| o.is_empty());
                 if empty_object {
                     continue;
@@ -463,6 +469,27 @@ pub fn deep_merge_json(base: &mut JsonValue, higher: JsonValue) {
             }
         }
         _ => *base = higher,
+    }
+}
+
+/// Total TOML -> JSON conversion for the `PUT /config` persistence path
+/// (the writable file is merged in JSON space so `null` deletions work,
+/// then converted back for parsing and writing).
+pub fn toml_to_json(v: &TomlValue) -> JsonValue {
+    match v {
+        TomlValue::Table(t) => {
+            let mut o = serde_json::Map::new();
+            for (k, val) in t {
+                o.insert(k.clone(), toml_to_json(val));
+            }
+            JsonValue::Object(o)
+        }
+        TomlValue::Array(a) => JsonValue::Array(a.iter().map(toml_to_json).collect()),
+        TomlValue::String(s) => JsonValue::String(s.clone()),
+        TomlValue::Integer(i) => JsonValue::from(*i),
+        TomlValue::Float(f) => JsonValue::from(*f),
+        TomlValue::Boolean(b) => JsonValue::Bool(*b),
+        TomlValue::Datetime(d) => JsonValue::String(d.to_string()),
     }
 }
 
@@ -878,16 +905,16 @@ pub fn merge_and_write_config(
     cli: Option<&Path>,
 ) -> Result<LoadedConfig, ApiError> {
     let write_path = writable_config_path(cli)?;
-    let mut file_toml = writable_file_toml(cli)?;
-    let sub_toml = json_to_toml(submitted)
+    let mut file_json = writable_file_toml(cli).map(|t| toml_to_json(&t))?;
+    deep_merge_json(&mut file_json, submitted.clone());
+    let merged_toml = json_to_toml(&file_json)
         .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
-    deep_merge_toml(&mut file_toml, sub_toml);
-    let raw: RawConfig = file_toml
+    let raw: RawConfig = merged_toml
         .clone()
         .try_into()
         .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
     validate_config(&raw)?;
-    write_config_toml(&write_path, &file_toml)?;
+    write_config_toml(&write_path, &merged_toml)?;
     load_config(cli)
 }
 
@@ -898,11 +925,11 @@ pub fn merge_and_validate_config(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<RawConfig, ApiError> {
-    let mut file_toml = writable_file_toml(cli)?;
-    let sub_toml = json_to_toml(submitted)
+    let mut file_json = writable_file_toml(cli).map(|t| toml_to_json(&t))?;
+    deep_merge_json(&mut file_json, submitted.clone());
+    let merged_toml = json_to_toml(&file_json)
         .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
-    deep_merge_toml(&mut file_toml, sub_toml);
-    let raw: RawConfig = file_toml
+    let raw: RawConfig = merged_toml
         .try_into()
         .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
     validate_config(&raw)?;
@@ -948,6 +975,16 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         "target_paths".into(),
         serde_json::to_value(&raw.target_paths).unwrap_or(JsonValue::Null),
     );
+    // Built-in default destination formats for every kind; clients use
+    // them as placeholders and to show what an unset key resolves to.
+    let mut defaults = serde_json::Map::new();
+    for kind in asset_kind::AssetKind::ALL {
+        defaults.insert(
+            kind.name().to_string(),
+            JsonValue::String(kind.default_format().to_string()),
+        );
+    }
+    out.insert("target_path_defaults".into(), JsonValue::Object(defaults));
     out.insert(
         "geocoder".into(),
         serde_json::json!({
@@ -961,6 +998,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             },
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
             "language": raw.geocoder.language,
+            "user_agent_contact": raw.geocoder.user_agent_contact,
             "rate_limit_ms": raw.geocoder.rate_limit_ms,
         }),
     );
@@ -1185,6 +1223,66 @@ mod tests {
         assert_eq!(t["description"]["photo"]["enabled"].as_bool(), Some(true));
         // Arrays are replaced wholesale, not unioned.
         assert_eq!(t["scan"]["exclude_paths"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn deep_merge_json_null_deletes() {
+        let mut base = serde_json::json!({
+            "geocoder": { "language": "fr", "enabled": true },
+            "target_paths": { "photo": "Pics/%f" },
+            "scan": { "exclude_paths": ["a/**"] },
+        });
+        deep_merge_json(
+            &mut base,
+            serde_json::json!({
+                "geocoder": { "language": null, "enabled": false },
+                "target_paths": { "photo": null, "audio": "Music/%f" },
+                "scan": { "exclude_paths": [] },
+            }),
+        );
+        assert_eq!(base["geocoder"]["language"], serde_json::Value::Null);
+        assert!(base["geocoder"].get("language").is_none());
+        assert_eq!(base["geocoder"]["enabled"], serde_json::json!(false));
+        assert!(base["target_paths"].get("photo").is_none());
+        assert_eq!(base["target_paths"]["audio"], serde_json::json!("Music/%f"));
+        assert_eq!(
+            base["scan"]["exclude_paths"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn put_null_deletes_persisted_key() {
+        let d = std::env::temp_dir().join(format!(
+            "hl-cfg-null-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("config.toml");
+        std::fs::write(
+            &file,
+            "[geocoder]\nenabled = true\nendpoint = \"https://nominatim.openstreetmap.org\"\nlanguage = \"fr\"\n[target_paths]\nphoto = \"Pics/%f\"\n",
+        )
+        .unwrap();
+        let cli = file.clone();
+        let loaded = merge_and_write_config(&serde_json::json!({}), Some(&cli)).unwrap();
+        assert_eq!(loaded.raw.geocoder.language.as_deref(), Some("fr"));
+        let cleared = merge_and_write_config(
+            &serde_json::json!({ "geocoder": { "language": null }, "target_paths": { "photo": null } }),
+            Some(&cli),
+        )
+        .unwrap();
+        assert_eq!(cleared.raw.geocoder.language, None);
+        assert!(!cleared.raw.target_paths.contains_key("photo"));
+        // The deletion is persisted: reloading the file sees it too.
+        let reloaded = load_config(Some(&cli)).unwrap();
+        assert_eq!(reloaded.raw.geocoder.language, None);
+        assert_eq!(reloaded.raw.target_paths.get("photo"), None);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

@@ -33,7 +33,7 @@ For production-style serving, `pnpm build` in `webui/` produces `webui/dist`, wh
 
 Configuration is TOML, resolved by precedence: per-scan CLI options, then the config file, then values inferred from tools and your home layout, then defaults.
 
-The default config path is `$HOME/.config/homelinter/config.toml` on Linux and macOS, and `%APPDATA%\homelinter\config.toml` on Windows; any file is merged over it (system-wide first, then user). Use `--config <path>` to select a specific file, and the SPA can edit the live config through its settings view.
+The default config path is `$HOME/.config/homelinter/config.toml` on Linux and macOS, and `%APPDATA%\homelinter\config.toml` on Windows; any file is merged over it (system-wide first, then user). Use `--config <path>` to select a specific file. The SPA's settings view customizes the scan-relevant options through individual form controls (destination paths, exclusions, providers, limits) and shows the full effective config as a read-only document; options it does not cover are changed in the config file itself.
 
 Key sections: `[target_paths]` maps each asset kind to a destination format string (for example `photo = "Pictures/%Y/%m/%f"`); `[geocoder]` and `[description]` configure optional content-description and location providers (all disabled by default); `[scan]` sets `exclude_paths` globs and (on Windows) the hidden-file definition; `[output]` selects pretty, JSON, or TOML reporting.
 

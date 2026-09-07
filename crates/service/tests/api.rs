@@ -457,6 +457,50 @@ async fn cache_clear_and_config_put() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_put_null_deletes_and_get_reports_defaults() {
+    let env = Env::new("conf-null");
+    let app = env.service();
+
+    // GET /config carries the built-in target-path defaults and the
+    // geocoder contact field.
+    let (_, v) = request(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(v["target_path_defaults"]["photo"], "Pictures/%Y/%m/%f");
+    assert_eq!(v["target_path_defaults"]["other"], "Other/%f");
+    assert_eq!(v["geocoder"]["user_agent_contact"], serde_json::Value::Null);
+
+    // Set two values...
+    let (status, v) = request(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        Some(json!({
+            "geocoder": { "language": "fr" },
+            "target_paths": { "photo": "Gallery/%f" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["geocoder"]["language"], "fr");
+    assert_eq!(v["target_paths"]["photo"], "Gallery/%f");
+
+    // ...then delete them again with nulls.
+    let (status, v) = request(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        Some(json!({
+            "geocoder": { "language": null },
+            "target_paths": { "photo": null },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["geocoder"]["language"], serde_json::Value::Null);
+    assert!(v["target_paths"].get("photo").is_none());
+    assert_eq!(v["target_path_defaults"]["photo"], "Pictures/%Y/%m/%f");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn session_exposes_batch_config_staleness() {
     let env = Env::new("stale");
     let app = env.service();

@@ -100,14 +100,9 @@ export default function App() {
       }));
       try {
         const targetPaths: Record<string, string> = {};
-        for (const line of values.targetPaths.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed.length === 0) continue;
-          const eq = trimmed.indexOf('=');
-          if (eq <= 0) {
-            throw new Error(`invalid target path line (expected kind=template): ${trimmed}`);
-          }
-          targetPaths[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+        for (const [kind, template] of Object.entries(values.targetPaths)) {
+          const t = template.trim();
+          if (t.length > 0) targetPaths[kind] = t;
         }
         await api.startScan({
           root: values.root.length > 0 ? values.root : undefined,
@@ -444,17 +439,12 @@ export default function App() {
     body = <ConfigView onClose={() => patch({ configOpen: false })} pushToast={pushToast} />;
   } else if (st.showScanForm) {
     const defaults = st.session?.scan_defaults;
-    const defaultTargetPaths = defaults
-      ? Object.entries(defaults.target_paths)
-          .map(([kind, tmpl]) => `${kind}=${tmpl}`)
-          .join('\n')
-      : '';
     body = (
       <ScanForm
         key={st.session ? 'session-loaded' : 'booting'}
         defaultRoot={st.session?.scan_root ?? ''}
         defaultHidden={defaults?.hidden ?? false}
-        defaultTargetPaths={defaultTargetPaths}
+        defaultTargetPaths={defaults?.target_paths}
         hasSuggestions={st.suggestions.length > 0}
         startDisabled={!canScan}
         onStart={startScan}

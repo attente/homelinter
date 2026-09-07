@@ -3,13 +3,29 @@ import { useState } from 'react';
 export interface ScanFormValues {
   root: string;
   hidden: boolean;
-  targetPaths: string;
+  targetPaths: Record<string, string>;
 }
+
+// The nine asset kinds with their built-in default destination format
+// strings (DESIGN.md "Destination Path Format Strings > Defaults"); the
+// defaults double as input placeholders. Empty input = use the configured
+// (or built-in) default for that kind.
+const KINDS: Array<[string, string]> = [
+  ['document', 'Documents/%f'],
+  ['photo', 'Pictures/%Y/%m/%f'],
+  ['video', 'Videos/%Y/%m/%f'],
+  ['audio', 'Music/%f'],
+  ['repository', 'Projects/%f'],
+  ['archive', 'Archives/%f'],
+  ['data', 'Data/%f'],
+  ['executable', 'bin/%f'],
+  ['other', 'Other/%f'],
+];
 
 interface ScanFormProps {
   defaultRoot: string;
   defaultHidden?: boolean;
-  defaultTargetPaths?: string;
+  defaultTargetPaths?: Record<string, string>;
   hasSuggestions: boolean;
   startDisabled?: boolean;
   onStart: (values: ScanFormValues) => void;
@@ -28,7 +44,19 @@ export function ScanForm(props: ScanFormProps) {
   } = props;
   const [root, setRoot] = useState(defaultRoot);
   const [hidden, setHidden] = useState(defaultHidden ?? false);
-  const [targets, setTargets] = useState(defaultTargetPaths ?? '');
+  const [paths, setPaths] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const [kind] of KINDS) {
+      init[kind] = defaultTargetPaths?.[kind] ?? '';
+    }
+    return init;
+  });
+  const [showPaths, setShowPaths] = useState(
+    Object.values(defaultTargetPaths ?? {}).some((v) => v.length > 0),
+  );
+
+  const setPath = (kind: string, value: string) =>
+    setPaths((prev) => ({ ...prev, [kind]: value }));
 
   return (
     <main className="scan-form">
@@ -43,7 +71,7 @@ export function ScanForm(props: ScanFormProps) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          onStart({ root: root.trim(), hidden, targetPaths: targets });
+          onStart({ root: root.trim(), hidden, targetPaths: paths });
         }}
       >
         <label className="field">
@@ -63,15 +91,30 @@ export function ScanForm(props: ScanFormProps) {
           />
           <span>Include hidden files and directories</span>
         </label>
-        <label className="field">
-          <span>Target path overrides (optional, kind=template per line)</span>
-          <textarea
-            value={targets}
-            onChange={(e) => setTargets(e.target.value)}
-            placeholder="photo={year}/{month}/{name}"
-            rows={3}
-          />
-        </label>
+        <details
+          className="scan-paths"
+          open={showPaths}
+          onToggle={(e) => setShowPaths((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>Per-kind target path overrides (optional)</summary>
+          <p className="hint">
+            Destination format string per asset kind, relative to home or absolute.
+            Must contain a placeholder; empty uses the configured default.
+          </p>
+          <div className="field-grid">
+            {KINDS.map(([kind, def]) => (
+              <label className="field" key={kind}>
+                <span>{kind}</span>
+                <input
+                  type="text"
+                  value={paths[kind]}
+                  placeholder={def}
+                  onChange={(e) => setPath(kind, e.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+        </details>
         <div className="toolbar">
           <button
             type="submit"
