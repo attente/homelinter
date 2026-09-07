@@ -140,13 +140,13 @@ pub struct GeocoderConfig {
     pub language: Option<String>,
     #[serde(default)]
     pub user_agent_contact: Option<String>,
-    /// Minimum interval between requests in seconds, enforced between
+    /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. Only meaningful for the
     /// `custom` service: the built-in public services keep their documented
     /// usage pace regardless (see "Provider Plugins" in DESIGN.md).
     /// `0` (the default) means no built-in delay.
     #[serde(default)]
-    pub rate_limit_seconds: Option<u64>,
+    pub rate_limit_ms: Option<u64>,
 }
 
 impl GeocoderConfig {
@@ -600,10 +600,10 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         // The configured rate limit paces only the custom service; the
         // built-in public services always enforce their documented usage pace.
         let rate_warn = || {
-            if geo.rate_limit_seconds.is_some() {
+            if geo.rate_limit_ms.is_some() {
                 Some((
-                    "geocoder.rate_limit_seconds".to_string(),
-                    "rate_limit_seconds applies only to the custom service; built-in public services always enforce their documented usage pace"
+                    "geocoder.rate_limit_ms".to_string(),
+                    "rate_limit_ms applies only to the custom service; built-in public services always enforce their documented usage pace"
                         .to_string(),
                 ))
             } else {
@@ -970,7 +970,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             },
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
             "language": raw.geocoder.language,
-            "rate_limit_seconds": raw.geocoder.rate_limit_seconds,
+            "rate_limit_ms": raw.geocoder.rate_limit_ms,
         }),
     );
     let mut desc = serde_json::Map::new();

@@ -504,7 +504,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
             // The custom/self-hosted service is the user's responsibility;
             // the optional configured rate limit paces it like the built-in
             // public services pace themselves (0 = no built-in delay).
-            Duration::from_secs(cfg.geocoder.rate_limit_seconds.unwrap_or(0)),
+            Duration::from_millis(cfg.geocoder.rate_limit_ms.unwrap_or(0)),
         ),
     };
     let endpoint = cfg
@@ -1001,12 +1001,12 @@ mod tests {
 
         // A configured rate limit paces the custom service.
         let paced: RawConfig = toml::from_str(
-            "[geocoder]\nenabled = true\nservice = \"custom\"\nendpoint = \"http://geo.local\"\nrate_limit_seconds = 3\n"
+            "[geocoder]\nenabled = true\nservice = \"custom\"\nendpoint = \"http://geo.local\"\nrate_limit_ms = 3000\n"
         )
         .unwrap();
         assert_eq!(
             geocoder_settings(&paced).unwrap().min_interval,
-            Duration::from_secs(3)
+            Duration::from_millis(3000)
         );
 
         // Disabled -> None.
