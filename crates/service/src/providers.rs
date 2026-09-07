@@ -23,20 +23,22 @@
 //! Results carry the scan epoch; results for a superseded scan are dropped
 //! without touching the session.
 //!
-//! The scaffold implements the transport for the neutral `custom` geocoder
-//! contract only; the public nominatim/photon/google/mapbox backends and
-//! every description (LLM) backend return "not implemented yet" and thus
-//! behave as ordinary provider failures. Jobs are planned per unit only
-//! when the destination format for the unit's kind uses the corresponding
-//! placeholder (`%l` for the geocoder, `%s` for descriptions); provider
-//! inputs that do exist (GPS coordinates from EXIF) are wired in, and
-//! document text for description prompts is extracted in the worker per
+//! The scaffold implements the neutral `custom` contracts only: the
+//! reverse-geocode transport and the completion transport for description
+//! (LLM) requests. The public nominatim/photon/google/mapbox geocoder
+//! backends and the ollama/openrouter/openai description backends return
+//! "not implemented yet" and thus behave as ordinary provider failures.
+//! Jobs are planned per unit only when the destination format for the
+//! unit's kind uses the corresponding placeholder (`%l` for the geocoder,
+//! `%s` for descriptions); provider inputs that do exist (GPS coordinates
+//! from EXIF, extracted document text) are wired in, and document text
+//! for description prompts is extracted in the worker per
 //! the `[document_extraction]` section (configured commands, default tools
 //! when on the PATH, then the in-process readers in `homelinter-analyze`;
 //! see `document_text`).
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -54,7 +56,7 @@ use tokio::sync::Notify;
 
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::AssetKind;
-use homelinter_model::config::{GeocoderService, RawConfig};
+use homelinter_model::config::{GeocoderService, RawConfig, DEFAULT_MAX_WORDS};
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
 use homelinter_scan::SymlinkIndex;
@@ -330,10 +332,12 @@ async fn cache_put(app: &App, job: &ProviderJob, value: &str) {
     );
 }
 
-/// Exercise one provider request. The only implemented transport today is
-/// the `custom` geocoder neutral contract from "Provider Plugins": `POST
-/// endpoint` with `{"latitude", "longitude", "language"}` answering
-/// `{"name": ...}`. Everything else degrades to a provider failure.
+/// Exercise one provider request. The implemented transports today are the
+/// neutral `custom` contracts from "Provider Plugins": reverse geocoding
+/// (`POST endpoint` with `{"latitude", "longitude", "language"}` answering
+/// `{"name": ...}`) and completion for descriptions (`POST endpoint` with
+/// `{"model", "prompt", "max_words"}` answering `{"content": ...}`).
+/// Everything else degrades to a provider failure.
 async fn invoke(job: &ProviderJob) -> Result<String, String> {
     match job.kind {
         ProviderKind::Geocode => {
@@ -355,9 +359,58 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             }
         }
         ProviderKind::Description => {
-            Err("description (LLM) backends are not implemented yet".to_string())
+            let text = match &job.input {
+                ProviderInput::Describe { text } => text.as_deref(),
+                ProviderInput::Geocode { .. } => {
+                    return Err("mismatched provider input".to_string())
+                }
+            };
+            match job.settings.backend.as_str() {
+                "custom" => neutral_complete(&job.settings, &job.unit.path, text).await,
+                backend => Err(format!(
+                    "description backend '{backend}' is not implemented yet"
+                )),
+            }
         }
     }
+}
+
+/// POST `body` JSON to `endpoint` and parse the JSON response. Shared by
+/// the neutral geocoder and description transports: bearer auth when an
+/// api key is configured, JSON content-type, and a bounded failure on any
+/// non-2xx status, unreadable body, or non-JSON response.
+async fn post_json(endpoint: &str, api_key: Option<&str>, body: Value) -> Result<Value, String> {
+    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let uri: hyper::Uri = endpoint
+        .parse()
+        .map_err(|e| format!("invalid provider endpoint: {e}"))?;
+    let mut builder = Request::builder().method(Method::POST).uri(uri);
+    if let Some(key) = api_key {
+        builder = builder.header(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
+        );
+    }
+    let bytes = serde_json::to_vec(&body).map_err(|e| format!("provider serialize: {e}"))?;
+    builder = builder.header("content-type", "application/json");
+    let req = builder
+        .body(Full::new(Bytes::from(bytes)))
+        .map_err(|e| format!("provider request build: {e}"))?;
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| format!("provider transport error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("provider body read: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        return Err(format!("provider returned {}", status.as_u16()));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "provider response is not JSON".to_string())
 }
 
 /// Reverse geocode against the neutral `custom` contract.
@@ -370,48 +423,66 @@ async fn neutral_reverse_geocode(
     if s.endpoint.is_empty() {
         return Err("custom geocoder needs an endpoint".to_string());
     }
-    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
     let body: Value = json!({
         "latitude": latitude,
         "longitude": longitude,
         "language": language.unwrap_or(""),
     });
-    let uri: hyper::Uri = s
-        .endpoint
-        .parse()
-        .map_err(|e| format!("invalid geocoder endpoint: {e}"))?;
-    let mut builder = Request::builder().method(Method::POST).uri(uri);
-    if let Some(key) = &s.api_key {
-        builder = builder.header(
-            "authorization",
-            HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
-        );
-    }
-    let bytes = serde_json::to_vec(&body).map_err(|e| format!("geocoder serialize: {e}"))?;
-    builder = builder.header("content-type", "application/json");
-    let req = builder
-        .body(Full::new(Bytes::from(bytes)))
-        .map_err(|e| format!("geocoder request build: {e}"))?;
-    let resp = client
-        .request(req)
-        .await
-        .map_err(|e| format!("geocoder transport error: {e}"))?;
-    let status = resp.status();
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| format!("geocoder body read: {e}"))?
-        .to_bytes();
-    if !status.is_success() {
-        return Err(format!("geocoder returned {}", status.as_u16()));
-    }
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "geocoder response is not JSON".to_string())?;
+    let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
     value["name"]
         .as_str()
         .map(str::to_string)
+        .filter(|n| !n.trim().is_empty())
         .ok_or_else(|| "geocoder response has no 'name' field".to_string())
+}
+
+/// Complete a description against the neutral `custom` contract: `POST`
+/// `endpoint` with `{"model", "prompt", "max_words"}`, where the prompt
+/// carries the file identity and the extracted plain text when a document
+/// extractor produced it, and a successful response is `{"content": ...}`.
+async fn neutral_complete(
+    s: &ProviderSettings,
+    path: &Path,
+    text: Option<&str>,
+) -> Result<String, String> {
+    if s.endpoint.is_empty() {
+        return Err("custom description provider needs an endpoint".to_string());
+    }
+    let max_words = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
+    let body: Value = json!({
+        "model": s.model.clone().unwrap_or_default(),
+        "prompt": description_prompt(path, text, max_words),
+        "max_words": max_words,
+    });
+    let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
+    value["content"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| "description response has no 'content' field".to_string())
+}
+
+/// Assemble the prompt for a description request: the file identity and
+/// the effective word budget, plus the extracted text when a document
+/// extractor produced it (documents are preprocessed to plain text before
+/// the request per `[document_extraction]`). The completion the model
+/// returns is used verbatim as the `%s` value, so the prompt asks for a
+/// short noun phrase.
+fn description_prompt(path: &Path, text: Option<&str>, max_words: u64) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut prompt = format!(
+        "Describe the subject matter of this file in at most {max_words} words, for use as an archive folder name. Reply with only the phrase.\n\nFile: {name}"
+    );
+    if let Some(t) = text {
+        if !t.is_empty() {
+            prompt.push_str("\n\nContent:\n");
+            prompt.push_str(t);
+        }
+    }
+    prompt
 }
 
 /// Resolve one provider job for a unit: record a successful value (when
@@ -745,6 +816,14 @@ mod tests {
     /// A session primed like the end of a real scan: one photo whose move
     /// suggestion resolves with an empty `%l`, ready for a late geocode.
     async fn primed_app() -> (AppHandle, u64) {
+        primed_app_with_format("Pictures/%Y/%l/%f").await
+    }
+
+    /// A session primed like the end of a real scan: one file whose move
+    /// suggestion resolves against `format`, ready for a late provider
+    /// request. `%l` resolves to `unknown` and `%s` to `unknown` until a
+    /// provider result overlays it.
+    async fn primed_app_with_format(format: &str) -> (AppHandle, u64) {
         let dir = tmp_dir("app");
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -789,10 +868,7 @@ mod tests {
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
-        formats.insert(
-            AssetKind::Photo,
-            FormatString::parse("Pictures/%Y/%l/%f").unwrap(),
-        );
+        formats.insert(AssetKind::Photo, FormatString::parse(format).unwrap());
         let symlinks = SymlinkIndex::default();
 
         let input = GenerateInput {
@@ -842,6 +918,34 @@ mod tests {
         port
     }
 
+    /// A stub `custom` description provider: POST / answers the neutral
+    /// contract with `content`, but only when the request carries the
+    /// model and an expected word budget; otherwise it answers an empty
+    /// content so the transport treats it as a malformed response.
+    async fn stub_describe(content: &'static str) -> u16 {
+        let router = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| async move {
+                let ok = body["model"].as_str() == Some("test-model")
+                    && body["max_words"].as_u64() == Some(8)
+                    && body["prompt"].as_str().is_some_and(|p| {
+                        p.contains("IMG_0001.jpg") && p.contains("subject matter")
+                    });
+                if ok {
+                    Json(json!({ "content": content }))
+                } else {
+                    Json(json!({ "content": "" }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        port
+    }
+
     async fn geocode_job(app: &AppHandle, port: u16, epoch: u64) -> ProviderJob {
         let mut job = ProviderJob {
             kind: ProviderKind::Geocode,
@@ -867,6 +971,36 @@ mod tests {
                 longitude: 2.3522,
                 language: None,
             },
+        };
+        let sess = app.session.lock().await;
+        job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
+            .path
+            .clone();
+        drop(sess);
+        job
+    }
+
+    async fn describe_job(app: &AppHandle, port: u16, epoch: u64) -> ProviderJob {
+        let mut job = ProviderJob {
+            kind: ProviderKind::Description,
+            settings: ProviderSettings {
+                provider_id: format!("describe:custom:{port}"),
+                settings_hash: sha256(&[b"custom", port.to_string().as_bytes()]),
+                min_interval: Duration::ZERO,
+                backend: "custom".to_string(),
+                endpoint: format!("http://127.0.0.1:{port}"),
+                api_key: None,
+                language: None,
+                model: Some("test-model".to_string()),
+                max_words: Some(8),
+            },
+            unit: UnitRef {
+                epoch,
+                index: 0,
+                path: PathBuf::new(),
+            },
+            input_hash: sha256(&[&[3u8], b"desc"]),
+            input: ProviderInput::Describe { text: None },
         };
         let sess = app.session.lock().await;
         job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
@@ -917,6 +1051,141 @@ mod tests {
                 .as_deref(),
             Some("paris")
         );
+    }
+
+    #[tokio::test]
+    async fn worker_fetches_applies_and_caches_description() {
+        let (app, epoch) = primed_app_with_format("Documents/%Y/%s/%f").await;
+        let port = stub_describe("march invoices").await;
+        let queue = app.provider_queue.clone();
+        let job = describe_job(&app, port, epoch).await;
+        queue.enqueue(job.clone());
+        spawn(app.clone());
+
+        // Wait for the pending flag to clear with the described subject.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut refreshed = false;
+        while Instant::now() < deadline {
+            let sess = app.session.lock().await;
+            let s = sess.suggestions.first().cloned();
+            refreshed = s.is_some_and(|s| {
+                !s.metadata_pending
+                    && s.new_path
+                        .as_deref()
+                        .is_some_and(|p| p.contains("march-invoices"))
+            });
+            drop(sess);
+            if refreshed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(refreshed, "described path never appeared");
+
+        // The result was cached under the provider identity.
+        let cache = app.cache.lock().await;
+        let key = super::cache_key(
+            KIND_DESCRIPTION,
+            &job.settings.provider_id,
+            &job.settings.settings_hash,
+            &job.input_hash,
+        );
+        assert_eq!(
+            cache
+                .get(&key, &job.settings.provider_id)
+                .unwrap()
+                .as_deref(),
+            Some("march invoices")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutral_custom_description_transport() {
+        // The stub enforces the whole neutral contract on the wire: bearer
+        // auth, model, word budget, and a prompt carrying the file identity
+        // and the extracted document text. Any deviation answers an empty
+        // content, which the transport must treat as a failure.
+        let router = Router::new().route(
+            "/",
+            post(
+                |headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
+                    let ok = auth == Some("Bearer secret")
+                        && body["model"].as_str() == Some("contract-model")
+                        && body["max_words"].as_u64() == Some(12)
+                        && body["prompt"].as_str().is_some_and(|p| {
+                            p.contains("receipt.pdf") && p.contains("Vendor: ACME, March 2024")
+                        });
+                    if ok {
+                        Json(json!({ "content": "travel expenses" }))
+                    } else {
+                        Json(json!({ "content": "" }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let path = tmp_dir("contract").join("receipt.pdf");
+        std::fs::write(&path, b"%PDF-1.4 fake").unwrap();
+        let settings = ProviderSettings {
+            provider_id: format!("describe:custom:{port}"),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: "custom".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            api_key: Some("secret".to_string()),
+            language: None,
+            model: Some("contract-model".to_string()),
+            max_words: Some(12),
+        };
+        let unit = UnitRef {
+            epoch: 1,
+            index: 0,
+            path: path.clone(),
+        };
+        let job = ProviderJob {
+            kind: ProviderKind::Description,
+            settings: settings.clone(),
+            unit: unit.clone(),
+            input_hash: [0u8; 32],
+            input: ProviderInput::Describe {
+                text: Some("Vendor: ACME, March 2024".to_string()),
+            },
+        };
+        assert_eq!(invoke(&job).await.unwrap(), "travel expenses".to_string());
+
+        // A request that does not carry the expected inputs (here: text
+        // from a different document) is answered with empty content, which
+        // degrades to a provider failure rather than an empty subject.
+        let other = ProviderJob {
+            input: ProviderInput::Describe {
+                text: Some("Unrelated notes".to_string()),
+            },
+            ..job
+        };
+        let err = invoke(&other).await.unwrap_err();
+        assert!(err.contains("'content'"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unimplemented_backends_fail_cleanly() {
+        let (app, epoch) = primed_app_with_format("Documents/%Y/%s/%f").await;
+        let mut desc = describe_job(&app, 1, epoch).await;
+        desc.settings.backend = "openai".to_string();
+        desc.settings.endpoint = "https://api.openai.com/v1".to_string();
+        let err = invoke(&desc).await.unwrap_err();
+        assert!(err.contains("not implemented yet"), "{err}");
+
+        let mut geo = geocode_job(&app, 1, epoch).await;
+        geo.settings.backend = "nominatim".to_string();
+        geo.settings.endpoint = "https://nominatim.openstreetmap.org".to_string();
+        let err = invoke(&geo).await.unwrap_err();
+        assert!(err.contains("not implemented yet"), "{err}");
     }
 
     #[tokio::test]
