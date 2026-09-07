@@ -2,9 +2,9 @@
 //!
 //! The TUI drives one embedded service instance through the HTTP API exactly
 //! like the managed CLI modes do (see "Client Lifecycle" in DESIGN.md). It
-//! keeps one `GET /events` connection for live progress and falls back to
-//! session polling when the stream is interrupted, so the UI stays
-//! responsive even if an SSE connection is dropped.
+//! keeps one `GET /events` connection as the fast path for live progress and
+//! polls `GET /session` every frame as a backstop, so the UI stays responsive
+//! and the session state stays honest even if an SSE connection is dropped.
 //!
 //! Screens: a scanning/progress screen while the batch is generated, a
 //! two-pane suggestion browser with client-side filtering and server-side
