@@ -7,13 +7,10 @@ use std::path::PathBuf;
 #[test]
 fn config_template_loads_and_validates() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults.toml");
-    assert!(
-        path.is_file(),
-        "missing template: {}",
-        path.display()
+    assert!(path.is_file(), "missing template: {}", path.display());
+    let loaded = homelinter_model::config::load_config(Some(&path)).expect(
+        "repo-root defaults.toml template must load and validate against the current schema",
     );
-    let loaded = homelinter_model::config::load_config(Some(&path))
-        .expect("repo-root defaults.toml template must load and validate against the current schema");
 
     assert!(
         !loaded.raw.target_paths.is_empty(),

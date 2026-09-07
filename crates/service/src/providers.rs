@@ -273,10 +273,7 @@ async fn cache_get(app: &App, job: &ProviderJob) -> Option<String> {
         &job.settings.settings_hash,
         &job.input_hash,
     );
-    cache
-        .get(&key, &job.settings.provider_id)
-        .ok()
-        .flatten()
+    cache.get(&key, &job.settings.provider_id).ok().flatten()
 }
 
 async fn cache_put(app: &App, job: &ProviderJob, value: &str) {
@@ -315,7 +312,9 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             };
             match job.settings.backend.as_str() {
                 "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await,
-                backend => Err(format!("geocoder backend '{backend}' is not implemented yet")),
+                backend => Err(format!(
+                    "geocoder backend '{backend}' is not implemented yet"
+                )),
             }
         }
         ProviderKind::Description => {
@@ -389,11 +388,7 @@ async fn neutral_reverse_geocode(
 /// Returns `false` when nothing was updated (stale epoch, scan not yet
 /// published, unit mismatch, pending requests remain, or no suggestion for
 /// the unit).
-pub async fn resolve_provider_job(
-    app: &AppHandle,
-    job: &ProviderJob,
-    value: Option<&str>,
-) -> bool {
+pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Option<&str>) -> bool {
     let mut sess = app.session.lock().await;
     if sess.summary.is_none() {
         // The scan has not published its batch yet.
@@ -478,7 +473,8 @@ pub async fn resolve_provider_job(
     let items = sess.suggestions.clone();
     let total = items.len();
     drop(sess);
-    app.events.publish(ServerEvent::SuggestionBatch { items, total });
+    app.events
+        .publish(ServerEvent::SuggestionBatch { items, total });
     true
 }
 
@@ -496,7 +492,11 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
             Duration::from_secs(1),
         ),
         GeocoderService::Photon => ("photon", "https://photon.komoot.io", Duration::from_secs(1)),
-        GeocoderService::Google => ("google", "https://maps.googleapis.com/maps/api", Duration::ZERO),
+        GeocoderService::Google => (
+            "google",
+            "https://maps.googleapis.com/maps/api",
+            Duration::ZERO,
+        ),
         GeocoderService::Mapbox => ("mapbox", "https://api.mapbox.com", Duration::ZERO),
         GeocoderService::Custom => (
             "custom",
@@ -511,8 +511,9 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
     // the service's built-in public pacing: it can only slow requests down,
     // never exceed the documented usage pace (see "Geocoder rate limiting
     // and identification" in DESIGN.md).
-    let min_interval = built_in_interval
-        .max(Duration::from_millis(cfg.geocoder.rate_limit_ms.unwrap_or(0)));
+    let min_interval = built_in_interval.max(Duration::from_millis(
+        cfg.geocoder.rate_limit_ms.unwrap_or(0),
+    ));
     let endpoint = cfg
         .geocoder
         .endpoint
@@ -546,10 +547,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
 /// Build the description provider settings for one asset kind from the
 /// effective configuration, following per-kind overrides. `None` when the
 /// provider for that kind is disabled.
-pub fn description_settings(
-    cfg: &RawConfig,
-    kind: &AssetKind,
-) -> Option<ProviderSettings> {
+pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
     let eff = cfg
         .description
         .kind_effective(&kind.name())
@@ -612,18 +610,16 @@ pub async fn plan_provider_jobs(
         let Some(fmt) = formats.get(&f.kind) else {
             continue;
         };
-        let uses_location = fmt.segments().iter().any(|s| {
-            matches!(s, Segment::Placeholder(Placeholder::Location))
-        });
-        let uses_subject = fmt.segments().iter().any(|s| {
-            matches!(s, Segment::Placeholder(Placeholder::Subject))
-        });
+        let uses_location = fmt
+            .segments()
+            .iter()
+            .any(|s| matches!(s, Segment::Placeholder(Placeholder::Location)));
+        let uses_subject = fmt
+            .segments()
+            .iter()
+            .any(|s| matches!(s, Segment::Placeholder(Placeholder::Subject)));
         if uses_location {
-            if let (Some(g), Some(lat), Some(lon)) = (
-                &geo,
-                f.latitude,
-                f.longitude,
-            ) {
+            if let (Some(g), Some(lat), Some(lon)) = (&geo, f.latitude, f.longitude) {
                 let input_hash = sha256(&[
                     b"geocode",
                     lat.to_le_bytes().as_slice(),
@@ -649,10 +645,7 @@ pub async fn plan_provider_jobs(
         }
         if uses_subject {
             if let Some(desc) = description_settings(cfg, &f.kind) {
-                let input_hash = sha256(&[
-                    b"describe",
-                    f.path.as_os_str().as_encoded_bytes(),
-                ]);
+                let input_hash = sha256(&[b"describe", f.path.as_os_str().as_encoded_bytes()]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Description,
                     settings: desc,
@@ -773,7 +766,11 @@ mod tests {
         };
         let suggestions = generate_suggestions(&input).unwrap().suggestions;
         assert_eq!(suggestions.len(), 1);
-        assert!(!suggestions[0].new_path.as_deref().unwrap().contains("paris"));
+        assert!(!suggestions[0]
+            .new_path
+            .as_deref()
+            .unwrap()
+            .contains("paris"));
 
         let mut sess = app.session.lock().await;
         let mut suggestion = suggestions.into_iter().next().unwrap();
@@ -796,10 +793,10 @@ mod tests {
 
     /// A stub `custom` geocoder: POST / answers the neutral contract.
     async fn stub_geocoder() -> u16 {
-        let router = Router::new()
-            .route("/", post(|Json(_body): Json<Value>| async move {
-                Json(json!({ "name": "paris" }))
-            }));
+        let router = Router::new().route(
+            "/",
+            post(|Json(_body): Json<Value>| async move { Json(json!({ "name": "paris" })) }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -858,8 +855,7 @@ mod tests {
             let sess = app.session.lock().await;
             let s = sess.suggestions.first().cloned();
             refreshed = s.is_some_and(|s| {
-                !s.metadata_pending
-                    && s.new_path.as_deref().is_some_and(|p| p.contains("paris"))
+                !s.metadata_pending && s.new_path.as_deref().is_some_and(|p| p.contains("paris"))
             });
             drop(sess);
             if refreshed {
@@ -1023,23 +1019,18 @@ mod tests {
 
         // Nominatim carries the built-in public pace; a configured rate
         // limit below it is absorbed, above it raises the floor.
-        let nom: RawConfig =
-            toml::from_str("[geocoder]\nenabled = true\n").unwrap();
+        let nom: RawConfig = toml::from_str("[geocoder]\nenabled = true\n").unwrap();
         let s = geocoder_settings(&nom).unwrap();
         assert_eq!(s.backend, "nominatim");
         assert_eq!(s.min_interval, Duration::from_secs(1));
-        let below: RawConfig = toml::from_str(
-            "[geocoder]\nenabled = true\nrate_limit_ms = 500\n",
-        )
-        .unwrap();
+        let below: RawConfig =
+            toml::from_str("[geocoder]\nenabled = true\nrate_limit_ms = 500\n").unwrap();
         assert_eq!(
             geocoder_settings(&below).unwrap().min_interval,
             Duration::from_secs(1)
         );
-        let above: RawConfig = toml::from_str(
-            "[geocoder]\nenabled = true\nrate_limit_ms = 2500\n",
-        )
-        .unwrap();
+        let above: RawConfig =
+            toml::from_str("[geocoder]\nenabled = true\nrate_limit_ms = 2500\n").unwrap();
         assert_eq!(
             geocoder_settings(&above).unwrap().min_interval,
             Duration::from_millis(2500)
@@ -1127,7 +1118,13 @@ mod tests {
         let dir = tmp_dir("files");
 
         // Photo with a %l format and GPS: geocode planned.
-        let photo = file_at(&dir, "IMG_0001.jpg", AssetKind::Photo, Some(48.8566), Some(2.3522));
+        let photo = file_at(
+            &dir,
+            "IMG_0001.jpg",
+            AssetKind::Photo,
+            Some(48.8566),
+            Some(2.3522),
+        );
         // Photo with a %l format but no GPS: nothing planned.
         let photo_no_gps = file_at(&dir, "IMG_0002.jpg", AssetKind::Photo, None, None);
         // Document with a %s format: description planned, no geocode.
@@ -1149,15 +1146,11 @@ mod tests {
             AssetKind::Document,
             FormatString::parse("Documents/%s/%f").unwrap(),
         );
-        formats.insert(
-            AssetKind::Audio,
-            FormatString::parse("Music/%f").unwrap(),
-        );
+        formats.insert(AssetKind::Audio, FormatString::parse("Music/%f").unwrap());
 
         let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 7).await;
 
-        let photo_jobs: Vec<&ProviderJob> =
-            jobs.iter().filter(|j| j.unit.index == 0).collect();
+        let photo_jobs: Vec<&ProviderJob> = jobs.iter().filter(|j| j.unit.index == 0).collect();
         assert_eq!(photo_jobs.len(), 1);
         assert_eq!(photo_jobs[0].kind, ProviderKind::Geocode);
         assert_eq!(photo_jobs[0].unit.epoch, 7);
@@ -1176,8 +1169,7 @@ mod tests {
         // Photo with GPS but no format %l: no geocode job.
         assert!(jobs.iter().all(|j| j.unit.index != 1));
         // Document: one description job (format %s), never a geocode.
-        let doc_jobs: Vec<&ProviderJob> =
-            jobs.iter().filter(|j| j.unit.index == 2).collect();
+        let doc_jobs: Vec<&ProviderJob> = jobs.iter().filter(|j| j.unit.index == 2).collect();
         assert_eq!(doc_jobs.len(), 1);
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
@@ -1188,7 +1180,13 @@ mod tests {
     async fn disabled_providers_plan_nothing() {
         let cfg: RawConfig = toml::from_str("").unwrap(); // all disabled
         let dir = tmp_dir("off");
-        let photo = file_at(&dir, "IMG_0001.jpg", AssetKind::Photo, Some(48.8), Some(2.3));
+        let photo = file_at(
+            &dir,
+            "IMG_0001.jpg",
+            AssetKind::Photo,
+            Some(48.8),
+            Some(2.3),
+        );
         let analysis = Arc::new(Analysis {
             files: vec![photo],
             repos: Vec::new(),

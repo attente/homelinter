@@ -308,10 +308,7 @@ mod tests {
                 second: 45
             }
         );
-        assert_eq!(
-            parse_exif_datetime("2024-03-15T15:30:45").unwrap().hour,
-            15
-        );
+        assert_eq!(parse_exif_datetime("2024-03-15T15:30:45").unwrap().hour, 15);
         assert_eq!(parse_exif_datetime("2024/03/15").unwrap().day, 15);
         assert!(parse_exif_datetime("2024:13:01 00:00:00").is_none());
         assert!(parse_exif_datetime("2024:02:31 00:00:00").is_none());

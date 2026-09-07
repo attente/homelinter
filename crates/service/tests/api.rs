@@ -451,7 +451,10 @@ async fn session_exposes_batch_config_staleness() {
     // A new scan regenerates the batch under the current config: fresh again.
     scan_to_ready(&app, &env.home).await;
     let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
-    assert_eq!(v["batch_config_hash"].as_str().unwrap(), v["config_hash"].as_str().unwrap());
+    assert_eq!(
+        v["batch_config_hash"].as_str().unwrap(),
+        v["config_hash"].as_str().unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------

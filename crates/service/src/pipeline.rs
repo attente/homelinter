@@ -14,7 +14,8 @@ use tokio::sync::Mutex;
 
 use homelinter_analyze::{
     analyze, AnalyzeOptions, BuiltinAudioExtractor, BuiltinExifExtractor,
-    DocumentContainerExtractor, ExifToolExtractor, ExtractionContext, MetadataExtractor, PdfInfoExtractor,
+    DocumentContainerExtractor, ExifToolExtractor, ExtractionContext, MetadataExtractor,
+    PdfInfoExtractor,
 };
 use homelinter_model::config::{config_hash, RawConfig};
 use homelinter_model::suggestion::{

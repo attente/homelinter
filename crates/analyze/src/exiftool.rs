@@ -19,10 +19,7 @@ use crate::tool_runner::run_capture;
 /// The exiftool shell-out only runs for containers exiftool understands;
 /// text, archives, and other kinds are never handed to it.
 fn applies(kind: AssetKind) -> bool {
-    matches!(
-        kind,
-        AssetKind::Photo | AssetKind::Video | AssetKind::Audio
-    )
+    matches!(kind, AssetKind::Photo | AssetKind::Video | AssetKind::Audio)
 }
 
 /// Derive a signed coordinate from a numeric value and an optional hemisphere
@@ -59,12 +56,7 @@ impl MetadataExtractor for ExifToolExtractor {
         "exiftool"
     }
 
-    fn extract(
-        &self,
-        path: &Path,
-        kind: AssetKind,
-        ctx: &ExtractionContext,
-    ) -> EmbeddedMeta {
+    fn extract(&self, path: &Path, kind: AssetKind, ctx: &ExtractionContext) -> EmbeddedMeta {
         let mut meta = EmbeddedMeta::default();
         if !applies(kind) {
             return meta;
@@ -111,18 +103,17 @@ impl MetadataExtractor for ExifToolExtractor {
         let Some(row) = root
             .as_array()
             .and_then(|a| a.first())
-            .and_then(|v| v.as_object()) else {
+            .and_then(|v| v.as_object())
+        else {
             return meta;
         };
         let s = |key: &str| row.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         let f = |key: &str| {
-            row.get(key)
-                .and_then(|v| v.as_f64())
-                .or_else(|| {
-                    row.get(key)
-                        .and_then(|v| v.as_str())
-                        .and_then(|raw| raw.trim().parse::<f64>().ok())
-                })
+            row.get(key).and_then(|v| v.as_f64()).or_else(|| {
+                row.get(key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|raw| raw.trim().parse::<f64>().ok())
+            })
         };
         let date = s("DateTimeOriginal")
             .or_else(|| s("CreateDate"))
@@ -138,18 +129,10 @@ impl MetadataExtractor for ExifToolExtractor {
         meta.camera = s("Model").or_else(|| s("Make"));
         meta.bitrate_kbps = f("Bitrate").map(|b| (b / 1000.0).round() as u32);
         meta.duration_secs = f("Duration").map(|d| d.max(0.0) as u64);
-        meta.latitude = signed_coordinate(
-            f("GPSLatitude"),
-            s("GPSLatitudeRef").as_deref(),
-            'S',
-            'N',
-        );
-        meta.longitude = signed_coordinate(
-            f("GPSLongitude"),
-            s("GPSLongitudeRef").as_deref(),
-            'W',
-            'E',
-        );
+        meta.latitude =
+            signed_coordinate(f("GPSLatitude"), s("GPSLatitudeRef").as_deref(), 'S', 'N');
+        meta.longitude =
+            signed_coordinate(f("GPSLongitude"), s("GPSLongitudeRef").as_deref(), 'W', 'E');
         meta
     }
 }
@@ -175,8 +158,17 @@ mod tests {
         assert!(has_sign(signed_coordinate(Some(lat), nf, 'S', 'N'), false));
         assert!(has_sign(signed_coordinate(Some(lon), ef, 'W', 'E'), false));
         assert!(has_sign(signed_coordinate(Some(lon), wf, 'W', 'E'), true));
-        assert!(has_sign(signed_coordinate(Some(-lat), none, 'S', 'N'), true));
-        assert!(has_sign(signed_coordinate(Some(lat), none, 'S', 'N'), false));
-        assert!(has_sign(signed_coordinate(Some(lon), Some(""), 'W', 'E'), true));
+        assert!(has_sign(
+            signed_coordinate(Some(-lat), none, 'S', 'N'),
+            true
+        ));
+        assert!(has_sign(
+            signed_coordinate(Some(lat), none, 'S', 'N'),
+            false
+        ));
+        assert!(has_sign(
+            signed_coordinate(Some(lon), Some(""), 'W', 'E'),
+            true
+        ));
     }
 }

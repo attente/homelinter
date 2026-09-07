@@ -680,7 +680,11 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             );
         }
     });
-    fn check_provider(prefix: String, eff: EffectiveDescription, fields: &mut Vec<(String, String)>) {
+    fn check_provider(
+        prefix: String,
+        eff: EffectiveDescription,
+        fields: &mut Vec<(String, String)>,
+    ) {
         if let Some(ep) = &eff.endpoint {
             if ep.trim().is_empty() {
                 fields.push((
@@ -981,7 +985,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 .unwrap_or_else(|| base_eff.service.default_endpoint().into()),
         ),
     );
-    desc.insert("model".into(), serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null));
+    desc.insert(
+        "model".into(),
+        serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null),
+    );
     desc.insert("max_words".into(), JsonValue::from(base_eff.max_words));
     desc.insert(
         "rate_limit_ms".into(),
@@ -1093,10 +1100,7 @@ mod tests {
             DEFAULT_LARGE_FILE_THRESHOLD
         );
         assert_eq!(rc.provider_timeout(), DEFAULT_PROVIDER_TIMEOUT_SECONDS);
-        assert_eq!(
-            rc.description.base_effective().max_words,
-            DEFAULT_MAX_WORDS
-        );
+        assert_eq!(rc.description.base_effective().max_words, DEFAULT_MAX_WORDS);
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
     }
@@ -1123,7 +1127,9 @@ mod tests {
 
     #[test]
     fn description_key_requirements() {
-        assert!(parse("[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err());
+        assert!(
+            parse("[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err()
+        );
         assert!(parse(
             "[description]\nenabled = true\nmodel = \"m\"\nservice = \"openai\"\napi_key = \"k\"\n"
         )
@@ -1174,10 +1180,9 @@ mod tests {
         let mut base: TomlValue = "[description]\nenabled = false\n[description.photo]\nenabled = false\n[scan]\nexclude_paths = [\".cache/**\"]\n"
             .parse()
             .unwrap();
-        let higher: TomlValue =
-            "[description.photo]\nenabled = true\n[scan]\nexclude_paths = []\n"
-                .parse()
-                .unwrap();
+        let higher: TomlValue = "[description.photo]\nenabled = true\n[scan]\nexclude_paths = []\n"
+            .parse()
+            .unwrap();
         deep_merge_toml(&mut base, higher);
         let t = base.as_table().unwrap();
         assert_eq!(t["description"]["enabled"].as_bool(), Some(false));
