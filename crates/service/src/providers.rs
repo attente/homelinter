@@ -26,7 +26,7 @@
 //! The scaffold implements the neutral `custom` contracts only: the
 //! reverse-geocode transport and the completion transport for description
 //! (LLM) requests. The public nominatim/photon/google/mapbox geocoder
-//! backends and the ollama/openrouter/openai description backends return
+//! backends and the ollama/openrouter description backends return
 //! "not implemented yet" and thus behave as ordinary provider failures.
 //! Jobs are planned per unit only when the destination format for the
 //! unit's kind uses the corresponding placeholder (`%l` for the geocoder,
@@ -1176,8 +1176,8 @@ mod tests {
     async fn unimplemented_backends_fail_cleanly() {
         let (app, epoch) = primed_app_with_format("Documents/%Y/%s/%f").await;
         let mut desc = describe_job(&app, 1, epoch).await;
-        desc.settings.backend = "openai".to_string();
-        desc.settings.endpoint = "https://api.openai.com/v1".to_string();
+        desc.settings.backend = "openrouter".to_string();
+        desc.settings.endpoint = "https://openrouter.ai/api/v1".to_string();
         let err = invoke(&desc).await.unwrap_err();
         assert!(err.contains("not implemented yet"), "{err}");
 

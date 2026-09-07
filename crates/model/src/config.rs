@@ -79,7 +79,6 @@ pub fn app_data_dir() -> Option<PathBuf> {
 pub enum LlmBackend {
     Ollama,
     Openrouter,
-    Openai,
     Custom,
 }
 
@@ -88,7 +87,6 @@ impl LlmBackend {
         match self {
             LlmBackend::Ollama => "ollama",
             LlmBackend::Openrouter => "openrouter",
-            LlmBackend::Openai => "openai",
             LlmBackend::Custom => "custom",
         }
     }
@@ -97,7 +95,6 @@ impl LlmBackend {
         match self {
             LlmBackend::Ollama => "http://localhost:11434",
             LlmBackend::Openrouter => "https://openrouter.ai/api/v1",
-            LlmBackend::Openai => "https://api.openai.com/v1",
             LlmBackend::Custom => "",
         }
     }
@@ -723,7 +720,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                     ));
                 }
             }
-            LlmBackend::Openrouter | LlmBackend::Openai => {
+            LlmBackend::Openrouter => {
                 if eff
                     .api_key
                     .as_deref()
@@ -1065,7 +1062,6 @@ fn llm_backend_name(b: LlmBackend) -> &'static str {
     match b {
         LlmBackend::Ollama => "ollama",
         LlmBackend::Openrouter => "openrouter",
-        LlmBackend::Openai => "openai",
         LlmBackend::Custom => "custom",
     }
 }
@@ -1128,10 +1124,10 @@ mod tests {
     #[test]
     fn description_key_requirements() {
         assert!(
-            parse("[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err()
+            parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n").is_err()
         );
         assert!(parse(
-            "[description]\nenabled = true\nmodel = \"m\"\nservice = \"openai\"\napi_key = \"k\"\n"
+            "[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\napi_key = \"k\"\n"
         )
         .is_ok());
         assert!(parse(
