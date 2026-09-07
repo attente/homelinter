@@ -157,7 +157,7 @@ impl GeocoderConfig {
 
 /// A description provider entry: the base `[description]` table or one
 /// per-kind override such as `[description.photo]`. LLM transport settings
-/// (`backend`, `endpoint`, `model`, `api_key`, `max_tokens`) live directly
+/// (`provider`, `endpoint`, `model`, `api_key`, `max_tokens`) live directly
 /// on each entry; unset keys fall back to the base entry.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -165,7 +165,7 @@ pub struct DescriptionProvider {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub backend: Option<LlmBackend>,
+    pub provider: Option<LlmBackend>,
     #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
@@ -181,7 +181,7 @@ pub struct DescriptionProvider {
 #[derive(Debug, Clone)]
 pub struct EffectiveDescription {
     pub enabled: bool,
-    pub backend: LlmBackend,
+    pub provider: LlmBackend,
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
@@ -194,7 +194,7 @@ impl DescriptionProvider {
     pub fn effective(&self, base: &DescriptionProvider) -> EffectiveDescription {
         EffectiveDescription {
             enabled: self.enabled.or(base.enabled).unwrap_or(false),
-            backend: self.backend.or(base.backend).unwrap_or(LlmBackend::Ollama),
+            provider: self.provider.or(base.provider).unwrap_or(LlmBackend::Ollama),
             endpoint: self.endpoint.clone().or_else(|| base.endpoint.clone()),
             model: self.model.clone().or_else(|| base.model.clone()),
             api_key: self.api_key.clone().or_else(|| base.api_key.clone()),
@@ -714,7 +714,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                 "model is required when the description provider is enabled".into(),
             ));
         }
-        match eff.backend {
+        match eff.provider {
             LlmBackend::Custom => {
                 if eff
                     .endpoint
@@ -741,7 +741,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                         format!("{prefix}.api_key"),
                         format!(
                             "api_key is required by the {:?} backend when enabled",
-                            eff.backend
+                            eff.provider
                         )
                         .to_lowercase(),
                     ));
@@ -980,7 +980,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
     }
     desc.insert(
         "backend".into(),
-        JsonValue::String(llm_backend_name(base_eff.backend).into()),
+        JsonValue::String(llm_backend_name(base_eff.provider).into()),
     );
     desc.insert(
         "endpoint".into(),
@@ -988,7 +988,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             base_eff
                 .endpoint
                 .clone()
-                .unwrap_or_else(|| base_eff.backend.default_endpoint().into()),
+                .unwrap_or_else(|| base_eff.provider.default_endpoint().into()),
         ),
     );
     desc.insert("model".into(), serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null));
@@ -999,8 +999,8 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             kind.clone(),
             serde_json::json!({
                 "enabled": eff.enabled,
-                "backend": llm_backend_name(eff.backend),
-                "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.backend.default_endpoint().into()),
+                "provider": llm_backend_name(eff.provider),
+                "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.provider.default_endpoint().into()),
                 "model": eff.model,
                 "max_tokens": eff.max_tokens,
             }),
@@ -1130,11 +1130,11 @@ mod tests {
     fn description_key_requirements() {
         assert!(parse("[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\n").is_err());
         assert!(parse(
-            "[description]\nenabled = true\nmodel = \"m\"\nbackend = \"openai\"\napi_key = \"k\"\n"
+            "[description]\nenabled = true\nmodel = \"m\"\nprovider = \"openai\"\napi_key = \"k\"\n"
         )
         .is_ok());
         assert!(parse(
-            "[description]\nenabled = true\nmodel = \"m\"\nbackend = \"ollama\"\napi_key = \"k\"\n"
+            "[description]\nenabled = true\nmodel = \"m\"\nprovider = \"ollama\"\napi_key = \"k\"\n"
         )
         .is_err());
         assert!(parse("[description]\nenabled = true\n").is_err());
@@ -1151,7 +1151,7 @@ mod tests {
         let photo = rc.description.kind_effective("photo").unwrap();
         assert!(photo.enabled);
         assert_eq!(photo.model.as_deref(), Some("vision"));
-        assert_eq!(photo.backend, LlmBackend::Ollama);
+        assert_eq!(photo.provider, LlmBackend::Ollama);
         // An explicitly disabled entry suppresses the base for that kind.
         let rc = parse(
             "[description]\nenabled = true\nmodel = \"base\"\n[description.audio]\nenabled = false\n",

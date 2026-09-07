@@ -35,13 +35,13 @@ user_agent_contact = ""     # recommended for public services
 # rate_limit_seconds = 0
 
 [description]
-# Content descriptions for %s via an LLM. Requires a reachable backend
+# Content descriptions for %s via an LLM. Requires a reachable provider
 # when enabled; model is required then, api_key only for
 # openrouter/openai. Per-kind overrides ([description.photo] etc.) inherit
 # unset keys from this base section, so an override needs only the model
 # it changes, and enabled = false suppresses descriptions for that kind.
 enabled = false
-backend = "ollama"          # ollama | openrouter | openai | custom
+provider = "ollama"          # ollama | openrouter | openai | custom
 endpoint = "http://localhost:11434"
 model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer
