@@ -3,7 +3,10 @@
 //! session, and publish SSE events. Cancellation is cooperative inside the
 //! scan phases (the discovery walks and the analysis loop poll the cancel
 //! flag per entry/file) and between top-level suggestions (execute), exactly
-//! as "Session Model > Cancellation" describes.
+//! as "Session Model > Cancellation" describes. Scan progress is published
+//! at phase boundaries and, during analysis, at most once per second as
+//! completed work items, so a long extraction or hashing pass shows live
+//! movement in clients instead of a frozen phase line.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -190,7 +193,27 @@ pub async fn start_scan(
             let app = app.clone();
             move || is_cancelled(&app, cancel_token)
         };
-        tokio::task::spawn_blocking(move || analyze(&files, &repos, &analyze_opts, &cancelled)).await
+        // Analysis progress: the blocking analysis loop reports completed
+        // work items (extracted files, hashed files, repositories); publish
+        // a `scan.progress` event at most every second so a long
+        // extraction/hashing pass shows movement in clients instead of the
+        // frozen phase line left by the last phase-boundary event.
+        let progress = {
+            let app = app.clone();
+            let start = start;
+            let last = std::cell::Cell::new(start);
+            move |phase: &'static str, scanned: u64| {
+                let now = Instant::now();
+                if now.duration_since(last.get()) >= std::time::Duration::from_secs(1) {
+                    last.set(now);
+                    app.events.publish(phase_progress(phase, scanned, start));
+                }
+            }
+        };
+        tokio::task::spawn_blocking(move || {
+            analyze(&files, &repos, &analyze_opts, &cancelled, &progress)
+        })
+        .await
     };
     let analysis = match analysis {
         Ok(a) => Arc::new(a),

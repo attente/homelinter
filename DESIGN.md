@@ -677,7 +677,7 @@ Every selection change triggers re-validation of the selected subset (see "Sugge
 | Event | Data |
 |---|---|
 | `session.state` | `{"state": "idle" \| "scanning" \| "analyzing" \| "ready" \| "executing" \| "done" \| "failed"}` |
-| `scan.progress` | `{"phase": "discovery" \| "metadata" \| "symlinks" \| "suggestions", "scanned": N, "elapsed_ms": N}` |
+| `scan.progress` | `{"phase": "discovery" \| "symlinks" \| "metadata" \| "hashing" \| "repos" \| "suggestions", "scanned": N, "elapsed_ms": N}` emitted at phase boundaries and, during analysis, at most once per second as completed work items (extracted files under `metadata`, hashed files under `hashing`, repositories under `repos`) so a long extraction or content-hashing pass shows live movement in clients instead of a frozen phase line |
 | `scan.complete` | `{"summary": {...}}` |
 | `suggestion.batch` | `{"items": [...], "total": N}` emitted after generation and batch validation; re-emitted whenever a `metadata_pending` suggestion is updated in place as its provider requests resolve, with the updated items |
 | `batch.validated` | `{"valid": bool, "rejected": [{"id": "...", "reason": "..."}]}` emitted after every selection change |

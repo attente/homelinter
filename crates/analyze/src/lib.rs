@@ -134,11 +134,16 @@ impl Default for AnalyzeOptions {
 /// probe polled between files (and between hashes and repositories): when
 /// it returns true, analysis stops early and returns the partial `Analysis`
 /// computed so far, which the caller discards once it observes the probe.
+/// `progress` reports completed work items so callers can publish live
+/// `scan.progress` events during a long analysis phase: it receives the
+/// phase label (`"metadata"`, `"hashing"`, or `"repos"`) and the number of
+/// items completed in that pass.
 pub fn analyze(
     files: &[FileEntry],
     repos: &[RepoEntry],
     opts: &AnalyzeOptions,
     cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(&'static str, u64),
 ) -> Analysis {
     let mut analyzed: Vec<AnalyzedFile> = Vec::with_capacity(files.len());
     let mut degraded = false;
@@ -202,17 +207,21 @@ pub fn analyze(
             duration_secs: merged.duration_secs,
             page_count: merged.page_count,
         });
+        // Progress: report extracted files so a long extraction batch shows
+        // movement in clients instead of a frozen phase line.
+        progress("metadata", analyzed.len() as u64);
     }
 
-    let groups = dedup_groups(&mut analyzed, opts.large_file_threshold, cancel);
+    let groups = dedup_groups(&mut analyzed, opts.large_file_threshold, cancel, progress);
 
     let repo_analyzer = RepoAnalyzer::new(&opts.toolset);
     let mut repo_meta: Vec<(RepoEntry, RepoMeta)> = Vec::with_capacity(repos.len());
-    for r in repos {
+    for (k, r) in repos.iter().enumerate() {
         if cancel() {
             break;
         }
         repo_meta.push((r.clone(), repo_analyzer.analyze(r)));
+        progress("repos", k as u64 + 1);
     }
 
     Analysis {
@@ -241,7 +250,12 @@ fn filename_date(f: &FileEntry) -> (Option<DateParts>, &'static str) {
 /// whose fast-path hash collides are promoted to a full-content hash, and
 /// only verified full-content equality forms a group. The fast path never
 /// establishes a duplicate relationship by itself.
-fn dedup_groups(files: &mut [AnalyzedFile], threshold: u64, cancel: &dyn Fn() -> bool) -> Vec<DupGroup> {
+fn dedup_groups(
+    files: &mut [AnalyzedFile],
+    threshold: u64,
+    cancel: &dyn Fn() -> bool,
+    progress: &dyn Fn(&'static str, u64),
+) -> Vec<DupGroup> {
     // Known full hashes, keyed to member indexes.
     let mut full: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
     // Large files awaiting confirmation, keyed to member indexes.
@@ -263,18 +277,24 @@ fn dedup_groups(files: &mut [AnalyzedFile], threshold: u64, cancel: &dyn Fn() ->
                 full.entry(h).or_default().push(i);
             }
         }
+        // Progress: report hashed files so a long content-hashing pass
+        // (large files at or above the threshold) shows movement too.
+        progress("hashing", i as u64 + 1);
     }
 
     // Confirm fast-path collisions with full-content hashes.
     for (_, members) in fast_pending {
-        for i in members {
+        for (j, i) in members.iter().enumerate() {
             if cancel() {
                 return Vec::new();
             }
-            if let Ok(h) = hash::hash_file_full(&files[i].path) {
-                files[i].full_hash = Some(h);
-                full.entry(h).or_default().push(i);
+            if let Ok(h) = hash::hash_file_full(&files[*i].path) {
+                files[*i].full_hash = Some(h);
+                full.entry(h).or_default().push(*i);
             }
+            // Rare pass: continue the count past the first loop so the
+            // reported number never moves backwards.
+            progress("hashing", files.len() as u64 + j as u64 + 1);
         }
     }
 
