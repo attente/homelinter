@@ -583,6 +583,10 @@ async fn mapbox_reverse(
 }
 
 /// Raw file bytes are sent to the model's `images` field when present.
+/// Every request carries `keep_alive` so the model stays resident between
+/// scans instead of paying a cold-load on each first image request.
+const OLLAMA_KEEP_ALIVE: &str = "30m";
+
 async fn ollama_complete(
     s: &ProviderSettings,
     path: &Path,
@@ -595,7 +599,7 @@ async fn ollama_complete(
     if let Some(bytes) = image {
         message["images"] = json!([general_purpose::STANDARD.encode(bytes)]);
     }
-    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4 } });
+    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4 }, "keep_alive": OLLAMA_KEEP_ALIVE });
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
     v.pointer("/message/content")
         .and_then(Value::as_str)
@@ -1077,6 +1081,39 @@ pub fn sha256(parts: &[&[u8]]) -> [u8; 32] {
         h.update(part);
     }
     h.finalize().into()
+}
+
+/// Fire-and-forget model warmup for vision-capable description jobs.
+/// A tiny text-only chat to the same endpoint/model forces Ollama to load
+/// the model out-of-band (no timeout), so the worker's first image request
+/// finds it warm instead of spending its provider timeout on model load.
+/// Failures are ignored: the worker's real request simply pays the load
+/// cost, and every request's `keep_alive` keeps the model resident between
+/// scans. One warmup per scan is enough; it is spawned at scan time so it
+/// runs concurrently with publishing.
+pub fn warmup_vision_models(jobs: &[ProviderJob]) {
+    for job in jobs {
+        if matches!(&job.input, ProviderInput::Describe { vision: true, .. })
+            && job.settings.backend == "ollama"
+        {
+            let endpoint = job.settings.endpoint.clone();
+            let model = job.settings.model.clone().unwrap_or_default();
+            if model.is_empty() {
+                return;
+            }
+            tokio::spawn(async move {
+                let body = json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "stream": false,
+                    "options": { "num_predict": 1 },
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                });
+                let _ = post_json(&format!("{endpoint}/api/chat"), None, body).await;
+            });
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

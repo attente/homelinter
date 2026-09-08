@@ -255,6 +255,9 @@ pub async fn start_scan(
     // never execute a move built on incomplete metadata.
     let provider_jobs =
         crate::providers::plan_provider_jobs(&cfg, &analysis, &formats, provider_epoch).await;
+    // Warm a vision-capable model out-of-band (no timeout) so the worker's
+    // first image request does not eat its provider timeout on model load.
+    crate::providers::warmup_vision_models(&provider_jobs);
     let mut pending: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
     for job in &provider_jobs {
         *pending.entry(job.unit.index).or_default() += 1;
