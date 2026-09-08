@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{
-    config_hash, effective_config_json, merge_and_validate_config, merge_and_write_config,
+    config_hash, effective_config_json, merge_and_validate_config_chain, merge_and_write_config_chain,
     overlay_scan_config, platform_name,
 };
 use homelinter_model::error::{ApiError, ErrorCode};
@@ -855,10 +855,12 @@ async fn config_put(State(app): State<AppHandle>, Json(body): Json<Value>) -> Ap
         ));
     }
     let cli = app.cli_config.clone();
-    let loaded = tokio::task::spawn_blocking(move || merge_and_write_config(&body, cli.as_deref()))
-        .await
-        .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
-        .map_err(api_err)?;
+    let chain = app.config_chain.clone();
+    let loaded =
+        tokio::task::spawn_blocking(move || merge_and_write_config_chain(&chain, &body, cli.as_deref()))
+            .await
+            .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
+            .map_err(api_err)?;
     let cfg = {
         let mut sess = app.session.lock().await;
         sess.config = loaded.raw;
@@ -880,10 +882,12 @@ async fn config_validate(State(app): State<AppHandle>, Json(body): Json<Value>) 
         ));
     }
     let cli = app.cli_config.clone();
-    let raw = tokio::task::spawn_blocking(move || merge_and_validate_config(&body, cli.as_deref()))
-        .await
-        .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
-        .map_err(api_err)?;
+    let chain = app.config_chain.clone();
+    let raw =
+        tokio::task::spawn_blocking(move || merge_and_validate_config_chain(&chain, &body, cli.as_deref()))
+            .await
+            .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
+            .map_err(api_err)?;
     ok(json!({ "valid": true, "config": effective_config_json(&raw, None) }))
 }
 

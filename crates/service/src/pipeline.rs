@@ -40,6 +40,9 @@ pub struct App {
     pub audit: crate::audit::AuditLog,
     pub cancel: AtomicU64,
     pub cli_config: Option<PathBuf>,
+    /// Configuration search chain (system + per-user files read below the
+    /// explicit config file); the host chain by default, empty in tests.
+    pub config_chain: homelinter_model::config::ConfigChain,
     /// Test/embedding override for the home used by symlink indexing and
     /// relative destinations; None means the platform home.
     pub home_override: Option<PathBuf>,

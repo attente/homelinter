@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+use homelinter_model::config::ConfigChain;
 use homelinter_service::pipeline::AppHandle;
 use homelinter_service::{build_service, ServiceOptions};
 
@@ -55,6 +56,9 @@ impl Env {
             cli_config: Some(self._config.clone()),
             home_override: Some(self.home.clone()),
             data_dir_override: Some(self.data.clone()),
+            // Hermetic config chain: never read the host's system or
+            // per-user config files, whatever this machine happens to have.
+            config_chain_override: Some(ConfigChain::default()),
             web_dir: None,
             ..Default::default()
         };
@@ -147,6 +151,7 @@ async fn session_reports_scan_dialog_defaults() {
         cli_config: Some(env._config.clone()),
         home_override: Some(env.home.clone()),
         data_dir_override: Some(env.data.clone()),
+        config_chain_override: Some(ConfigChain::default()),
         web_dir: None,
         default_hidden: true,
         default_target_paths: BTreeMap::from([(

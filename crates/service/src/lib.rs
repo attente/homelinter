@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex};
 
-use homelinter_model::config::load_config;
+use homelinter_model::config::{load_config_chain, ConfigChain};
 use homelinter_model::error::ApiError;
 
 use crate::events::EventBus;
@@ -39,6 +39,11 @@ pub struct ServiceOptions {
     pub home_override: Option<PathBuf>,
     /// Override the app data directory (cache, audit).
     pub data_dir_override: Option<PathBuf>,
+    /// Override the configuration search chain (the system-wide and
+    /// per-user files read below the explicit config file). Tests set an
+    /// empty chain so config behavior stays hermetic; None uses the host
+    /// chain.
+    pub config_chain_override: Option<ConfigChain>,
     /// Directory containing the built SPA (index.html + assets). When set,
     /// the HTTP server also serves static files and the SPA index fallback.
     pub web_dir: Option<PathBuf>,
@@ -67,7 +72,11 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         .or_else(homelinter_model::path::home_dir)
         .ok_or_else(|| ApiError::internal("cannot determine the home directory"))?;
 
-    let loaded = load_config(opts.cli_config.as_deref())?;
+    let chain = opts
+        .config_chain_override
+        .clone()
+        .unwrap_or_else(ConfigChain::host);
+    let loaded = load_config_chain(&chain, opts.cli_config.as_deref())?;
 
     let data_dir = opts
         .data_dir_override
@@ -97,6 +106,7 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         provider_epoch: AtomicU64::new(0),
         provider_queue: provider_queue.clone(),
         cli_config: opts.cli_config,
+        config_chain: chain,
         home_override: opts.home_override,
         web_dir: opts.web_dir,
         default_hidden: opts.default_hidden,

@@ -169,6 +169,7 @@ pub async fn web(opts: WebOptions) -> Result<u8, String> {
             cli_config: opts.config,
             home_override: Some(root),
             data_dir_override: None,
+            config_chain_override: None,
             web_dir: resolve_web_dir(),
             default_hidden: opts.hidden,
             default_target_paths: opts.target_paths,

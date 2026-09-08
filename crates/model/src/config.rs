@@ -64,6 +64,28 @@ pub fn system_config_path() -> Option<PathBuf> {
     }
 }
 
+/// The configuration search chain below the explicitly requested file: the
+/// optional system-wide file and the optional per-user file, merged from
+/// lowest to highest precedence before the explicit file. Production
+/// resolves `ConfigChain::host()`; tests inject an empty chain so
+/// config-file behavior stays hermetic regardless of what exists on the
+/// host machine.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigChain {
+    pub system: Option<PathBuf>,
+    pub user: Option<PathBuf>,
+}
+
+impl ConfigChain {
+    /// The host platform's chain.
+    pub fn host() -> ConfigChain {
+        ConfigChain {
+            system: system_config_path(),
+            user: default_user_config_path(),
+        }
+    }
+}
+
 /// Standard per-user application-data directory: cache database and audit
 /// log live here.
 pub fn app_data_dir() -> Option<PathBuf> {
@@ -561,18 +583,28 @@ fn read_config_file(path: &Path, required: bool) -> Result<Option<TomlValue>, Ap
 /// Missing default files are ignored; a missing or malformed explicitly
 /// requested file is an error.
 pub fn load_config(cli_config: Option<&Path>) -> Result<LoadedConfig, ApiError> {
+    load_config_chain(&ConfigChain::host(), cli_config)
+}
+
+/// `load_config` over an explicit search chain: the same precedence rules,
+/// with the system and per-user files supplied by the caller instead of
+/// resolved from the host.
+pub fn load_config_chain(
+    chain: &ConfigChain,
+    cli_config: Option<&Path>,
+) -> Result<LoadedConfig, ApiError> {
     let mut merged = TomlValue::Table(Default::default());
     let mut highest_existing: Option<PathBuf> = None;
     let mut had_user = false;
 
-    if let Some(sys) = system_config_path() {
-        if let Some(v) = read_config_file(&sys, false)? {
+    if let Some(sys) = &chain.system {
+        if let Some(v) = read_config_file(sys, false)? {
             deep_merge_toml(&mut merged, v);
-            highest_existing = Some(sys);
+            highest_existing = Some(sys.clone());
         }
     }
-    if let Some(user) = default_user_config_path() {
-        if let Some(v) = read_config_file(&user, false)? {
+    if let Some(user) = &chain.user {
+        if let Some(v) = read_config_file(user, false)? {
             deep_merge_toml(&mut merged, v);
             highest_existing = Some(user.clone());
             had_user = true;
@@ -603,10 +635,20 @@ pub fn load_config(cli_config: Option<&Path>) -> Result<LoadedConfig, ApiError> 
 /// The path `PUT /config` writes to: the explicitly requested path, else
 /// the per-user default path (creating parent directories as needed).
 pub fn writable_config_path(cli_config: Option<&Path>) -> Result<PathBuf, ApiError> {
+    writable_config_path_chain(&ConfigChain::host(), cli_config)
+}
+
+/// `writable_config_path` over an explicit search chain.
+pub fn writable_config_path_chain(
+    chain: &ConfigChain,
+    cli_config: Option<&Path>,
+) -> Result<PathBuf, ApiError> {
     if let Some(p) = cli_config {
         return Ok(p.to_path_buf());
     }
-    let user = default_user_config_path()
+    let user = chain
+        .user
+        .clone()
         .ok_or_else(|| ApiError::internal("no per-user config directory available"))?;
     if let Some(parent) = user.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -955,8 +997,8 @@ pub fn parse_and_validate_json(value: JsonValue) -> Result<RawConfig, ApiError> 
 
 /// The file content currently at the writable path (the file `PUT /config`
 /// writes to), or an empty table when no file exists there.
-fn writable_file_toml(cli: Option<&Path>) -> Result<TomlValue, ApiError> {
-    let path = writable_config_path(cli)?;
+fn writable_file_toml(chain: &ConfigChain, cli: Option<&Path>) -> Result<TomlValue, ApiError> {
+    let path = writable_config_path_chain(chain, cli)?;
     Ok(read_config_file(&path, false)?.unwrap_or_else(|| TomlValue::Table(Default::default())))
 }
 
@@ -967,8 +1009,17 @@ pub fn merge_and_write_config(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<LoadedConfig, ApiError> {
-    let write_path = writable_config_path(cli)?;
-    let mut file_json = writable_file_toml(cli).map(|t| toml_to_json(&t))?;
+    merge_and_write_config_chain(&ConfigChain::host(), submitted, cli)
+}
+
+/// `merge_and_write_config` over an explicit search chain.
+pub fn merge_and_write_config_chain(
+    chain: &ConfigChain,
+    submitted: &JsonValue,
+    cli: Option<&Path>,
+) -> Result<LoadedConfig, ApiError> {
+    let write_path = writable_config_path_chain(chain, cli)?;
+    let mut file_json = writable_file_toml(chain, cli).map(|t| toml_to_json(&t))?;
     deep_merge_json(&mut file_json, submitted.clone());
     let merged_toml = json_to_toml(&file_json)
         .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
@@ -978,7 +1029,7 @@ pub fn merge_and_write_config(
         .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
     validate_config(&raw)?;
     write_config_toml(&write_path, &merged_toml)?;
-    load_config(cli)
+    load_config_chain(chain, cli)
 }
 
 /// Validate a partial configuration document exactly as `PUT /config`
@@ -988,7 +1039,16 @@ pub fn merge_and_validate_config(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<RawConfig, ApiError> {
-    let mut file_json = writable_file_toml(cli).map(|t| toml_to_json(&t))?;
+    merge_and_validate_config_chain(&ConfigChain::host(), submitted, cli)
+}
+
+/// `merge_and_validate_config` over an explicit search chain.
+pub fn merge_and_validate_config_chain(
+    chain: &ConfigChain,
+    submitted: &JsonValue,
+    cli: Option<&Path>,
+) -> Result<RawConfig, ApiError> {
+    let mut file_json = writable_file_toml(chain, cli).map(|t| toml_to_json(&t))?;
     deep_merge_json(&mut file_json, submitted.clone());
     let merged_toml = json_to_toml(&file_json)
         .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
@@ -1450,6 +1510,10 @@ mod tests {
 
     #[test]
     fn put_null_deletes_persisted_key() {
+        // An empty chain: the test stays hermetic even when the host has a
+        // real per-user config file (which would otherwise leak into every
+        // reload below the explicit file).
+        let chain = ConfigChain::default();
         let d = std::env::temp_dir().join(format!(
             "hl-cfg-null-{}-{}",
             std::process::id(),
@@ -1466,9 +1530,10 @@ mod tests {
         )
         .unwrap();
         let cli = file.clone();
-        let loaded = merge_and_write_config(&serde_json::json!({}), Some(&cli)).unwrap();
+        let loaded = merge_and_write_config_chain(&chain, &serde_json::json!({}), Some(&cli)).unwrap();
         assert_eq!(loaded.raw.geocoder.language.as_deref(), Some("fr"));
-        let cleared = merge_and_write_config(
+        let cleared = merge_and_write_config_chain(
+            &chain,
             &serde_json::json!({ "geocoder": { "language": null }, "target_paths": { "photo": null } }),
             Some(&cli),
         )
@@ -1476,7 +1541,7 @@ mod tests {
         assert_eq!(cleared.raw.geocoder.language, None);
         assert!(!cleared.raw.target_paths.contains_key("photo"));
         // The deletion is persisted: reloading the file sees it too.
-        let reloaded = load_config(Some(&cli)).unwrap();
+        let reloaded = load_config_chain(&chain, Some(&cli)).unwrap();
         assert_eq!(reloaded.raw.geocoder.language, None);
         assert_eq!(reloaded.raw.target_paths.get("photo"), None);
         std::fs::remove_dir_all(&d).unwrap();
