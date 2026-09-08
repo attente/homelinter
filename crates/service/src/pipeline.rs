@@ -1,8 +1,9 @@
 //! Phase runners: scan and execute pipelines that drive the sync crates
 //! (scan, analyze, suggest, execute) from async handlers, update the shared
-//! session, and publish SSE events. Cancellation is cooperative between
-//! phases (scan) and between top-level suggestions (execute), exactly as
-//! "Session Model > Cancellation" describes.
+//! session, and publish SSE events. Cancellation is cooperative inside the
+//! scan phases (the discovery walks and the analysis loop poll the cancel
+//! flag per entry/file) and between top-level suggestions (execute), exactly
+//! as "Session Model > Cancellation" describes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -139,11 +140,18 @@ pub async fn start_scan(
     );
     app.events.publish(phase_progress("discovery", 0, start));
 
-    // Phase 1 + symlink pass: discovery. Runs on the blocking pool.
+    // Phase 1 + symlink pass: discovery. Runs on the blocking pool. The
+    // probe is polled inside the walks (per entry) so a cancel lands
+    // promptly instead of waiting for the whole tree.
     let home2 = home.clone();
-    let scan_result =
-        tokio::task::spawn_blocking(move || homelinter_scan::scan_root(&root, &home2, &scan_opts))
-            .await;
+    let cancelled = {
+        let app = app.clone();
+        move || is_cancelled(&app, cancel_token)
+    };
+    let scan_result = tokio::task::spawn_blocking(move || {
+        homelinter_scan::scan_root(&root, &home2, &scan_opts, &cancelled)
+    })
+    .await;
     let scan = match scan_result {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return fail(app.clone(), format!("discovery failed: {e}")).await,
@@ -174,8 +182,13 @@ pub async fn start_scan(
             config: Some(cfg.clone()),
         },
     };
-    let analysis =
-        tokio::task::spawn_blocking(move || analyze(&files, &repos, &analyze_opts)).await;
+    let analysis = {
+        let cancelled = {
+            let app = app.clone();
+            move || is_cancelled(&app, cancel_token)
+        };
+        tokio::task::spawn_blocking(move || analyze(&files, &repos, &analyze_opts, &cancelled)).await
+    };
     let analysis = match analysis {
         Ok(a) => Arc::new(a),
         Err(e) => return fail(app.clone(), format!("analysis task panicked: {e}")).await,

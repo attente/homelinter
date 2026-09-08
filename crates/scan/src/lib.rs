@@ -34,14 +34,18 @@ pub struct ScanResult {
 }
 
 /// Run the primary discovery walk and the home-wide symlink pass for one
-/// scan request.
+/// scan request. `cancel` is a cooperative-cancellation probe polled inside
+/// both walks (per entry), so a cancel request stops a scan promptly
+/// instead of waiting for the current blocking phase to finish; the partial
+/// result is discarded by the caller when it observes the probe.
 pub fn scan_root(
     _root: &Path,
     home: &Path,
     opts: &DiscoveryOptions,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<ScanResult, DiscoveryError> {
-    let primary = discover(opts)?;
-    let symlinks = SymlinkIndex::scan(home);
+    let primary = discover(opts, cancel)?;
+    let symlinks = SymlinkIndex::scan(home, cancel);
     let primary_units = primary.files_scanned + primary.repos.len() as u64;
     Ok(ScanResult {
         files: primary.files,

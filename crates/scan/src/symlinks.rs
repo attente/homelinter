@@ -33,12 +33,16 @@ pub struct SymlinkIndex {
 }
 
 impl SymlinkIndex {
-    pub fn scan(home: &Path) -> SymlinkIndex {
+    /// Index every symlink under `home` without following links. `cancel` is
+    /// a cooperative-cancellation probe polled while walking: when it
+    /// returns true the walk stops early and returns the partial index, so
+    /// a cancelled scan does not need to finish the home-wide pass.
+    pub fn scan(home: &Path, cancel: &dyn Fn() -> bool) -> SymlinkIndex {
         let mut index = SymlinkIndex {
             home: Some(home.to_path_buf()),
             entries: Vec::new(),
         };
-        walk(home, &mut index.entries);
+        walk(home, cancel, &mut index.entries);
         index.entries.sort_by(|a, b| {
             a.link_path
                 .to_string_lossy()
@@ -48,12 +52,16 @@ impl SymlinkIndex {
     }
 }
 
-fn walk(dir: &Path, out: &mut Vec<SymlinkEntry>) {
+fn walk(dir: &Path, cancel: &dyn Fn() -> bool, out: &mut Vec<SymlinkEntry>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
     };
     for entry in entries.flatten() {
+        // Cooperative cancellation: polled per entry.
+        if cancel() {
+            return;
+        }
         let path = entry.path();
         let ft = match entry.file_type() {
             Ok(t) => t,
@@ -66,7 +74,7 @@ fn walk(dir: &Path, out: &mut Vec<SymlinkEntry>) {
             continue; // never follow links
         }
         if ft.is_dir() {
-            walk(&path, out);
+            walk(&path, cancel, out);
         }
     }
 }

@@ -70,9 +70,9 @@ fn duplicate_kept_moved_others_deleted() {
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
     filetime::set_file_mtime(&a, filetime::FileTime::from_system_time(old)).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false)).unwrap();
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
     assert_eq!(scan.files.len(), 2);
-    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default());
+    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default(), &|| false);
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
         symlinks: &scan.symlinks,
@@ -112,8 +112,8 @@ fn symlink_repair_attached_on_move() {
     let link = home.join("link-to-photo.jpg");
     symlink(&f, &link).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false)).unwrap();
-    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default());
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default(), &|| false);
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
         symlinks: &scan.symlinks,
@@ -157,8 +157,8 @@ fn delete_repairs_links_pointing_at_duplicate() {
     let link = home.join("preview.jpg");
     symlink(&dup, &link).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false)).unwrap();
-    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default());
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default(), &|| false);
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
         symlinks: &scan.symlinks,
@@ -188,8 +188,8 @@ fn validation_marks_identity_degraded() {
     let downloads = root.join("Downloads");
     std::fs::create_dir_all(&downloads).unwrap();
     std::fs::write(downloads.join("doc.txt"), b"hello").unwrap();
-    let scan = scan_root(&root, &home, &discovery(&root, false)).unwrap();
-    let mut analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default());
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let mut analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default(), &|| false);
     // Simulate a non-unix degraded identity for all files.
     for f in &mut analysis.files {
         f.provenance.identity_available = false;
@@ -215,8 +215,8 @@ fn noop_move_not_generated() {
     std::fs::create_dir_all(&downloads).unwrap();
     let f = downloads.join("keep.txt");
     std::fs::write(&f, b"hello").unwrap();
-    let scan = scan_root(&root, &home, &discovery(&root, false)).unwrap();
-    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default());
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let analysis = analyze(&scan.files, &scan.repos, &AnalyzeOptions::default(), &|| false);
     // Title is "keep"; destination "keep.txt" resolves under a directory
     // named "keep.txt.txt", colliding back with the literal source name
     // only if resolution lands exactly on the file. Simpler: point the

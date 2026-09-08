@@ -200,8 +200,14 @@ fn is_vcs_marker_name(n: &std::ffi::OsStr) -> bool {
 }
 
 /// Walk the primary tree. `home` is only used to bound the relative
-/// representation; discovery itself never leaves the root.
-pub fn discover(opts: &DiscoveryOptions) -> Result<ScanOutput, DiscoveryError> {
+/// representation; discovery itself never leaves the root. `cancel` is a
+/// cooperative-cancellation probe polled while walking: once it returns
+/// true the walk stops early and returns the partially-collected output,
+/// so a scan cancelled mid-discovery does not need to finish the tree.
+pub fn discover(
+    opts: &DiscoveryOptions,
+    cancel: &dyn Fn() -> bool,
+) -> Result<ScanOutput, DiscoveryError> {
     let root = opts.root.clone();
     if !root.is_dir() {
         return Err(DiscoveryError(format!(
@@ -211,7 +217,7 @@ pub fn discover(opts: &DiscoveryOptions) -> Result<ScanOutput, DiscoveryError> {
     }
     let excludes = ExcludeSet::compile(&opts.exclude_patterns)?;
     let mut out = ScanOutput::default();
-    walk_dir(&root, &root, opts, &excludes, &mut out)?;
+    walk_dir(&root, &root, opts, &excludes, cancel, &mut out)?;
     // Deterministic order: repository roots before files keeps reporting
     // stable; each list is sorted by normalized absolute path.
     out.files
@@ -228,6 +234,7 @@ fn walk_dir(
     dir: &Path,
     opts: &DiscoveryOptions,
     excludes: &ExcludeSet,
+    cancel: &dyn Fn() -> bool,
     out: &mut ScanOutput,
 ) -> Result<(), DiscoveryError> {
     let entries: Vec<_> = match std::fs::read_dir(dir) {
@@ -262,6 +269,11 @@ fn walk_dir(
     }
 
     for e in entries {
+        // Cooperative cancellation: polled per entry so a cancel request
+        // lands promptly even inside one very large directory.
+        if cancel() {
+            return Ok(());
+        }
         let name = e.file_name();
         let name_str = name.to_string_lossy();
         if !opts.hidden && is_hidden_name(&name_str, opts.hidden_definition) {
@@ -287,7 +299,7 @@ fn walk_dir(
             if dir == root && root_repo.is_some() && is_vcs_marker_name(&name) {
                 continue;
             }
-            walk_dir(root, &abs, opts, excludes, out)?;
+            walk_dir(root, &abs, opts, excludes, cancel, out)?;
             out.dirs.push(abs);
         } else if meta.is_file() {
             if excludes.excludes_file(&rel, &name_str) {
@@ -344,7 +356,7 @@ mod tests {
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: Vec::new(),
         };
-        let out = discover(&opts).unwrap();
+        let out = discover(&opts, &|| false).unwrap();
         assert_eq!(out.files.len(), 2);
         assert_eq!(out.files_scanned, 2);
         let names: Vec<String> = out
@@ -359,7 +371,7 @@ mod tests {
             hidden: true,
             ..opts
         };
-        let out2 = discover(&opts_hidden).unwrap();
+        let out2 = discover(&opts_hidden, &|| false).unwrap();
         assert_eq!(out2.files.len(), 4);
 
         std::fs::remove_dir_all(root).ok();
@@ -381,7 +393,7 @@ mod tests {
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: vec!["build/**".into(), "*.hs".into()],
         };
-        let out = discover(&opts).unwrap();
+        let out = discover(&opts, &|| false).unwrap();
         let names: Vec<String> = out
             .files
             .iter()
@@ -408,10 +420,35 @@ mod tests {
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: Vec::new(),
         };
-        let out = discover(&opts).unwrap();
+        let out = discover(&opts, &|| false).unwrap();
         assert_eq!(out.files.len(), 1); // outside.txt only
         assert_eq!(out.repos.len(), 1);
         assert_eq!(out.repos[0].vcs, VcsKind::Git);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cancel_probe_stops_the_walk_early() {
+        let root = tmpdir("cancel");
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/c.txt"), "c").unwrap();
+
+        let opts = DiscoveryOptions {
+            root: root.clone(),
+            hidden: false,
+            hidden_definition: HiddenDefinition::Explorer,
+            exclude_patterns: Vec::new(),
+        };
+        // A probe that fires immediately leaves the walk empty but succeeds.
+        let out = discover(&opts, &|| true).unwrap();
+        assert_eq!(out.files.len(), 0);
+        assert_eq!(out.repos.len(), 0);
+        // A probe that never fires collects everything.
+        let out2 = discover(&opts, &|| false).unwrap();
+        assert_eq!(out2.files.len(), 3);
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -434,7 +471,7 @@ mod tests {
                 hidden_definition: HiddenDefinition::Explorer,
                 exclude_patterns: Vec::new(),
             };
-            let out = discover(&opts).unwrap();
+            let out = discover(&opts, &|| false).unwrap();
             // real.txt + sub/inner.txt; empty.txt and symlinks are ignored.
             assert_eq!(out.files.len(), 2);
             assert!(!out.files.iter().any(|f| f.path.ends_with("empty.txt")));

@@ -130,10 +130,24 @@ impl Default for AnalyzeOptions {
     }
 }
 
-pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) -> Analysis {
+/// Analyze every discovered unit. `cancel` is a cooperative-cancellation
+/// probe polled between files (and between hashes and repositories): when
+/// it returns true, analysis stops early and returns the partial `Analysis`
+/// computed so far, which the caller discards once it observes the probe.
+pub fn analyze(
+    files: &[FileEntry],
+    repos: &[RepoEntry],
+    opts: &AnalyzeOptions,
+    cancel: &dyn Fn() -> bool,
+) -> Analysis {
     let mut analyzed: Vec<AnalyzedFile> = Vec::with_capacity(files.len());
     let mut degraded = false;
     for f in files {
+        // Cooperative cancellation: polled per file so a cancel lands
+        // between individual extractions instead of after the whole batch.
+        if cancel() {
+            break;
+        }
         let kind = classify_path(&f.path);
         // Merge all configured extractors, first value wins per field.
         let mut merged = EmbeddedMeta::default();
@@ -190,13 +204,16 @@ pub fn analyze(files: &[FileEntry], repos: &[RepoEntry], opts: &AnalyzeOptions) 
         });
     }
 
-    let groups = dedup_groups(&mut analyzed, opts.large_file_threshold);
+    let groups = dedup_groups(&mut analyzed, opts.large_file_threshold, cancel);
 
     let repo_analyzer = RepoAnalyzer::new(&opts.toolset);
-    let repo_meta: Vec<(RepoEntry, RepoMeta)> = repos
-        .iter()
-        .map(|r| (r.clone(), repo_analyzer.analyze(r)))
-        .collect();
+    let mut repo_meta: Vec<(RepoEntry, RepoMeta)> = Vec::with_capacity(repos.len());
+    for r in repos {
+        if cancel() {
+            break;
+        }
+        repo_meta.push((r.clone(), repo_analyzer.analyze(r)));
+    }
 
     Analysis {
         files: analyzed,
@@ -224,13 +241,17 @@ fn filename_date(f: &FileEntry) -> (Option<DateParts>, &'static str) {
 /// whose fast-path hash collides are promoted to a full-content hash, and
 /// only verified full-content equality forms a group. The fast path never
 /// establishes a duplicate relationship by itself.
-fn dedup_groups(files: &mut [AnalyzedFile], threshold: u64) -> Vec<DupGroup> {
+fn dedup_groups(files: &mut [AnalyzedFile], threshold: u64, cancel: &dyn Fn() -> bool) -> Vec<DupGroup> {
     // Known full hashes, keyed to member indexes.
     let mut full: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
     // Large files awaiting confirmation, keyed to member indexes.
     let mut fast_pending: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
 
     for (i, f) in files.iter_mut().enumerate() {
+        if cancel() {
+            // A cancelled scan discards the partial batch; stop hashing.
+            return Vec::new();
+        }
         if f.size >= threshold && f.size > 0 {
             let size = f.size;
             if let Ok(h) = hash::hash_file_fast(&f.path, size) {
@@ -246,10 +267,10 @@ fn dedup_groups(files: &mut [AnalyzedFile], threshold: u64) -> Vec<DupGroup> {
 
     // Confirm fast-path collisions with full-content hashes.
     for (_, members) in fast_pending {
-        if members.len() < 2 {
-            continue;
-        }
         for i in members {
+            if cancel() {
+                return Vec::new();
+            }
             if let Ok(h) = hash::hash_file_full(&files[i].path) {
                 files[i].full_hash = Some(h);
                 full.entry(h).or_default().push(i);
