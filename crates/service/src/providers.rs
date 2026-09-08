@@ -40,6 +40,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose, Engine as _};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::header::HeaderValue;
@@ -99,9 +100,19 @@ pub enum ProviderInput {
         language: Option<String>,
     },
     /// A description (LLM) request. `text` carries extracted plain text
-    /// when a document extractor produced it; otherwise the provider sees
-    /// the unit path and kind.
-    Describe { text: Option<String> },
+    /// when a document extractor produced it; when `vision` is set and the
+    /// backend accepts image input (the ollama transport), the worker
+    /// loads the raw file bytes into `image` on a provider cache miss.
+    /// Otherwise the provider sees the unit path and kind.
+    Describe {
+        text: Option<String>,
+        /// Whether this unit's kind supports vision (photo) and the backend
+        /// is image-capable. Gates the `image` payload and the cache key.
+        vision: bool,
+        /// Raw file bytes for a vision-capable description request, loaded
+        /// lazily by the worker. `None` degrades to the text-only prompt.
+        image: Option<Vec<u8>>,
+    },
 }
 
 /// Provider facts: cache identity, pacing, and transport.
@@ -263,20 +274,35 @@ pub async fn run_provider_worker(app: AppHandle) {
 /// kind only. Extraction is local and bounded, never a scan failure.
 async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> ProviderJob {
     let mut job = job.clone();
-    if let ProviderInput::Describe { text: None } = &job.input {
-        let cfg = {
-            let sess = app.session.lock().await;
-            sess.config.clone()
-        };
-        let path = job.unit.path.clone();
-        let tools = tools.clone();
-        let text = tokio::task::spawn_blocking(move || {
-            crate::document_text::extract_document_text(&cfg, &path, &tools)
-        })
-        .await
-        .ok()
-        .flatten();
-        job.input = ProviderInput::Describe { text };
+    match &mut job.input {
+        ProviderInput::Describe {
+            text,
+            vision,
+            image,
+        } => {
+            if text.is_none() {
+                let cfg = {
+                    let sess = app.session.lock().await;
+                    sess.config.clone()
+                };
+                let path = job.unit.path.clone();
+                let tools = tools.clone();
+                *text = tokio::task::spawn_blocking(move || {
+                    crate::document_text::extract_document_text(&cfg, &path, &tools)
+                })
+                .await
+                .ok()
+                .flatten();
+            }
+            if *vision && image.is_none() {
+                let path = job.unit.path.clone();
+                *image = tokio::task::spawn_blocking(move || read_image_bytes(&path))
+                    .await
+                    .ok()
+                    .flatten();
+            }
+        }
+        ProviderInput::Geocode { .. } => {}
     }
     job
 }
@@ -364,15 +390,15 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             }
         }
         ProviderKind::Description => {
-            let text = match &job.input {
-                ProviderInput::Describe { text } => text.as_deref(),
+            let (text, image) = match &job.input {
+                ProviderInput::Describe { text, image, .. } => (text.as_deref(), image.as_deref()),
                 ProviderInput::Geocode { .. } => {
                     return Err("mismatched provider input".to_string())
                 }
             };
             match job.settings.backend.as_str() {
                 "custom" => neutral_complete(&job.settings, &job.unit.path, text).await,
-                "ollama" => ollama_complete(&job.settings, &job.unit.path, text).await,
+                "ollama" => ollama_complete(&job.settings, &job.unit.path, text, image).await,
                 "openrouter" => {
                     if job.settings.api_key.is_none() {
                         Err("openrouter description provider requires an API key".to_string())
@@ -556,13 +582,20 @@ async fn mapbox_reverse(
         .ok_or_else(|| "mapbox response has no place name".into())
 }
 
+/// Raw file bytes are sent to the model's `images` field when present.
 async fn ollama_complete(
     s: &ProviderSettings,
     path: &Path,
     text: Option<&str>,
+    image: Option<&[u8]>,
 ) -> Result<String, String> {
     let endpoint = format!("{}/api/chat", s.endpoint.trim_end_matches('/'));
-    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": description_prompt(path, text, s.max_words.unwrap_or(DEFAULT_MAX_WORDS))}], "stream": false, "options": {"num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4}});
+    let prompt = description_prompt(path, text, s.max_words.unwrap_or(DEFAULT_MAX_WORDS));
+    let mut message = json!({ "role": "user", "content": prompt });
+    if let Some(bytes) = image {
+        message["images"] = json!([general_purpose::STANDARD.encode(bytes)]);
+    }
+    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4 } });
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
     v.pointer("/message/content")
         .and_then(Value::as_str)
@@ -679,6 +712,23 @@ async fn neutral_complete(
         .map(str::to_string)
         .filter(|c| !c.trim().is_empty())
         .ok_or_else(|| "description response has no 'content' field".to_string())
+}
+
+/// Raw image payload bound for vision description requests, in bytes.
+/// A photo larger than this degrades to the text-only prompt; once
+/// base64-encoded, the body would be ~1.33x this size anyway.
+
+const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Read a unit's raw bytes for a vision description request, bounded by
+/// `MAX_IMAGE_BYTES`. `None` degrades the job to the text-only prompt;
+/// reading is local and bounded, never a scan or provider failure.
+fn read_image_bytes(path: &Path) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 /// Assemble the prompt for a description request: the file identity and
@@ -975,7 +1025,27 @@ pub async fn plan_provider_jobs(
         }
         if uses_subject {
             if let Some(desc) = description_settings(cfg, &f.kind) {
-                let input_hash = sha256(&[b"describe", f.path.as_os_str().as_encoded_bytes()]);
+                // Photos with an image-capable backend (ollama) get the raw
+                // bytes analyzed; other kinds stay text/filename-only. The vision
+                // bit joins the cache key so a cached text-only guess is never
+                // served for a vision job (and vice versa), and a photo's
+                // content hash binds the entry to the pixels, not just the path.
+                let vision = f.kind == AssetKind::Photo && desc.backend == "ollama";
+                let mut parts: Vec<&[u8]> = vec![
+                    b"describe",
+                    if vision { b"vision" } else { b"text" },
+                    f.path.as_os_str().as_encoded_bytes(),
+                ];
+                let mut hash_owned: Vec<u8> = Vec::new();
+                if vision {
+                    if let Some(h) = f.full_hash {
+                        hash_owned.extend_from_slice(&h);
+                    }
+                }
+                if vision {
+                    parts.push(hash_owned.as_slice());
+                }
+                let input_hash = sha256(&parts);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Description,
                     settings: desc,
@@ -985,7 +1055,11 @@ pub async fn plan_provider_jobs(
                         path: f.path.clone(),
                     },
                     input_hash,
-                    input: ProviderInput::Describe { text: None },
+                    input: ProviderInput::Describe {
+                        text: None,
+                        vision,
+                        image: None,
+                    },
                 });
             }
         }
@@ -1224,7 +1298,11 @@ mod tests {
                 path: PathBuf::new(),
             },
             input_hash: sha256(&[&[3u8], b"desc"]),
-            input: ProviderInput::Describe { text: None },
+            input: ProviderInput::Describe {
+                text: None,
+                vision: false,
+                image: None,
+            },
         };
         let sess = app.session.lock().await;
         job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
@@ -1380,6 +1458,8 @@ mod tests {
             input_hash: [0u8; 32],
             input: ProviderInput::Describe {
                 text: Some("Vendor: ACME, March 2024".to_string()),
+                vision: false,
+                image: None,
             },
         };
         assert_eq!(invoke(&job).await.unwrap(), "travel expenses".to_string());
@@ -1390,11 +1470,100 @@ mod tests {
         let other = ProviderJob {
             input: ProviderInput::Describe {
                 text: Some("Unrelated notes".to_string()),
+                vision: false,
+                image: None,
             },
             ..job
         };
         let err = invoke(&other).await.unwrap_err();
         assert!(err.contains("'content'"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ollama_vision_transport_sends_image_bytes() {
+        // The stub enforces the ollama chat shape for vision: the user
+        // message carries the expected model and an `images` array holding
+        // base64 of the raw bytes. Any deviation answers empty content,
+        // which the transport must treat as a failure.
+        let router = Router::new().route(
+            "/api/chat",
+            post(|Json(body): Json<Value>| async move {
+                let img = body["messages"][0]["images"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str());
+                let decoded =
+                    img.and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok());
+                let ok = body["model"].as_str() == Some("vl-model")
+                    && body["messages"][0].get("content").is_some()
+                    && decoded.as_deref() == Some(&b"fake-image-bytes"[..]);
+                if ok {
+                    Json(json!({ "message": { "content": "sunset beach" } }))
+                } else {
+                    Json(json!({ "message": { "content": "" } }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let path = tmp_dir("vision").join("img.jpg");
+        std::fs::write(&path, b"fake-image-bytes").unwrap();
+        let settings = ProviderSettings {
+            provider_id: format!("describe:ollama:{port}"),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: "ollama".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            api_key: None,
+            language: None,
+            user_agent_contact: None,
+            model: Some("vl-model".to_string()),
+            max_words: Some(8),
+        };
+        let out = ollama_complete(&settings, &path, None, Some(&b"fake-image-bytes"[..]))
+            .await
+            .unwrap();
+        assert_eq!(out, "sunset beach".to_string());
+
+        // Without image bytes the request degrades to the text-only prompt:
+        // no `images` key, and a model that requires vision answers empty,
+        // which is a provider failure.
+        let stub = Router::new().route(
+            "/api/chat",
+            post(|Json(body): Json<Value>| async move {
+                let ok = body["messages"][0].get("images").is_none();
+                if ok {
+                    Json(json!({ "message": { "content": "from filename" } }))
+                } else {
+                    Json(json!({ "message": { "content": "" } }))
+                }
+            }),
+        );
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener2, stub).await;
+        });
+        let settings2 = ProviderSettings {
+            provider_id: format!("describe:ollama:{port2}"),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: "ollama".to_string(),
+            endpoint: format!("http://127.0.0.1:{port2}"),
+            api_key: None,
+            language: None,
+            user_agent_contact: None,
+            model: Some("vl-model".to_string()),
+            max_words: Some(8),
+        };
+        let out2 = ollama_complete(&settings2, &path, None, None)
+            .await
+            .unwrap();
+        assert_eq!(out2, "from filename".to_string());
     }
 
     #[tokio::test]
@@ -1466,7 +1635,11 @@ mod tests {
         let geo = geocode_job(&app, port, epoch).await;
         let mut desc = geo.clone();
         desc.kind = ProviderKind::Description;
-        desc.input = ProviderInput::Describe { text: None };
+        desc.input = ProviderInput::Describe {
+            text: None,
+            vision: false,
+            image: None,
+        };
         desc.input_hash = sha256(&[&[2u8], b"desc"]);
         desc.settings.provider_id = "describe:none".into();
 

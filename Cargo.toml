@@ -37,6 +37,7 @@ axum = "0.8"
 tower = "0.5"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
+base64 = "0.22"
 rustix = { version = "0.38", features = ["fs"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
