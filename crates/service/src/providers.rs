@@ -249,6 +249,15 @@ pub async fn run_provider_worker(app: AppHandle) {
                     let timeout = provider_timeout(&app).await;
                     match tokio::time::timeout(timeout, invoke(&job)).await {
                         Ok(Ok(v)) => {
+                            // Geocode results are the full address; when
+                            // `[geocoder] max_words` is set, condense
+                            // it with the description provider before it is
+                            // cached and rendered into `%l`.
+                            let v = if job.kind == ProviderKind::Geocode {
+                                summarize_location(&app, &job, &v).await
+                            } else {
+                                v
+                            };
                             cache_put(&app, &job, &v).await;
                             Some(v)
                         }
@@ -396,19 +405,31 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
                     return Err("mismatched provider input".to_string())
                 }
             };
-            match job.settings.backend.as_str() {
-                "custom" => neutral_complete(&job.settings, &job.unit.path, text).await,
-                "ollama" => ollama_complete(&job.settings, &job.unit.path, text, image).await,
-                "openrouter" => {
-                    if job.settings.api_key.is_none() {
-                        Err("openrouter description provider requires an API key".to_string())
-                    } else {
-                        openrouter_complete(&job.settings, &job.unit.path, text).await
-                    }
-                }
-                backend => Err(format!("unknown description backend '{backend}'")),
+            let max_words = job.settings.max_words.unwrap_or(DEFAULT_MAX_WORDS);
+            let prompt = description_prompt(&job.unit.path, text, max_words);
+            complete(&job.settings, &prompt, image).await
+        }
+    }
+}
+
+/// Dispatch a completion request to the configured description backend.
+/// Shared by description jobs and geocode-location summarization.
+async fn complete(
+    s: &ProviderSettings,
+    prompt: &str,
+    image: Option<&[u8]>,
+) -> Result<String, String> {
+    match s.backend.as_str() {
+        "custom" => neutral_complete(s, prompt).await,
+        "ollama" => ollama_complete(s, prompt, image).await,
+        "openrouter" => {
+            if s.api_key.is_none() {
+                Err("openrouter description provider requires an API key".to_string())
+            } else {
+                openrouter_complete(s, prompt).await
             }
         }
+        backend => Err(format!("unknown description backend '{backend}'")),
     }
 }
 
@@ -589,12 +610,10 @@ const OLLAMA_KEEP_ALIVE: &str = "30m";
 
 async fn ollama_complete(
     s: &ProviderSettings,
-    path: &Path,
-    text: Option<&str>,
+    prompt: &str,
     image: Option<&[u8]>,
 ) -> Result<String, String> {
     let endpoint = format!("{}/api/chat", s.endpoint.trim_end_matches('/'));
-    let prompt = description_prompt(path, text, s.max_words.unwrap_or(DEFAULT_MAX_WORDS));
     let mut message = json!({ "role": "user", "content": prompt });
     if let Some(bytes) = image {
         message["images"] = json!([general_purpose::STANDARD.encode(bytes)]);
@@ -608,14 +627,10 @@ async fn ollama_complete(
         .ok_or_else(|| "ollama response has no message content".into())
 }
 
-async fn openrouter_complete(
-    s: &ProviderSettings,
-    path: &Path,
-    text: Option<&str>,
-) -> Result<String, String> {
+async fn openrouter_complete(s: &ProviderSettings, prompt: &str) -> Result<String, String> {
     let endpoint = format!("{}/chat/completions", s.endpoint.trim_end_matches('/'));
     let max = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
-    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": description_prompt(path, text, max)}], "max_tokens": max * 4});
+    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": prompt}], "max_tokens": max * 4});
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
     v.pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -696,18 +711,14 @@ async fn neutral_reverse_geocode(
 /// `endpoint` with `{"model", "prompt", "max_words"}`, where the prompt
 /// carries the file identity and the extracted plain text when a document
 /// extractor produced it, and a successful response is `{"content": ...}`.
-async fn neutral_complete(
-    s: &ProviderSettings,
-    path: &Path,
-    text: Option<&str>,
-) -> Result<String, String> {
+async fn neutral_complete(s: &ProviderSettings, prompt: &str) -> Result<String, String> {
     if s.endpoint.is_empty() {
         return Err("custom description provider needs an endpoint".to_string());
     }
     let max_words = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
     let body: Value = json!({
         "model": s.model.clone().unwrap_or_default(),
-        "prompt": description_prompt(path, text, max_words),
+        "prompt": prompt,
         "max_words": max_words,
     });
     let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
@@ -756,6 +767,43 @@ fn description_prompt(path: &Path, text: Option<&str>, max_words: u64) -> String
         }
     }
     prompt
+}
+
+/// Summarize a reverse-geocoded location into at most `max_words`
+/// words using the description provider, when `[geocoder] max_words`
+/// is set and a description provider is enabled for the unit's kind. Any
+/// failure (provider disabled, unknown backend, timeout) returns the full
+/// location unchanged, so location resolution never depends on the LLM.
+/// The summary is cached under the geocode job's key.
+async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> String {
+    let max_words = job.settings.max_words.unwrap_or(0);
+    if max_words == 0 {
+        return location.to_string();
+    }
+    let cfg = {
+        let sess = app.session.lock().await;
+        sess.config.clone()
+    };
+    let kind = {
+        let sess = app.session.lock().await;
+        sess.provider_ctx
+            .as_ref()
+            .and_then(|ctx| ctx.analysis.files.get(job.unit.index))
+            .map(|f| f.kind)
+    };
+    let Some(kind) = kind else {
+        return location.to_string();
+    };
+    let Some(desc) = description_settings(&cfg, &kind) else {
+        return location.to_string();
+    };
+    let prompt = format!(
+        "Summarize this location into at most {max_words} words, for use as an archive folder name. Reply with only the phrase.\n\nLocation: {location}"
+    );
+    match complete(&desc, &prompt, None).await {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => location.to_string(),
+    }
 }
 
 /// Resolve one provider job for a unit: record a successful value (when
@@ -912,6 +960,9 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         endpoint.as_bytes(),
         language.as_deref().unwrap_or("").as_bytes(),
         cfg.geocoder.api_key.as_deref().unwrap_or("").as_bytes(),
+        // The word budget governs the summary, so a different cap must not
+        // reuse cached locations from another budget.
+        cfg.geocoder.max_words.unwrap_or(0).to_le_bytes().as_slice(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -923,7 +974,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         language,
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
-        max_words: None,
+        max_words: cfg.geocoder.max_words,
     })
 }
 
@@ -1004,12 +1055,28 @@ pub async fn plan_provider_jobs(
             .any(|s| matches!(s, Segment::Placeholder(Placeholder::Subject)));
         if uses_location {
             if let (Some(g), Some(lat), Some(lon)) = (&geo, f.latitude, f.longitude) {
-                let input_hash = sha256(&[
-                    b"geocode",
-                    lat.to_le_bytes().as_slice(),
-                    lon.to_le_bytes().as_slice(),
-                    g.language.as_deref().unwrap_or("").as_bytes(),
-                ]);
+                let lat_bytes = lat.to_le_bytes();
+                let lon_bytes = lon.to_le_bytes();
+                let lang = g.language.as_deref().unwrap_or("");
+                // The cached value may be the LLM summary, so the
+                // description provider's identity joins the key: a model or
+                // word-budget change re-summarizes. Hoisted so the borrow
+                // outlives the `sha256` call below.
+                let desc_hash: Option<[u8; 32]> = if g.max_words.unwrap_or(0) > 0 {
+                    description_settings(cfg, &f.kind).map(|d| d.settings_hash)
+                } else {
+                    None
+                };
+                let mut input: Vec<u8> = Vec::new();
+                input.extend_from_slice(b"geocode");
+                input.extend_from_slice(&lat_bytes);
+                input.extend_from_slice(&lon_bytes);
+                input.extend_from_slice(lang.as_bytes());
+                if let Some(h) = desc_hash {
+                    input.extend_from_slice(b"summarize");
+                    input.extend_from_slice(&h);
+                }
+                let input_hash = sha256(&[input.as_slice()]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Geocode,
                     settings: g.clone(),
@@ -1561,7 +1628,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
         };
-        let out = ollama_complete(&settings, &path, None, Some(&b"fake-image-bytes"[..]))
+        let out = ollama_complete(&settings, "describe this", Some(&b"fake-image-bytes"[..]))
             .await
             .unwrap();
         assert_eq!(out, "sunset beach".to_string());
@@ -1597,7 +1664,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
         };
-        let out2 = ollama_complete(&settings2, &path, None, None)
+        let out2 = ollama_complete(&settings2, "describe this", None)
             .await
             .unwrap();
         assert_eq!(out2, "from filename".to_string());

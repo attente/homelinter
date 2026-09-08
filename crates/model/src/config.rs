@@ -137,6 +137,13 @@ pub struct GeocoderConfig {
     pub language: Option<String>,
     #[serde(default)]
     pub user_agent_contact: Option<String>,
+    /// When set (> 0), the full reverse-geocoded address is summarized
+    /// into at most this many words by the description provider (LLM)
+    /// before it is used as the `%l` value. `0`/absent keeps the full
+    /// address. The summary is cached like any provider value and degrades
+    /// to the full address when no description provider is enabled.
+    #[serde(default)]
+    pub max_words: Option<u64>,
     /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. An additional floor on top of
     /// the service's built-in pacing (see "Provider Plugins" in DESIGN.md):
@@ -1052,6 +1059,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
             "language": raw.geocoder.language,
             "user_agent_contact": raw.geocoder.user_agent_contact,
+            "max_words": raw.geocoder.max_words,
             "rate_limit_ms": raw.geocoder.rate_limit_ms,
         }),
     );
