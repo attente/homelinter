@@ -201,7 +201,7 @@ fn validation_marks_identity_degraded() {
         home: &home,
     })
     .unwrap();
-    let rejected = validate_batch(&mut out.suggestions);
+    let rejected = validate_batch(&mut out.suggestions, false);
     assert_eq!(rejected.len(), out.suggestions.len());
     let _ = std::fs::remove_dir_all(&base);
 }

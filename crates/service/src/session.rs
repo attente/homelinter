@@ -141,13 +141,15 @@ impl Session {
 
     /// Re-validate the given ids (typically the selection) and return the
     /// rejected entries with reasons. Validation is monotonic: a suggestion
-    /// marked rejected stays rejected.
+    /// marked rejected stays rejected. Still-pending suggestions are
+    /// deferred (their destinations are provisional); they are re-validated
+    /// when their provider requests resolve.
     pub fn validate_ids(&mut self, ids: &[String]) -> Vec<(String, String)> {
         let mut subset: Vec<Suggestion> = ids
             .iter()
             .filter_map(|id| self.suggestion_by_id(id).cloned())
             .collect();
-        validate_batch(&mut subset);
+        validate_batch(&mut subset, true);
         let rejected: Vec<(String, String)> = subset
             .iter()
             .filter(|s| s.status == SuggestionStatus::Rejected)

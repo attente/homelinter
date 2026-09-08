@@ -106,6 +106,18 @@ describe('format', () => {
     expect(resolved).not.toContain('[metadata pending]');
   });
 
+  it('row label shows the rejection reason when present', () => {
+    const s = sampleSuggestion({
+      status: 'rejected',
+      rejection_reason: 'destination_collision:also=abc123',
+    });
+    const label = rowLabel(s);
+    expect(label).toContain('(rejected)');
+    expect(label).toContain('[rejected: destination_collision:also=abc123]');
+    const plain = rowLabel(sampleSuggestion({ status: 'rejected' }));
+    expect(plain).not.toContain('[rejected:');
+  });
+
 
   it('counts and entry lines render reports', () => {
     const entries: ReportEntry[] = [

@@ -200,7 +200,6 @@ pub async fn start_scan(
         // frozen phase line left by the last phase-boundary event.
         let progress = {
             let app = app.clone();
-            let start = start;
             let last = std::cell::Cell::new(start);
             move |phase: &'static str, scanned: u64| {
                 let now = Instant::now();
@@ -257,12 +256,46 @@ pub async fn start_scan(
         Err(e) => return fail(app.clone(), format!("suggestion task panicked: {e}")).await,
     };
 
-    // Full-batch validation before the batch is presented.
+    let total_files = analysis.files.len() as u64;
+    let total_symlinks = scan.symlinks.entries.len() as u64;
+
+    // Plan provider work before batch validation: suggestions whose unit
+    // has outstanding provider requests are marked `metadata_pending` first
+    // so validation defers them. Their destinations are built on fallback
+    // metadata and a collision may disappear once the provider result
+    // arrives; they are re-validated against real metadata when their last
+    // request resolves (providers.rs). Everyone sees the full scan result,
+    // yet pending moves are never executable.
+    let provider_jobs =
+        crate::providers::plan_provider_jobs(&cfg, &analysis, &formats, provider_epoch).await;
+    // Warm a vision-capable model out-of-band (no timeout) so the worker's
+    // first image request does not eat its provider timeout on model load.
+    crate::providers::warmup_vision_models(&provider_jobs);
+    let mut pending: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
+    for job in &provider_jobs {
+        *pending.entry(job.unit.index).or_default() += 1;
+    }
+    let unit_of: std::collections::BTreeMap<String, usize> = analysis
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (Suggestion::id_for_target(&f.path), i))
+        .collect();
+    for s in suggestions.iter_mut() {
+        if unit_of.get(&s.id).is_some_and(|i| pending.contains_key(i)) {
+            s.metadata_pending = true;
+        }
+    }
+
+    // Full-batch validation before the batch is presented. Pending
+    // suggestions are excluded (their destinations are provisional); every
+    // rejection of the rest carries the machine-readable reason, which is
+    // copied onto the suggestion so clients can show why it was rejected.
     let rejected: Vec<RejectedId> = {
-        let mut pending = suggestions.clone();
-        let ids = homelinter_suggest::validate_batch(&mut pending);
+        let mut pending_snapshot = suggestions.clone();
+        let ids = homelinter_suggest::validate_batch(&mut pending_snapshot, true);
         ids.into_iter()
-            .filter_map(|id| pending.iter().find(|s| s.id == id))
+            .filter_map(|id| pending_snapshot.iter().find(|s| s.id == id))
             .filter_map(|s| {
                 s.rejection_reason.as_ref().map(|reason| RejectedId {
                     id: s.id.clone(),
@@ -272,8 +305,9 @@ pub async fn start_scan(
             .collect()
     };
     for s in suggestions.iter_mut() {
-        if rejected.iter().any(|r| r.id == s.id) {
+        if let Some(r) = rejected.iter().find(|r| r.id == s.id) {
             s.status = SuggestionStatus::Rejected;
+            s.rejection_reason = Some(r.reason.clone());
         }
     }
     if is_cancelled(&app, cancel_token) {
@@ -284,23 +318,6 @@ pub async fn start_scan(
         suggestions.len() as u64,
         start,
     ));
-
-    let total_files = analysis.files.len() as u64;
-    let total_symlinks = scan.symlinks.entries.len() as u64;
-
-    // Plan provider work before publishing: suggestions whose unit has
-    // outstanding provider requests are published immediately but marked
-    // `metadata_pending`, so the user sees the full scan result yet can
-    // never execute a move built on incomplete metadata.
-    let provider_jobs =
-        crate::providers::plan_provider_jobs(&cfg, &analysis, &formats, provider_epoch).await;
-    // Warm a vision-capable model out-of-band (no timeout) so the worker's
-    // first image request does not eat its provider timeout on model load.
-    crate::providers::warmup_vision_models(&provider_jobs);
-    let mut pending: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
-    for job in &provider_jobs {
-        *pending.entry(job.unit.index).or_default() += 1;
-    }
 
     {
         let mut sess = app.session.lock().await;
@@ -324,21 +341,6 @@ pub async fn start_scan(
             meta: Default::default(),
             pending: pending.clone(),
         });
-        if !pending.is_empty() {
-            // Mark suggestions whose unit still has outstanding provider
-            // jobs as metadata-pending (non-executable until resolved).
-            let unit_of: std::collections::BTreeMap<String, usize> = analysis
-                .files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (Suggestion::id_for_target(&f.path), i))
-                .collect();
-            for s in suggestions.iter_mut() {
-                if unit_of.get(&s.id).is_some_and(|i| pending.contains_key(i)) {
-                    s.metadata_pending = true;
-                }
-            }
-        }
         sess.suggestions = suggestions;
         let mut summary = sess.summary_of_batch();
         summary.total_files_scanned = total_files;

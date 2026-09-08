@@ -36,8 +36,16 @@ export function rowLabel(s: Suggestion): string {
   }
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
   const pending = s.metadata_pending ? ' [metadata pending]' : '';
-  const rejected = s.rejection_reason ? ' [rejected]' : '';
+  const rejected = s.rejection_reason
+    ? ` [rejected: ${head(s.rejection_reason, 48)}]`
+    : '';
   return `${marker} ${action}${status}${pending}${rejected}`;
+}
+
+/** Keep the head of a string, truncating the tail when too long. */
+export function head(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 3)}...`;
 }
 
 export interface ReportCounts {

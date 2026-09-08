@@ -57,13 +57,13 @@ use homelinter_model::config::{
     GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
-use homelinter_model::suggestion::Suggestion;
+use homelinter_model::suggestion::{Suggestion, SuggestionStatus};
 use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
 use homelinter_suggest::rebuild_move_suggestion;
 
 use crate::cache::{cache_key, KIND_DESCRIPTION, KIND_GEOCODE};
-use crate::events::ServerEvent;
+use crate::events::{RejectedId, ServerEvent};
 use crate::pipeline::{App, AppHandle};
 
 /// What kind of provider a job fetches.
@@ -911,6 +911,9 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
         return false;
     };
+    // Newly rejected ids from re-validation after a rebuild, published as a
+    // `batch.validated` event so clients can surface them.
+    let mut newly_rejected: Vec<(String, String)> = Vec::new();
     match rebuilt {
         // Rebuild error: keep the published fallback, just clear the
         // pending flag.
@@ -928,6 +931,27 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             s.rejection_reason = prior.rejection_reason.clone();
             s.metadata_pending = false;
             sess.suggestions[pos] = s;
+            // The unit's metadata is now real: re-validate the batch so a
+            // destination that only collides once the provider value is
+            // applied is rejected with a reason, and a pending suggestion
+            // that would have lost a provisional collision stays pending.
+            // Still-pending suggestions stay deferred and validation is
+            // monotonic (it never un-rejects), so this is safe to run on
+            // the whole batch on every resolution.
+            let was_rejected: std::collections::HashSet<String> = sess
+                .suggestions
+                .iter()
+                .filter(|s| s.status == SuggestionStatus::Rejected)
+                .map(|s| s.id.clone())
+                .collect();
+            newly_rejected = homelinter_suggest::validate_batch(&mut sess.suggestions, true)
+                .into_iter()
+                .filter(|id| !was_rejected.contains(id))
+                .filter_map(|id| {
+                    sess.suggestion_by_id(&id)
+                        .and_then(|s| s.rejection_reason.clone().map(|r| (id, r)))
+                })
+                .collect();
         }
     }
     let mut summary = sess.summary_of_batch();
@@ -941,6 +965,16 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     drop(sess);
     app.events
         .publish(ServerEvent::SuggestionBatch { items, total });
+    if !newly_rejected.is_empty() {
+        let rejected: Vec<RejectedId> = newly_rejected
+            .into_iter()
+            .map(|(id, reason)| RejectedId { id, reason })
+            .collect();
+        app.events.publish(ServerEvent::BatchValidated {
+            valid: false,
+            rejected,
+        });
+    }
     true
 }
 
@@ -1302,6 +1336,13 @@ mod tests {
         let photo = home.join("IMG_0001.jpg");
         std::fs::write(&photo, b"photo bytes").unwrap();
 
+        // A real unix scan records dev/ino identity; mirror that so the
+        // post-resolution re-validation does not reject the suggestion for
+        // `identity_unavailable`.
+        let provenance = Provenance {
+            identity_available: true,
+            ..Default::default()
+        };
         let file = AnalyzedFile {
             path: photo.clone(),
             kind: AssetKind::Photo,
@@ -1309,7 +1350,7 @@ mod tests {
             modified: SystemTime::now(),
             created: None,
             full_hash: None,
-            provenance: Provenance::default(),
+            provenance,
             extracted_date: None,
             date_source: "",
             embedded_title: None,
