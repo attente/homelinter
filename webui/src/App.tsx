@@ -1,17 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, resolveApiError } from './api';
-import { Browse } from './components/Browse';
-import { ConfigView } from './components/ConfigView';
-import { Header } from './components/Header';
-import { RunView } from './components/RunView';
-import { ScanForm, ScanFormValues } from './components/ScanForm';
-import { Toasts } from './components/Toasts';
-import { EventSourceClient } from './events';
-import { downloadText } from './lib/download';
-import { elapsedLabel, opLine, stateLabel } from './lib/format';
-import type { ExecutionReport, ScanProgress, Session, SseEvent, Suggestion } from './types';
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, resolveApiError } from "./api";
+import { Browse } from "./components/Browse";
+import { ConfigView } from "./components/ConfigView";
+import { Header } from "./components/Header";
+import { RunView } from "./components/RunView";
+import { ScanForm, ScanFormValues } from "./components/ScanForm";
+import { Toasts } from "./components/Toasts";
+import { EventSourceClient } from "./events";
+import { downloadText } from "./lib/download";
+import { elapsedLabel, opLine, stateLabel } from "./lib/format";
+import type {
+  ExecutionReport,
+  ScanProgress,
+  Session,
+  SseEvent,
+  Suggestion,
+} from "./types";
 
-type Phase = 'idle' | 'scanning' | 'browse' | 'running' | 'report';
+type Phase = "idle" | "scanning" | "browse" | "running" | "report";
 
 interface AppState {
   phase: Phase;
@@ -25,14 +31,14 @@ interface AppState {
   toasts: string[];
   configOpen: boolean;
   showScanForm: boolean;
-  pendingAction: 'run' | 'export' | null;
+  pendingAction: "run" | "export" | null;
 }
 
 const POLL_MS = 2000;
 
 export default function App() {
   const [st, setSt] = useState<AppState>({
-    phase: 'idle',
+    phase: "idle",
     session: null,
     suggestions: [],
     progress: null,
@@ -56,12 +62,18 @@ export default function App() {
   const pushToast = useCallback((msg: string) => {
     setSt((prev) => ({ ...prev, toasts: [...prev.toasts, `${msg}`] }));
     setTimeout(() => {
-      setSt((prev) => ({ ...prev, toasts: prev.toasts.filter((t) => t !== msg) }));
+      setSt((prev) => ({
+        ...prev,
+        toasts: prev.toasts.filter((t) => t !== msg),
+      }));
     }, 4500);
   }, []);
 
   const dismissToast = useCallback((i: number) => {
-    setSt((prev) => ({ ...prev, toasts: prev.toasts.filter((_, j) => j !== i) }));
+    setSt((prev) => ({
+      ...prev,
+      toasts: prev.toasts.filter((_, j) => j !== i),
+    }));
   }, []);
 
   const refreshSuggestions = useCallback(async (): Promise<Suggestion[]> => {
@@ -73,24 +85,28 @@ export default function App() {
   const enterBrowse = useCallback(async () => {
     try {
       await refreshSuggestions();
-      setSt((prev) => ({ ...prev, phase: 'browse', showScanForm: false }));
+      setSt((prev) => ({ ...prev, phase: "browse", showScanForm: false }));
     } catch (e: unknown) {
       pushToast(`cannot load suggestions: ${resolveApiError(e)}`);
-      setSt((prev) => ({ ...prev, phase: 'idle' }));
+      setSt((prev) => ({ ...prev, phase: "idle" }));
     }
   }, [pushToast, refreshSuggestions]);
 
   const startScan = useCallback(
     async (values: ScanFormValues) => {
       const curState = stRef.current.session?.state;
-      if (curState === 'scanning' || curState === 'analyzing' || curState === 'executing') {
-        pushToast('a scan or execution is already in progress');
+      if (
+        curState === "scanning" ||
+        curState === "analyzing" ||
+        curState === "executing"
+      ) {
+        pushToast("a scan or execution is already in progress");
         return;
       }
       setSt((prev) => ({
         ...prev,
         busy: true,
-        phase: 'scanning',
+        phase: "scanning",
         showScanForm: false,
         suggestions: [],
         progress: null,
@@ -107,15 +123,17 @@ export default function App() {
         await api.startScan({
           root: values.root.length > 0 ? values.root : undefined,
           hidden: values.hidden,
-          target_paths: Object.keys(targetPaths).length > 0 ? targetPaths : undefined,
-          config:
-            values.config && Object.keys(values.config).length > 0
-              ? values.config
-              : undefined,
+          target_paths:
+            Object.keys(targetPaths).length > 0 ? targetPaths : undefined,
         });
       } catch (e: unknown) {
         pushToast(`scan failed to start: ${resolveApiError(e)}`);
-        setSt((prev) => ({ ...prev, busy: false, phase: 'idle', showScanForm: true }));
+        setSt((prev) => ({
+          ...prev,
+          busy: false,
+          phase: "idle",
+          showScanForm: true,
+        }));
       }
     },
     [pushToast],
@@ -124,7 +142,7 @@ export default function App() {
   const fetchExecution = useCallback(async () => {
     try {
       const report = await api.execution();
-      setSt((prev) => ({ ...prev, report, phase: 'report' }));
+      setSt((prev) => ({ ...prev, report, phase: "report" }));
     } catch (e: unknown) {
       pushToast(`cannot load execution report: ${resolveApiError(e)}`);
     }
@@ -133,55 +151,71 @@ export default function App() {
     async (ev: SseEvent) => {
       const d = ev.data as Record<string, unknown>;
       switch (ev.name) {
-        case 'session.state': {
-          const state = String(d.state ?? '');
+        case "session.state": {
+          const state = String(d.state ?? "");
           const cur = stRef.current;
-          if (state === 'ready' || state === 'done') {
-            if (cur.phase === 'scanning' || cur.phase === 'idle') {
+          if (state === "ready" || state === "done") {
+            if (cur.phase === "scanning" || cur.phase === "idle") {
               await enterBrowse();
             }
-            if (state === 'done' && cur.phase === 'running' && !cur.report) {
+            if (state === "done" && cur.phase === "running" && !cur.report) {
               await fetchExecution();
             }
           }
           break;
         }
-        case 'scan.progress':
+        case "scan.progress":
           setSt((prev) => ({
             ...prev,
             progress: d as unknown as ScanProgress,
-            phase: prev.phase === 'idle' ? 'scanning' : prev.phase,
+            phase: prev.phase === "idle" ? "scanning" : prev.phase,
           }));
           break;
-        case 'scan.complete':
+        case "scan.complete":
           setSt((prev) => ({ ...prev, progress: null }));
           await enterBrowse();
           break;
-        case 'suggestion.batch':
-          setSt((prev) => ({ ...prev, suggestions: (d.items as Suggestion[]) ?? [] }));
+        case "suggestion.batch":
+          setSt((prev) => ({
+            ...prev,
+            suggestions: (d.items as Suggestion[]) ?? [],
+          }));
           break;
-        case 'batch.validated': {
-          const v = d as { valid: boolean; rejected: { id: string; reason: string }[] };
+        case "batch.validated": {
+          const v = d as {
+            valid: boolean;
+            rejected: { id: string; reason: string }[];
+          };
           if (!v.valid) {
-            pushToast(`re-validation rejected ${v.rejected.length} suggestion(s)`);
+            pushToast(
+              `re-validation rejected ${v.rejected.length} suggestion(s)`,
+            );
           }
           break;
         }
-        case 'execution.op':
+        case "execution.op":
           setSt((prev) => ({
             ...prev,
             runLog: [
               ...prev.runLog,
-              opLine(d as { suggestion_id: string; operation: string; status: string; detail?: unknown }),
+              opLine(
+                d as {
+                  suggestion_id: string;
+                  operation: string;
+                  status: string;
+                  detail?: unknown;
+                },
+              ),
             ],
           }));
           break;
-        case 'execution.complete':
+        case "execution.complete":
           await fetchExecution();
           break;
-        case 'config.updated': {
-          pushToast('config updated by another client; applies to the next scan');
-          // Refresh the session so the stale-batch banner appears promptly.
+        case "config.updated": {
+          // No toast: the scan setup page persists settings as they change,
+          // so this event fires on every saved edit. The configuration view
+          // mirrors via the config hash; batch staleness shows the banner.
           try {
             const session = await api.session();
             setSt((prev) => ({ ...prev, session }));
@@ -190,8 +224,8 @@ export default function App() {
           }
           break;
         }
-        case 'cache.cleared':
-          pushToast('cache cleared by another client');
+        case "cache.cleared":
+          pushToast("cache cleared by another client");
           break;
         default:
           break;
@@ -199,7 +233,6 @@ export default function App() {
     },
     [enterBrowse, fetchExecution, pushToast],
   );
-
 
   const poll = useCallback(async () => {
     let session: Session;
@@ -211,16 +244,25 @@ export default function App() {
     const cur = stRef.current;
     setSt((prev) => ({ ...prev, session }));
     const state = session.state;
-    if (state === 'scanning' && cur.phase !== 'scanning') {
-      setSt((prev) => ({ ...prev, phase: 'scanning', showScanForm: false }));
-    } else if ((state === 'ready' || state === 'done') && (cur.phase === 'scanning' || cur.phase === 'idle')) {
+    if (state === "scanning" && cur.phase !== "scanning") {
+      setSt((prev) => ({ ...prev, phase: "scanning", showScanForm: false }));
+    } else if (
+      (state === "ready" || state === "done") &&
+      (cur.phase === "scanning" || cur.phase === "idle")
+    ) {
       await enterBrowse();
-    } else if (state === 'done' && cur.phase === 'running' && !cur.report) {
+    } else if (state === "done" && cur.phase === "running" && !cur.report) {
       await fetchExecution();
-    } else if (state === 'failed' && cur.phase !== 'idle') {
-      const msg = (session as { failure?: { message?: string } }).failure?.message;
-      pushToast(`scan failed: ${msg ?? 'unknown reason'}`);
-      setSt((prev) => ({ ...prev, phase: 'idle', showScanForm: true, progress: null }));
+    } else if (state === "failed" && cur.phase !== "idle") {
+      const msg = (session as { failure?: { message?: string } }).failure
+        ?.message;
+      pushToast(`scan failed: ${msg ?? "unknown reason"}`);
+      setSt((prev) => ({
+        ...prev,
+        phase: "idle",
+        showScanForm: true,
+        progress: null,
+      }));
     }
   }, [enterBrowse, fetchExecution, pushToast]);
 
@@ -231,13 +273,13 @@ export default function App() {
         const session = await api.session();
         if (cancelled) return;
         setSt((prev) => ({ ...prev, session }));
-        if (session.state === 'ready' || session.state === 'done') {
+        if (session.state === "ready" || session.state === "done") {
           const list = await api.suggestions();
           if (cancelled) return;
           setSt((prev) => ({
             ...prev,
             suggestions: list.items,
-            phase: 'browse',
+            phase: "browse",
             showScanForm: false,
           }));
         }
@@ -265,7 +307,9 @@ export default function App() {
     async (id: string, select: boolean) => {
       setSt((prev) => ({
         ...prev,
-        suggestions: prev.suggestions.map((s) => (s.id === id ? { ...s, selected: select } : s)),
+        suggestions: prev.suggestions.map((s) =>
+          s.id === id ? { ...s, selected: select } : s,
+        ),
       }));
       try {
         if (select) {
@@ -285,7 +329,10 @@ export default function App() {
     async (ids: string[]) => {
       setSt((prev) => ({
         ...prev,
-        suggestions: prev.suggestions.map((s) => ({ ...s, selected: ids.includes(s.id) })),
+        suggestions: prev.suggestions.map((s) => ({
+          ...s,
+          selected: ids.includes(s.id),
+        })),
       }));
       try {
         await api.selectionPut(ids);
@@ -304,12 +351,12 @@ export default function App() {
   const startRun = useCallback(
     async (ids: string[]) => {
       if (ids.length === 0) {
-        pushToast('no suggestions selected');
+        pushToast("no suggestions selected");
         return;
       }
       setSt((prev) => ({
         ...prev,
-        phase: 'running',
+        phase: "running",
         report: null,
         runLog: [],
         runError: null,
@@ -321,7 +368,7 @@ export default function App() {
         pushToast(`running ${ids.length} suggestion(s)`);
       } catch (e: unknown) {
         pushToast(`cannot start run: ${resolveApiError(e)}`);
-        setSt((prev) => ({ ...prev, busy: false, phase: 'browse' }));
+        setSt((prev) => ({ ...prev, busy: false, phase: "browse" }));
       }
     },
     [pushToast],
@@ -331,61 +378,67 @@ export default function App() {
   // live config hash moved past it, the destinations are stale. Ask before
   // executing or exporting, and surface a banner while browsing.
   const batchIsStale = useCallback((sess: Session | null, count: number) => {
-    return !!sess
-      && !!sess.batch_config_hash
-      && !!sess.config_hash
-      && sess.batch_config_hash !== sess.config_hash
-      && count > 0;
+    return (
+      !!sess &&
+      !!sess.batch_config_hash &&
+      !!sess.config_hash &&
+      sess.batch_config_hash !== sess.config_hash &&
+      count > 0
+    );
   }, []);
   const configDirty = batchIsStale(st.session, st.suggestions.length);
 
-  const run = useCallback(
-    async () => {
-      const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
-      if (ids.length === 0) {
-        pushToast('no suggestions selected');
-        return;
-      }
-      if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
-        setSt((prev) => ({ ...prev, pendingAction: 'run' }));
-        return;
-      }
-      await startRun(ids);
-    },
-    [batchIsStale, pushToast, startRun],
-  );
+  const run = useCallback(async () => {
+    const ids = stRef.current.suggestions
+      .filter((s) => s.selected)
+      .map((s) => s.id);
+    if (ids.length === 0) {
+      pushToast("no suggestions selected");
+      return;
+    }
+    if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
+      setSt((prev) => ({ ...prev, pendingAction: "run" }));
+      return;
+    }
+    await startRun(ids);
+  }, [batchIsStale, pushToast, startRun]);
 
   const cancel = useCallback(async () => {
     try {
       await api.cancel();
-      pushToast('cancelled in-flight work');
+      pushToast("cancelled in-flight work");
     } catch (e: unknown) {
       pushToast(`cancel failed: ${resolveApiError(e)}`);
     }
   }, [pushToast]);
 
-  const doExport = useCallback(async (ids: string[]) => {
-    if (ids.length === 0) {
-      pushToast('no suggestions selected');
-      return;
-    }
-    try {
-      const res = await api.exportScript(ids);
-      downloadText('homelinter-plan.sh', res.text);
-      pushToast(`exported ${res.count} operation(s) as a shell plan`);
-    } catch (e: unknown) {
-      pushToast(`export failed: ${resolveApiError(e)}`);
-    }
-  }, [pushToast]);
+  const doExport = useCallback(
+    async (ids: string[]) => {
+      if (ids.length === 0) {
+        pushToast("no suggestions selected");
+        return;
+      }
+      try {
+        const res = await api.exportScript(ids);
+        downloadText("homelinter-plan.sh", res.text);
+        pushToast(`exported ${res.count} operation(s) as a shell plan`);
+      } catch (e: unknown) {
+        pushToast(`export failed: ${resolveApiError(e)}`);
+      }
+    },
+    [pushToast],
+  );
 
   const exportPlan = useCallback(async () => {
-    const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
+    const ids = stRef.current.suggestions
+      .filter((s) => s.selected)
+      .map((s) => s.id);
     if (ids.length === 0) {
-      pushToast('no suggestions selected');
+      pushToast("no suggestions selected");
       return;
     }
     if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
-      setSt((prev) => ({ ...prev, pendingAction: 'export' }));
+      setSt((prev) => ({ ...prev, pendingAction: "export" }));
       return;
     }
     await doExport(ids);
@@ -396,7 +449,12 @@ export default function App() {
   }, []);
 
   const reScanFromModal = useCallback(() => {
-    patch({ pendingAction: null, showScanForm: true, phase: 'idle', configOpen: false });
+    patch({
+      pendingAction: null,
+      showScanForm: true,
+      phase: "idle",
+      configOpen: false,
+    });
   }, [patch]);
 
   // Execute/export anyway, accepting the stale destinations.
@@ -404,8 +462,10 @@ export default function App() {
     const action = stRef.current.pendingAction;
     if (!action) return;
     setSt((prev) => ({ ...prev, pendingAction: null }));
-    const ids = stRef.current.suggestions.filter((s) => s.selected).map((s) => s.id);
-    if (action === 'run') {
+    const ids = stRef.current.suggestions
+      .filter((s) => s.selected)
+      .map((s) => s.id);
+    if (action === "run") {
       await startRun(ids);
     } else {
       await doExport(ids);
@@ -415,22 +475,23 @@ export default function App() {
   const doneFromReport = useCallback(async () => {
     try {
       await refreshSuggestions();
-      setSt((prev) => ({ ...prev, phase: 'browse', report: null, runLog: [] }));
+      setSt((prev) => ({ ...prev, phase: "browse", report: null, runLog: [] }));
     } catch (e: unknown) {
       pushToast(`cannot refresh: ${resolveApiError(e)}`);
     }
   }, [pushToast, refreshSuggestions]);
 
   const selectedCount = st.suggestions.filter((s) => s.selected).length;
-  const state = st.session?.state ?? 'unknown';
+  const state = st.session?.state ?? "unknown";
   // Mirror the backend's state guards so controls are disabled when the
   // service would reject the request (see "Session Model" in DESIGN.md):
   // a new scan is only accepted outside scanning/analyzing/executing, and
   // execute/export only from a ready or done session. Cancel is only
   // meaningful while something is in progress.
-  const inProgress = (s: string) => s === 'scanning' || s === 'analyzing' || s === 'executing';
+  const inProgress = (s: string) =>
+    s === "scanning" || s === "analyzing" || s === "executing";
   const canScan = !inProgress(state);
-  const canAct = state === 'ready' || state === 'done';
+  const canAct = state === "ready" || state === "done";
   const canCancel = inProgress(state);
   const counts = {
     suggestions: st.suggestions.length,
@@ -440,40 +501,52 @@ export default function App() {
 
   let body;
   if (st.configOpen) {
-    body = <ConfigView onClose={() => patch({ configOpen: false })} pushToast={pushToast} />;
+    body = (
+      <ConfigView
+        configHash={st.session?.config_hash ?? null}
+        onClose={() => patch({ configOpen: false })}
+        pushToast={pushToast}
+      />
+    );
   } else if (st.showScanForm) {
     const defaults = st.session?.scan_defaults;
     body = (
       <ScanForm
-        key={st.session ? 'session-loaded' : 'booting'}
-        defaultRoot={st.session?.scan_root ?? ''}
+        key={st.session ? "session-loaded" : "booting"}
+        defaultRoot={st.session?.scan_root ?? ""}
         defaultHidden={defaults?.hidden ?? false}
         defaultTargetPaths={defaults?.target_paths}
+        configHash={st.session?.config_hash ?? null}
         hasSuggestions={st.suggestions.length > 0}
         startDisabled={!canScan}
         onStart={startScan}
-        onResume={() => patch({ showScanForm: false, phase: 'browse' })}
+        onResume={() => patch({ showScanForm: false, phase: "browse" })}
       />
     );
-  } else if (st.phase === 'scanning') {
+  } else if (st.phase === "scanning") {
     body = (
       <main className="run-view">
         <div className="run-status">
           <span className="state-busy">{stateLabel(state)} ...</span>
           {st.progress && (
             <span className="progress-line">
-              {st.progress.phase}, scanned={st.progress.scanned}, elapsed={elapsedLabel(st.progress.elapsed_ms)}
+              {st.progress.phase}, scanned={st.progress.scanned}, elapsed=
+              {elapsedLabel(st.progress.elapsed_ms)}
             </span>
           )}
           <div className="toolbar">
-            <button type="button" onClick={() => void cancel()} disabled={!canCancel}>
+            <button
+              type="button"
+              onClick={() => void cancel()}
+              disabled={!canCancel}
+            >
               cancel
             </button>
           </div>
         </div>
       </main>
     );
-  } else if (st.phase === 'running' || st.phase === 'report') {
+  } else if (st.phase === "running" || st.phase === "report") {
     body = (
       <RunView
         state={state}
@@ -491,8 +564,9 @@ export default function App() {
       <>
         {configDirty && (
           <p className="banner warn" role="status">
-            Configuration changed after this scan: the current suggestions still use the settings
-            from the scan. Start a new scan to apply the changes.
+            Configuration changed after this scan: the current suggestions still
+            use the settings from the scan. Start a new scan to apply the
+            changes.
           </p>
         )}
         <Browse
@@ -516,7 +590,9 @@ export default function App() {
         counts={counts}
         busy={st.busy}
         scanDisabled={!canScan}
-        onNewScan={() => patch({ showScanForm: true, phase: 'idle', configOpen: false })}
+        onNewScan={() =>
+          patch({ showScanForm: true, phase: "idle", configOpen: false })
+        }
         onConfig={() => patch({ configOpen: true })}
       />
       {body}
@@ -526,20 +602,31 @@ export default function App() {
           role="presentation"
           onClick={dismissPending}
         >
-          <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
             <h2>Configuration changed since this scan</h2>
             <p>
-              Destinations and provider settings still reflect the configuration from the scan;
-              the saved changes apply to the next scan.
+              Destinations and provider settings still reflect the configuration
+              from the scan; the saved changes apply to the next scan.
             </p>
             <div className="modal-actions">
-              <button type="button" autoFocus onClick={() => void reScanFromModal()}>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => void reScanFromModal()}
+              >
                 re-scan
               </button>
               <button type="button" onClick={() => void proceedPending()}>
                 {st.pendingAction} anyway
               </button>
-              <button type="button" onClick={dismissPending}>cancel</button>
+              <button type="button" onClick={dismissPending}>
+                cancel
+              </button>
             </div>
           </div>
         </div>

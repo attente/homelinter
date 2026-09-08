@@ -12,7 +12,9 @@
   --ok: #9ece6a;
   --bad: #f7768e;
   --busy: #e0af68;
-  --mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono:
+    "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo,
+    monospace;
 }
 
 * {
@@ -104,6 +106,15 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+button.danger {
+  color: var(--bad);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  color: var(--bad);
 }
 
 input[type="text"],
@@ -444,6 +455,16 @@ textarea:focus {
   font-size: 12px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.config-editor {
+  display: block;
+  width: 100%;
+  min-height: 340px;
+  margin: 0;
+  font-size: 12px;
+  white-space: pre;
+  overflow: auto;
 }
 
 .field-grid {
