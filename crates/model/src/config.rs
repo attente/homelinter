@@ -19,6 +19,9 @@ use crate::format::FormatString;
 
 pub const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 104_857_600;
 pub const DEFAULT_MAX_WORDS: u64 = 8;
+/// Default longest side (pixels) for photos forwarded to a vision
+/// backend; larger photos are downscaled before the request.
+pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 120;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_TOOL_STDOUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -178,6 +181,13 @@ pub struct DescriptionProvider {
     pub api_key: Option<String>,
     #[serde(default)]
     pub max_words: Option<u64>,
+    /// Longest side in pixels allowed for a photo sent to a vision backend.
+    /// Larger photos are downscaled (preserving aspect ratio) before the
+    /// request so the model processes far fewer image tokens; the value
+    /// joins the cache key and the vision settings hash. `0` disables the
+    /// cap and forwards the original bytes.
+    #[serde(default)]
+    pub max_image_dimension: Option<u64>,
     /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. Description backends have no
     /// built-in pacing; the value only ever adds delay, and requests remain
@@ -197,6 +207,7 @@ pub struct EffectiveDescription {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub max_words: u64,
+    pub max_image_dimension: u64,
     pub rate_limit_ms: u64,
 }
 
@@ -214,6 +225,10 @@ impl DescriptionProvider {
                 .max_words
                 .or(base.max_words)
                 .unwrap_or(DEFAULT_MAX_WORDS),
+            max_image_dimension: self
+                .max_image_dimension
+                .or(base.max_image_dimension)
+                .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION),
             rate_limit_ms: self.rate_limit_ms.or(base.rate_limit_ms).unwrap_or(0),
         }
     }
@@ -1094,6 +1109,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
     );
     desc.insert("max_words".into(), JsonValue::from(base_eff.max_words));
     desc.insert(
+        "max_image_dimension".into(),
+        JsonValue::from(base_eff.max_image_dimension),
+    );
+    desc.insert(
         "rate_limit_ms".into(),
         JsonValue::from(base_eff.rate_limit_ms),
     );
@@ -1107,6 +1126,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.service.default_endpoint().into()),
                 "model": eff.model,
                 "max_words": eff.max_words,
+                "max_image_dimension": eff.max_image_dimension,
                 "rate_limit_ms": eff.rate_limit_ms,
             }),
         );

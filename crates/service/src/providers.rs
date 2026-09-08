@@ -53,7 +53,9 @@ use tokio::sync::Notify;
 
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
-use homelinter_model::config::{GeocoderService, RawConfig, DEFAULT_MAX_WORDS};
+use homelinter_model::config::{
+    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
+};
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
 use homelinter_scan::SymlinkIndex;
@@ -134,6 +136,9 @@ pub struct ProviderSettings {
     pub user_agent_contact: Option<String>,
     pub model: Option<String>,
     pub max_words: Option<u64>,
+    /// Longest side in pixels for photos forwarded to a vision backend;
+    /// `None`/`0` forwards the original bytes unchanged.
+    pub max_image_dimension: Option<u64>,
 }
 
 /// A single queued provider request.
@@ -305,7 +310,11 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
             }
             if *vision && image.is_none() {
                 let path = job.unit.path.clone();
-                *image = tokio::task::spawn_blocking(move || read_image_bytes(&path))
+                let max_dim = job
+                    .settings
+                    .max_image_dimension
+                    .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION);
+                *image = tokio::task::spawn_blocking(move || prepare_image_bytes(&path, max_dim))
                     .await
                     .ok()
                     .flatten();
@@ -730,9 +739,8 @@ async fn neutral_complete(s: &ProviderSettings, prompt: &str) -> Result<String, 
 }
 
 /// Raw image payload bound for vision description requests, in bytes.
-/// A photo larger than this degrades to the text-only prompt; once
-/// base64-encoded, the body would be ~1.33x this size anyway.
-
+/// A photo larger than this is not even read from disk; once base64-
+/// encoded, the body would be ~1.33x this size anyway.
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Read a unit's raw bytes for a vision description request, bounded by
@@ -744,6 +752,42 @@ fn read_image_bytes(path: &Path) -> Option<Vec<u8>> {
         return None;
     }
     std::fs::read(path).ok()
+}
+
+/// Prepare photo bytes for a vision description request. When the longest
+/// side exceeds `max_dim` (and `max_dim` is non-zero), the image is decoded
+/// and downscaled (preserving aspect ratio) and re-encoded as JPEG, so a
+/// 12 MP phone photo reaches the model as a ~1 MP image and the vision
+/// model processes far fewer image tokens - the dominant cost on CPU. A
+/// photo already within bounds is forwarded unchanged (no re-encode loss).
+/// Decode failures (unsupported formats such as HEIC, truncated files)
+/// degrade to the original bytes, preserving today's behavior.
+fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
+    let raw = read_image_bytes(path)?;
+    if max_dim == 0 {
+        return Some(raw);
+    }
+    // Unsupported formats (such as HEIC) or truncated files degrade to
+    // the original bytes, preserving the pre-resize behavior.
+    let Ok(decoded) = image::load_from_memory(&raw) else {
+        return Some(raw);
+    };
+    if decoded.width() <= max_dim as u32 && decoded.height() <= max_dim as u32 {
+        return Some(raw);
+    }
+    let scaled = decoded.resize(
+        max_dim as u32,
+        max_dim as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    // JPEG has no alpha channel; flatten to RGB so RGBA sources (PNG)
+    // encode deterministically instead of erroring or guessing.
+    if enc.encode_image(&scaled.to_rgb8()).is_err() {
+        return Some(raw);
+    }
+    Some(out)
 }
 
 /// Assemble the prompt for a description request: the file identity and
@@ -968,6 +1012,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
         max_words: cfg.geocoder.max_words,
+        max_image_dimension: None,
     })
 }
 
@@ -999,6 +1044,9 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         // The word budget governs the request, so a different cap must not
         // reuse cached descriptions from another budget.
         eff.max_words.to_le_bytes().as_slice(),
+        // The downscale cap shapes the pixels the model sees, so a different
+        // cap must not reuse descriptions produced from another resolution.
+        eff.max_image_dimension.to_le_bytes().as_slice(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -1011,6 +1059,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         user_agent_contact: None,
         model: eff.model,
         max_words: Some(eff.max_words),
+        max_image_dimension: Some(eff.max_image_dimension),
     })
 }
 
@@ -1373,6 +1422,7 @@ mod tests {
                 user_agent_contact: None,
                 model: None,
                 max_words: None,
+                max_image_dimension: None,
             },
             unit: UnitRef {
                 epoch,
@@ -1408,6 +1458,7 @@ mod tests {
                 user_agent_contact: None,
                 model: Some("test-model".to_string()),
                 max_words: Some(8),
+                max_image_dimension: Some(1024),
             },
             unit: UnitRef {
                 epoch,
@@ -1562,6 +1613,7 @@ mod tests {
             user_agent_contact: None,
             model: Some("contract-model".to_string()),
             max_words: Some(12),
+            max_image_dimension: None,
         };
         let unit = UnitRef {
             epoch: 1,
@@ -1640,6 +1692,7 @@ mod tests {
             user_agent_contact: None,
             model: Some("vl-model".to_string()),
             max_words: Some(8),
+            max_image_dimension: None,
         };
         let out = ollama_complete(&settings, "describe this", Some(&b"fake-image-bytes"[..]))
             .await
@@ -1676,6 +1729,7 @@ mod tests {
             user_agent_contact: None,
             model: Some("vl-model".to_string()),
             max_words: Some(8),
+            max_image_dimension: None,
         };
         let out2 = ollama_complete(&settings2, "describe this", None)
             .await
@@ -1712,6 +1766,7 @@ mod tests {
             user_agent_contact: None,
             model: None,
             max_words: None,
+            max_image_dimension: None,
         };
         let mut last = BTreeMap::new();
         pace(&settings, &mut last).await;
@@ -2022,5 +2077,46 @@ mod tests {
         );
         let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
         assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn prepare_image_bytes_downscales_large_jpeg() {
+        use image::RgbaImage;
+        let dir = tmp_dir("img");
+        let path = dir.join("big.jpg");
+        // 4000x2000 synthetic image: 8 MP, longest side 4000.
+        let mut img = RgbaImage::new(4000, 2000);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]);
+        }
+        image::DynamicImage::ImageRgba8(img)
+            .to_rgb8()
+            .save(&path)
+            .unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        // Bounded read and forward-unchanged when within bounds.
+        assert_eq!(prepare_image_bytes(&path, 0).unwrap(), raw);
+        assert_eq!(prepare_image_bytes(&path, 8000).unwrap(), raw);
+
+        // Downscaled to the cap: longest side 1024, aspect preserved.
+        let small = prepare_image_bytes(&path, 1024).unwrap();
+        assert!(small.len() < raw.len());
+        let decoded = image::load_from_memory(&small).unwrap();
+        assert_eq!(decoded.width(), 1024);
+        assert_eq!(decoded.height(), 512);
+    }
+
+    #[test]
+    fn prepare_image_bytes_degrades_undecodable_bytes() {
+        let dir = tmp_dir("imgbad");
+        let path = dir.join("garbage.jpg");
+        std::fs::write(&path, b"not an image at all").unwrap();
+        // Unsupported format degrades to the original bytes, preserving
+        // the pre-resize behavior (model gets the raw payload as-is).
+        assert_eq!(
+            prepare_image_bytes(&path, 1024).unwrap(),
+            b"not an image at all"
+        );
     }
 }
