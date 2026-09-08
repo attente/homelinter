@@ -236,7 +236,11 @@ impl DescriptionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DescriptionConfig {
     /// Base provider fields; the base entry is the default provider for
-    /// every content kind without an explicit per-modality override.
+    /// every content kind that lacks an explicit per-modality override.
+    /// Kinds without a content modality (repository, archive, data,
+    /// executable, other) never use it - they have no content source for
+    /// `%s` - except location summaries, which always use the text
+    /// provider (`[description.text]`, else the base).
     #[serde(default, flatten)]
     pub base: DescriptionProvider,
     /// Per-modality overrides, e.g. `[description.text]` (keys are

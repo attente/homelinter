@@ -1015,10 +1015,17 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 }
 
 /// The description provider for one asset kind:ithe per-modality override
-/// for its content modality (e.g. `[description.image]` for a photo),
-/// or the base `[description]` entry for kinds without a modality.
+/// The description provider for one asset kind: the per-modality override
+/// for its content modality (e.g. `[description.image]` for a photo).
+/// Kinds without a content modality (repository, archive, data,
+/// executable, other) have no content source for `%s` - the LLM would only
+/// guess from the filename - so no provider is planned and `%s` resolves
+/// to `unknown`.
 pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
-    description_settings_for(cfg, description_modality(*kind))
+    let Some(m) = description_modality(*kind) else {
+        return None;
+    };
+    description_settings_for(cfg, Some(m))
 }
 
 /// The text description provider, used for location summaries (a pure-text
