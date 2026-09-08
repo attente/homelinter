@@ -61,6 +61,12 @@ export function ConfigView(props: ConfigViewProps) {
     doc && typeof doc["config_path"] === "string"
       ? String(doc["config_path"])
       : null;
+  const rawWarnings = doc && typeof doc["warnings"] === "object"
+    ? (doc["warnings"] as Record<string, unknown>)
+    : {};
+  const configWarnings = Object.entries(rawWarnings).map(
+    ([field, reason]) => [field, String(reason)] as const,
+  );
 
   return (
     <main className="config-view">
@@ -82,6 +88,15 @@ export function ConfigView(props: ConfigViewProps) {
         to its built-in default. Changes apply to the next scan; a scan in
         progress keeps the configuration snapshot it started under.
       </p>
+      {configWarnings.length > 0 && (
+        <div className="config-warnings">
+          {configWarnings.map(([field, reason]) => (
+            <p key={field} className="note warn">
+              <strong>{field}:</strong> {reason}
+            </p>
+          ))}
+        </div>
+      )}
       {configPath !== null && <p className="note">config file: {configPath}</p>}
       <pre className="config-doc">
         {doc === null ? "loading..." : JSON.stringify(doc, null, 2)}

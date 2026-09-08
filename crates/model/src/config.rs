@@ -611,7 +611,8 @@ pub fn write_config_toml(path: &Path, value: &TomlValue) -> Result<(), ApiError>
 pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
     let mut fields: Vec<(String, String)> = Vec::new();
 
-    // target_paths
+    // target_paths: a malformed destination cannot be planned, so it stays
+    // a hard error.
     crate::format::validate_target_paths(&raw.target_paths)
         .err()
         .map(|e| {
@@ -626,66 +627,25 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             }
         });
 
-    // geocoder
-    let geo = &raw.geocoder;
-    if geo.enabled {
-        let key = geo.api_key.as_deref().map(str::trim).unwrap_or("");
-        match geo.geocoder_service() {
-            GeocoderService::Google | GeocoderService::Mapbox => {
-                if key.is_empty() {
-                    fields.push((
-                        "geocoder.api_key".into(),
-                        format!(
-                            "api_key is required by the {:?} service when enabled",
-                            geo.geocoder_service()
-                        )
-                        .to_lowercase(),
-                    ));
-                }
-            }
-            GeocoderService::Nominatim | GeocoderService::Photon => {
-                if !key.is_empty() {
-                    fields.push((
-                        "geocoder.api_key".into(),
-                        format!(
-                            "api_key is rejected for the {:?} service",
-                            geo.geocoder_service()
-                        )
-                        .to_lowercase(),
-                    ));
-                }
-            }
-            GeocoderService::Custom => {
-                if geo
-                    .endpoint
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    fields.push((
-                        "geocoder.endpoint".into(),
-                        "endpoint is required for the custom service".into(),
-                    ));
-                }
-            }
-        }
-        if geo
-            .endpoint
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-        {
-            fields.push((
-                "geocoder.endpoint".into(),
-                "endpoint must not be empty when the geocoder is enabled".into(),
-            ));
-        }
+    // geocoder: structural rules only. Cross-field readiness (enabled but
+    // missing a companion value, or a key that a service ignores) is
+    // reported as a warning by `config_warnings` instead, so partial edits
+    // persisted one field at a time never fail validation.
+    if raw
+        .geocoder
+        .endpoint
+        .as_deref()
+        .is_some_and(|ep| ep.trim().is_empty())
+    {
+        fields.push((
+            "geocoder.endpoint".into(),
+            "endpoint must not be empty".into(),
+        ));
     }
 
-    // description: every provider entry (base and per-kind) is validated
-    // on its effective settings, with unset keys inherited from the base.
+    // description: per-kind key names are structural (an unknown kind can
+    // never become valid); every other provider rule degrades at runtime
+    // and is reported as a warning instead.
     let desc = &raw.description;
     asset_kind::validate_per_kind_description_keys(
         desc.per_kind
@@ -722,62 +682,6 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                 format!("{prefix}.max_words"),
                 "max_words must be positive".into(),
             ));
-        }
-        if !eff.enabled {
-            return;
-        }
-        if eff.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            fields.push((
-                format!("{prefix}.model"),
-                "model is required when the description provider is enabled".into(),
-            ));
-        }
-        match eff.service {
-            LlmBackend::Custom => {
-                if eff
-                    .endpoint
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    fields.push((
-                        format!("{prefix}.endpoint"),
-                        "endpoint is required for the custom backend".into(),
-                    ));
-                }
-            }
-            LlmBackend::Openrouter => {
-                if eff
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    fields.push((
-                        format!("{prefix}.api_key"),
-                        format!(
-                            "api_key is required by the {:?} backend when enabled",
-                            eff.service
-                        )
-                        .to_lowercase(),
-                    ));
-                }
-            }
-            LlmBackend::Ollama => {
-                if eff
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|s| !s.is_empty())
-                {
-                    fields.push((
-                        format!("{prefix}.api_key"),
-                        "api_key is rejected for the ollama backend".into(),
-                    ));
-                }
-            }
         }
     }
     check_provider("description".into(), desc.base_effective(), &mut fields);
@@ -875,6 +779,136 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             fields,
         ))
     }
+}
+
+/// Readiness advisories for the effective configuration: cross-field
+/// conditions under which an enabled provider will not work until another
+/// value is set, or a set value is ignored by the selected service. These
+/// are warnings, never errors: the configuration loads and scans proceed,
+/// and the affected placeholder resolves to its fallback (`unknown`) while
+/// the condition holds. Surfaced in `GET /config`, `PUT /config`, and the
+/// `config.updated` event so clients can guide the user without blocking
+/// field-at-a-time edits.
+pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
+    let mut warnings: Vec<(String, String)> = Vec::new();
+
+    let geo = &raw.geocoder;
+    if geo.enabled {
+        let key = geo.api_key.as_deref().map(str::trim).unwrap_or("");
+        let endpoint_empty = geo
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty();
+        match geo.geocoder_service() {
+            GeocoderService::Google | GeocoderService::Mapbox => {
+                if key.is_empty() {
+                    warnings.push((
+                        "geocoder.api_key".into(),
+                        format!(
+                            "api_key is required by the {:?} service; geocoding fails and %l resolves to unknown until it is set",
+                            geo.geocoder_service()
+                        )
+                        .to_lowercase(),
+                    ));
+                }
+            }
+            GeocoderService::Nominatim | GeocoderService::Photon => {
+                if !key.is_empty() {
+                    warnings.push((
+                        "geocoder.api_key".into(),
+                        format!(
+                            "api_key is ignored by the {:?} service",
+                            geo.geocoder_service()
+                        )
+                        .to_lowercase(),
+                    ));
+                }
+            }
+            GeocoderService::Custom => {
+                if endpoint_empty {
+                    warnings.push((
+                        "geocoder.endpoint".into(),
+                        "endpoint is required for the custom service; geocoding fails and %l resolves to unknown until it is set"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn provider_warnings(
+        prefix: String,
+        eff: EffectiveDescription,
+        warnings: &mut Vec<(String, String)>,
+    ) {
+        if !eff.enabled {
+            return;
+        }
+        if eff.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            warnings.push((
+                format!("{prefix}.model"),
+                "model is required when the description provider is enabled; %s resolves to unknown until it is set"
+                    .into(),
+            ));
+        }
+        match eff.service {
+            LlmBackend::Custom => {
+                if eff
+                    .endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    warnings.push((
+                        format!("{prefix}.endpoint"),
+                        "endpoint is required for the custom backend; %s resolves to unknown until it is set"
+                            .into(),
+                    ));
+                }
+            }
+            LlmBackend::Openrouter => {
+                if eff
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
+                    warnings.push((
+                        format!("{prefix}.api_key"),
+                        "api_key is required by the openrouter backend; %s resolves to unknown until it is set"
+                            .into(),
+                    ));
+                }
+            }
+            LlmBackend::Ollama => {
+                if eff
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    warnings.push((
+                        format!("{prefix}.api_key"),
+                        "api_key is ignored by the ollama backend".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let desc = &raw.description;
+    provider_warnings("description".into(), desc.base_effective(), &mut warnings);
+    for kind in desc.per_kind.keys() {
+        let eff = desc
+            .kind_effective(kind)
+            .expect("per-kind key iterated from the same map");
+        provider_warnings(format!("description.{kind}"), eff, &mut warnings);
+    }
+
+    warnings
 }
 
 /// Deserialize and validate a candidate configuration document (JSON body
@@ -1103,6 +1137,11 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         }),
     );
     out.insert(
+        "warnings".into(),
+        serde_json::to_value(config_warnings(raw).into_iter().collect::<BTreeMap<_, _>>())
+            .unwrap_or(JsonValue::Null),
+    );
+    out.insert(
         "config_path".into(),
         config_path
             .map(|p| JsonValue::String(p.to_string_lossy().into_owned()))
@@ -1180,19 +1219,64 @@ mod tests {
 
     #[test]
     fn description_key_requirements() {
+        // Structural rules stay hard errors: an unknown service name and an
+        // unknown per-kind key can never become valid.
         assert!(
             parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n")
-                .is_err()
+                .is_ok()
         );
-        assert!(parse(
-            "[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\napi_key = \"k\"\n"
+        assert!(parse("[description]\nenabled = true\nservice = \"ssh\"\n").is_err());
+        assert!(parse("[description.ssh]\nenabled = true\n").is_err());
+        // Readiness conditions are warnings, not errors: an enabled entry
+        // without a key or model loads and degrades at scan time.
+        let rc = parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n")
+            .unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "description.api_key"));
+        let rc = parse(
+            "[description]\nenabled = true\nmodel = \"m\"\nservice = \"ollama\"\napi_key = \"k\"\n",
         )
-        .is_ok());
-        assert!(parse(
-            "[description]\nenabled = true\nmodel = \"m\"\nservice = \"ollama\"\napi_key = \"k\"\n"
+        .unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "description.api_key"));
+        let rc = parse("[description]\nenabled = true\n").unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "description.model"));
+    }
+
+    #[test]
+    fn geocoder_warnings_are_soft() {
+        // Enabling a geocoder without its companion values is a warning, so
+        // field-at-a-time edits never fail validation mid-edit.
+        let rc = parse(
+            "[geocoder]\nenabled = true\nservice = \"google\"\nendpoint = \"https://maps.googleapis.com/maps/api\"\n",
         )
-        .is_err());
-        assert!(parse("[description]\nenabled = true\n").is_err());
+        .unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "geocoder.api_key"));
+        // Built-in services fall back to their bundled endpoint at runtime,
+        // so enabling nominatim without an explicit endpoint is complete;
+        // only a service/keyset contradiction (or the endpoint-less custom
+        // service) warrants a warning.
+        let rc = parse("[geocoder]\nenabled = true\nservice = \"nominatim\"\n").unwrap();
+        assert!(config_warnings(&rc).is_empty());
+        let rc = parse("[geocoder]\nenabled = true\nservice = \"nominatim\"\napi_key = \"k\"\n")
+            .unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "geocoder.api_key"));
+        // The custom service has no built-in endpoint and must be told one.
+        let rc = parse("[geocoder]\nenabled = true\nservice = \"custom\"\n").unwrap();
+        assert!(config_warnings(&rc)
+            .iter()
+            .any(|(f, _)| f == "geocoder.endpoint"));
+        // An explicitly empty endpoint stays a hard error (it can never
+        // become valid without editing the same field again).
+        assert!(parse("[geocoder]\nenabled = false\nendpoint = \" \"\n").is_err());
     }
 
     #[test]
@@ -1213,9 +1297,12 @@ mod tests {
         )
         .unwrap();
         assert!(!rc.description.kind_effective("audio").unwrap().enabled);
-        // An enabled per-kind entry with no model anywhere is rejected on
-        // its effective settings while the disabled base stays valid.
-        assert!(parse("[description.photo]\nenabled = true\n").is_err());
+        // An enabled per-kind entry with no model anywhere warns on its
+        // effective settings while the disabled base stays silent.
+        let rc = parse("[description.photo]\nenabled = true\n").unwrap();
+        let ws = config_warnings(&rc);
+        assert!(ws.iter().any(|(f, _)| f == "description.photo.model"));
+        assert!(!ws.iter().any(|(f, _)| f == "description.model"));
     }
 
     #[test]

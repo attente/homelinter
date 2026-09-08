@@ -26,12 +26,6 @@ const KINDS: Array<[string, string]> = [
 ];
 
 const GEOCODER_SERVICES = ["nominatim", "photon", "google", "mapbox", "custom"];
-const GEOCODER_DEFAULT_ENDPOINTS: Record<string, string> = {
-  nominatim: "https://nominatim.openstreetmap.org",
-  photon: "https://photon.komoot.io",
-  google: "https://maps.googleapis.com/maps/api/geocode/json",
-  mapbox: "https://api.mapbox.com/geocoding/v5/mapbox.places",
-};
 const LLM_SERVICES = ["ollama", "openrouter", "custom"];
 
 // Document formats the extraction section always offers, with the runtime
@@ -226,22 +220,6 @@ function buildPatch(
   if (form.geoEnabled !== (effGeo.enabled === true)) {
     geo.enabled = form.geoEnabled;
     fields.push("geoEnabled");
-    // GET /config exposes the resolved default endpoint, but the service's
-    // persisted TOML may omit it. Include the effective transport settings
-    // when enabling so the merged file is valid on its own.
-    if (form.geoEnabled) {
-      if (str(effGeo.service).length > 0) {
-        geo.service = str(effGeo.service);
-        fields.push("geoService");
-      }
-      const service = str(effGeo.service) || "nominatim";
-      const endpoint =
-        str(effGeo.endpoint) || GEOCODER_DEFAULT_ENDPOINTS[service] || "";
-      if (endpoint.length > 0) {
-        geo.endpoint = endpoint;
-        fields.push("geoEndpoint");
-      }
-    }
   }
   if (form.geoService !== str(effGeo.service)) {
     geo.service = form.geoService;
@@ -670,6 +648,7 @@ export function ScanForm(props: ScanFormProps) {
   };
 
   const pathDefaults = obj(doc?.target_path_defaults) as Record<string, string>;
+  const configWarnings = Object.entries(obj(doc?.warnings));
 
   const start = async () => {
     if (!(await flush())) {
@@ -709,6 +688,15 @@ export function ScanForm(props: ScanFormProps) {
         and are never saved.
       </p>
       {saveNote !== null && <p className="error">{saveNote}</p>}
+      {configWarnings.length > 0 && (
+        <div className="config-warnings" role="status">
+          {configWarnings.map(([field, reason]) => (
+            <p key={field} className="note warn">
+              <strong>{field}:</strong> {String(reason)}
+            </p>
+          ))}
+        </div>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
