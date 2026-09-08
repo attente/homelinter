@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react';
-import { detailLines } from '../lib/detail';
 import {
   ALL_FILTER,
   Filter,
@@ -31,7 +30,6 @@ interface BrowseProps {
 export function Browse(props: BrowseProps) {
   const { suggestions, actionsDisabled, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
   const [filter, setFilter] = useState<Filter>(ALL_FILTER);
-  const [cursor, setCursor] = useState(0);
 
   const kinds = useMemo(() => uniqueKinds(suggestions), [suggestions]);
   const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
@@ -43,8 +41,6 @@ export function Browse(props: BrowseProps) {
     () => new Set(suggestions.filter((s) => s.selected).map((s) => s.id)),
     [suggestions],
   );
-
-  const shown = cursor >= 0 && cursor < filtered.length ? filtered[cursor] : undefined;
 
   return (
     <main className="browse">
@@ -101,44 +97,22 @@ export function Browse(props: BrowseProps) {
           </button>
         </div>
       </div>
-      <div className="browse-panes">
-        <section className="list-pane">
-          <ul className="suggest-list">
-            {filtered.map((s, i) => (
-              <li key={s.id} className={i === cursor ? 'list-row current' : 'list-row'}>
-                <button
-                  type="button"
-                  className="row-hit"
-                  onClick={() => {
-                    setCursor(i);
-                    onToggle(s.id, !selectedIds.has(s.id));
-                  }}
-                >
-                  {rowLabel(s)}
-                </button>
-              </li>
-            ))}
-            {filtered.length === 0 && <li className="empty">no suggestions match this filter</li>}
-          </ul>
-        </section>
-        <section className="detail-pane">
-          {shown ? <Detail suggestion={shown} /> : <p className="empty">no suggestion selected</p>}
-        </section>
-      </div>
+      <section className="list-pane">
+        <ul className="suggest-list">
+          {filtered.map((s) => (
+            <li key={s.id} className="list-row">
+              <button
+                type="button"
+                className="row-hit"
+                onClick={() => onToggle(s.id, !selectedIds.has(s.id))}
+              >
+                {rowLabel(s)}
+              </button>
+            </li>
+          ))}
+          {filtered.length === 0 && <li className="empty">no suggestions match this filter</li>}
+        </ul>
+      </section>
     </main>
-  );
-}
-
-function Detail({ suggestion }: { suggestion: Suggestion }) {
-  const lines = detailLines(suggestion);
-  return (
-    <dl className="detail">
-      {lines.map(([k, v]) => (
-        <div key={k} className="detail-row">
-          <dt>{k}</dt>
-          <dd>{v}</dd>
-        </div>
-      ))}
-    </dl>
   );
 }

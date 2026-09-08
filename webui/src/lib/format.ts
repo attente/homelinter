@@ -24,11 +24,20 @@ export function shorten(s: string, max: number): string {
 export function rowLabel(s: Suggestion): string {
   const marker = s.selected ? '[x]' : '[ ]';
   const name = tail(s.target, 3);
-  const dest = s.new_path ? tail(s.new_path, 3) : 'delete';
+  let action: string;
+  if (s.type === 'delete') {
+    const dupOf = s.metadata?.duplicate_of;
+    action = typeof dupOf === 'string' && dupOf.length > 0
+      ? `delete ${name}, duplicate of ${tail(dupOf, 3)}`
+      : `delete ${name}`;
+  } else {
+    const dest = s.new_path ? tail(s.new_path, 3) : '?';
+    action = `move ${name} to ${dest}`;
+  }
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
   const pending = s.metadata_pending ? ' [metadata pending]' : '';
   const rejected = s.rejection_reason ? ' [rejected]' : '';
-  return `${marker} ${s.type.padEnd(6)} ${s.asset_kind.padEnd(8)} ${name} -> ${dest}${status}${pending}${rejected}`;
+  return `${marker} ${action}${status}${pending}${rejected}`;
 }
 
 export interface ReportCounts {

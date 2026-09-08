@@ -8,6 +8,7 @@ import {
   uniqueKinds,
 } from './filter';
 import {
+  asciiOnly,
   countsOf,
   countsSummary,
   entryLine,
@@ -80,14 +81,22 @@ describe('format', () => {
   });
 
 
-  it('row label is ascii and marks selection', () => {
+  it('row label is ascii, marks selection, and reads move/delete', () => {
     const label = rowLabel(sampleSuggestion());
     expect(label.startsWith('[ ]')).toBe(true);
-    expect(label.includes('move')).toBe(true);
+    expect(label).toContain('move /home/a/IMG_1.jpg to /Pictures/2024/IMG_1.jpg');
     const sel = rowLabel(sampleSuggestion({ selected: true }));
     expect(sel.startsWith('[x]')).toBe(true);
-    const del = rowLabel(sampleSuggestion({ type: 'delete', new_path: null }));
-    expect(del.endsWith('delete')).toBe(true);
+    const del = rowLabel(sampleSuggestion({
+      type: 'delete',
+      new_path: null,
+      metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
+    }));
+    expect(del).toContain('delete /home/a/IMG_1.jpg, duplicate of /a/keeper/IMG_1.jpg');
+    const delNoMeta = rowLabel(sampleSuggestion({ type: 'delete', new_path: null }));
+    expect(delNoMeta).toContain('delete /home/a/IMG_1.jpg');
+    expect(delNoMeta).not.toContain('duplicate of');
+    expect(asciiOnly(label)).toBe(true);
   });
 
   it('row label marks pending provider metadata', () => {
