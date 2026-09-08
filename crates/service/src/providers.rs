@@ -23,11 +23,8 @@
 //! Results carry the scan epoch; results for a superseded scan are dropped
 //! without touching the session.
 //!
-//! The scaffold implements the neutral `custom` contracts only: the
-//! reverse-geocode transport and the completion transport for description
-//! (LLM) requests. The public nominatim/photon/google/mapbox geocoder
-//! backends and the ollama/openrouter description backends return
-//! "not implemented yet" and thus behave as ordinary provider failures.
+//! Built-in transports implement the configured public geocoders and LLM
+//! backends, as well as the neutral `custom` contracts.
 //! Jobs are planned per unit only when the destination format for the
 //! unit's kind uses the corresponding placeholder (`%l` for the geocoder,
 //! `%s` for descriptions); provider inputs that do exist (GPS coordinates
@@ -124,6 +121,7 @@ pub struct ProviderSettings {
     pub endpoint: String,
     pub api_key: Option<String>,
     pub language: Option<String>,
+    pub user_agent_contact: Option<String>,
     pub model: Option<String>,
     pub max_words: Option<u64>,
 }
@@ -353,9 +351,17 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             };
             match job.settings.backend.as_str() {
                 "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await,
-                backend => Err(format!(
-                    "geocoder backend '{backend}' is not implemented yet"
-                )),
+                "nominatim" => {
+                    if job.settings.endpoint.is_empty() {
+                        Err("nominatim geocoder needs an endpoint".to_string())
+                    } else {
+                        nominatim_reverse(&job.settings, lat, lon, language).await
+                    }
+                }
+                "photon" => photon_reverse(&job.settings, lat, lon, language).await,
+                "google" => google_reverse(&job.settings, lat, lon, language).await,
+                "mapbox" => mapbox_reverse(&job.settings, lat, lon, language).await,
+                backend => Err(format!("unknown geocoder backend '{backend}'")),
             }
         }
         ProviderKind::Description => {
@@ -367,12 +373,212 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             };
             match job.settings.backend.as_str() {
                 "custom" => neutral_complete(&job.settings, &job.unit.path, text).await,
-                backend => Err(format!(
-                    "description backend '{backend}' is not implemented yet"
-                )),
+                "ollama" => ollama_complete(&job.settings, &job.unit.path, text).await,
+                "openrouter" => {
+                    if job.settings.api_key.is_none() {
+                        Err("openrouter description provider requires an API key".to_string())
+                    } else {
+                        openrouter_complete(&job.settings, &job.unit.path, text).await
+                    }
+                }
+                backend => Err(format!("unknown description backend '{backend}'")),
             }
         }
     }
+}
+
+fn query_escape(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+async fn get_json(
+    endpoint: &str,
+    api_key: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<Value, String> {
+    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let uri: hyper::Uri = endpoint
+        .parse()
+        .map_err(|e| format!("invalid provider endpoint: {e}"))?;
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("accept", "application/json");
+    let ua = format!(
+        "homelinter/{}{}",
+        env!("CARGO_PKG_VERSION"),
+        user_agent.map(|v| format!(" ({v})")).unwrap_or_default()
+    );
+    builder = builder.header(
+        "user-agent",
+        HeaderValue::from_str(&ua).map_err(|e| e.to_string())?,
+    );
+    if let Some(key) = api_key {
+        builder = builder.header(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
+        );
+    }
+    let resp = client
+        .request(
+            builder
+                .body(Full::new(Bytes::new()))
+                .map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| format!("provider transport error: {e}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("provider body read: {e}"))?
+        .to_bytes();
+    if !status.is_success() {
+        return Err(format!("provider returned {}", status.as_u16()));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "provider response is not JSON".to_string())
+}
+
+async fn nominatim_reverse(
+    s: &ProviderSettings,
+    lat: f64,
+    lon: f64,
+    language: Option<&str>,
+) -> Result<String, String> {
+    let url = format!(
+        "{}/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1{}",
+        s.endpoint.trim_end_matches('/'),
+        language
+            .map(|v| format!("&accept-language={}", query_escape(v)))
+            .unwrap_or_default()
+    );
+    let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
+    v.get("display_name")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/address/city").and_then(Value::as_str))
+        .map(str::to_owned)
+        .filter(|x| !x.trim().is_empty())
+        .ok_or_else(|| "nominatim response has no place name".into())
+}
+
+async fn photon_reverse(
+    s: &ProviderSettings,
+    lat: f64,
+    lon: f64,
+    language: Option<&str>,
+) -> Result<String, String> {
+    let mut url = format!(
+        "{}/reverse?lat={lat}&lon={lon}",
+        s.endpoint.trim_end_matches('/')
+    );
+    if let Some(lang) = language {
+        url.push_str(&format!("&lang={}", query_escape(lang)));
+    }
+    let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
+    let p = v
+        .pointer("/features/0/properties")
+        .ok_or("photon response has no feature")?;
+    ["name", "city", "state", "country"]
+        .iter()
+        .find_map(|k| p.get(*k).and_then(Value::as_str))
+        .map(str::to_owned)
+        .filter(|x| !x.trim().is_empty())
+        .ok_or_else(|| "photon response has no place name".into())
+}
+
+async fn google_reverse(
+    s: &ProviderSettings,
+    lat: f64,
+    lon: f64,
+    language: Option<&str>,
+) -> Result<String, String> {
+    let key = s
+        .api_key
+        .as_deref()
+        .ok_or("google geocoder requires an API key")?;
+    let mut url = format!(
+        "{}/geocode/json?latlng={lat},{lon}&key={}",
+        s.endpoint.trim_end_matches('/'),
+        query_escape(key)
+    );
+    if let Some(lang) = language {
+        url.push_str(&format!("&language={}", query_escape(lang)));
+    }
+    let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
+    if v.get("status").and_then(Value::as_str) != Some("OK") {
+        return Err(format!(
+            "google geocoder status: {}",
+            v["status"].as_str().unwrap_or("unknown")
+        ));
+    }
+    v.pointer("/results/0/formatted_address")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "google response has no place name".into())
+}
+
+async fn mapbox_reverse(
+    s: &ProviderSettings,
+    lat: f64,
+    lon: f64,
+    language: Option<&str>,
+) -> Result<String, String> {
+    let token = s
+        .api_key
+        .as_deref()
+        .ok_or("mapbox geocoder requires an API key")?;
+    let mut url = format!(
+        "{}/geocoding/v5/mapbox.places/{lon},{lat}.json?access_token={}",
+        s.endpoint.trim_end_matches('/'),
+        query_escape(token)
+    );
+    if let Some(lang) = language {
+        url.push_str(&format!("&language={}", query_escape(lang)));
+    }
+    let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
+    v.pointer("/features/0/place_name")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/features/0/text").and_then(Value::as_str))
+        .map(str::to_owned)
+        .ok_or_else(|| "mapbox response has no place name".into())
+}
+
+async fn ollama_complete(
+    s: &ProviderSettings,
+    path: &Path,
+    text: Option<&str>,
+) -> Result<String, String> {
+    let endpoint = format!("{}/api/chat", s.endpoint.trim_end_matches('/'));
+    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": description_prompt(path, text, s.max_words.unwrap_or(DEFAULT_MAX_WORDS))}], "stream": false, "options": {"num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4}});
+    let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
+    v.pointer("/message/content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|x| !x.trim().is_empty())
+        .ok_or_else(|| "ollama response has no message content".into())
+}
+
+async fn openrouter_complete(
+    s: &ProviderSettings,
+    path: &Path,
+    text: Option<&str>,
+) -> Result<String, String> {
+    let endpoint = format!("{}/chat/completions", s.endpoint.trim_end_matches('/'));
+    let max = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
+    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": description_prompt(path, text, max)}], "max_tokens": max * 4});
+    let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
+    v.pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|x| !x.trim().is_empty())
+        .ok_or_else(|| "openrouter response has no completion content".into())
 }
 
 /// POST `body` JSON to `endpoint` and parse the JSON response. Shared by
@@ -638,6 +844,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         backend.as_bytes(),
         endpoint.as_bytes(),
         language.as_deref().unwrap_or("").as_bytes(),
+        cfg.geocoder.api_key.as_deref().unwrap_or("").as_bytes(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -647,6 +854,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         endpoint,
         api_key,
         language,
+        user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
         max_words: None,
     })
@@ -690,6 +898,7 @@ pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<Provide
         endpoint,
         api_key: eff.api_key,
         language: None,
+        user_agent_contact: None,
         model: eff.model,
         max_words: Some(eff.max_words),
     })
@@ -957,6 +1166,7 @@ mod tests {
                 endpoint: format!("http://127.0.0.1:{port}"),
                 api_key: None,
                 language: None,
+                user_agent_contact: None,
                 model: None,
                 max_words: None,
             },
@@ -991,6 +1201,7 @@ mod tests {
                 endpoint: format!("http://127.0.0.1:{port}"),
                 api_key: None,
                 language: None,
+                user_agent_contact: None,
                 model: Some("test-model".to_string()),
                 max_words: Some(8),
             },
@@ -1140,6 +1351,7 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{port}"),
             api_key: Some("secret".to_string()),
             language: None,
+            user_agent_contact: None,
             model: Some("contract-model".to_string()),
             max_words: Some(12),
         };
@@ -1173,19 +1385,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unimplemented_backends_fail_cleanly() {
+    async fn configured_backends_fail_cleanly_without_credentials_or_endpoint() {
         let (app, epoch) = primed_app_with_format("Documents/%Y/%s/%f").await;
         let mut desc = describe_job(&app, 1, epoch).await;
         desc.settings.backend = "openrouter".to_string();
         desc.settings.endpoint = "https://openrouter.ai/api/v1".to_string();
         let err = invoke(&desc).await.unwrap_err();
-        assert!(err.contains("not implemented yet"), "{err}");
+        assert!(err.contains("API key"), "{err}");
 
         let mut geo = geocode_job(&app, 1, epoch).await;
         geo.settings.backend = "nominatim".to_string();
-        geo.settings.endpoint = "https://nominatim.openstreetmap.org".to_string();
+        geo.settings.endpoint.clear();
         let err = invoke(&geo).await.unwrap_err();
-        assert!(err.contains("not implemented yet"), "{err}");
+        assert!(err.contains("endpoint"), "{err}");
     }
 
     #[tokio::test]
@@ -1198,6 +1410,7 @@ mod tests {
             endpoint: "x".into(),
             api_key: None,
             language: None,
+            user_agent_contact: None,
             model: None,
             max_words: None,
         };
