@@ -182,29 +182,45 @@ pub fn classify_path(p: &std::path::Path) -> AssetKind {
     }
 }
 
-/// Content-description per-kind keys are restricted to content kinds.
-pub fn validate_per_kind_description_keys(
+/// Content-description modality names, in canonical order. These are
+/// the per-modality keys accepted under `[description]` overrides
+/// (e.g. `[description.text]`, `[description.image]`), one per content
+/// kind (see `description_modality`).
+pub const DESCRIPTION_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"];
+
+/// The content-description modality for an asset kind, if any. Kinds
+/// without a modality (repository, archive, data, executable, other)
+/// are described by the base `[description]` provider only.
+pub fn description_modality(kind: AssetKind) -> Option<&'static str> {
+    match kind {
+        AssetKind::Document => Some("text"),
+        AssetKind::Photo => Some("image"),
+        AssetKind::Video => Some("video"),
+        AssetKind::Audio => Some("audio"),
+        _ => None,
+    }
+}
+
+/// Content-description per-modality keys are restricted to the content
+/// modalities (`DESCRIPTION_MODALITIES`).
+pub fn validate_per_modality_description_keys(
     keys: impl Iterator<Item = String>,
 ) -> Result<(), ApiError> {
     let mut fields = Vec::new();
     for k in keys {
-        let kind = AssetKind::from_name(&k);
-        match kind {
-            Some(kind) if AssetKind::CONTENT_KINDS.contains(&kind) => {}
-            _ => {
-                fields.push((
-                    format!("description.{k}"),
-                    "per-kind description keys must be one of: document, photo, video, audio"
-                        .to_string(),
-                ));
-            }
+        if !DESCRIPTION_MODALITIES.contains(&k.as_str()) {
+            fields.push((
+                format!("description.{k}"),
+                "per-modality description keys must be one of: text, image, video, audio"
+                    .to_string(),
+            ));
         }
     }
     if fields.is_empty() {
         Ok(())
     } else {
         Err(ApiError::validation_errors(
-            "invalid description per-kind configuration",
+            "invalid description per-modality configuration",
             fields,
         ))
     }

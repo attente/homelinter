@@ -52,7 +52,7 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use homelinter_analyze::Analysis;
-use homelinter_model::asset_kind::AssetKind;
+use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{GeocoderService, RawConfig, DEFAULT_MAX_WORDS};
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::suggestion::Suggestion;
@@ -770,8 +770,8 @@ fn description_prompt(path: &Path, text: Option<&str>, max_words: u64) -> String
 }
 
 /// Summarize a reverse-geocoded location into at most `max_words`
-/// words using the description provider, when `[geocoder] max_words`
-/// is set and a description provider is enabled for the unit's kind. Any
+/// words using the text description provider, when `[geocoder] max_words`
+/// is set and the text description provider is enabled. Any
 /// failure (provider disabled, unknown backend, timeout) returns the full
 /// location unchanged, so location resolution never depends on the LLM.
 /// The summary is cached under the geocode job's key.
@@ -784,17 +784,10 @@ async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> Str
         let sess = app.session.lock().await;
         sess.config.clone()
     };
-    let kind = {
-        let sess = app.session.lock().await;
-        sess.provider_ctx
-            .as_ref()
-            .and_then(|ctx| ctx.analysis.files.get(job.unit.index))
-            .map(|f| f.kind)
-    };
-    let Some(kind) = kind else {
-        return location.to_string();
-    };
-    let Some(desc) = description_settings(&cfg, &kind) else {
+    // Location summarization is a pure-text task:it always uses the
+    // text description provider (`[description.text]`, else the base), not
+    // the provider of the asset's content modality.
+    let Some(desc) = description_settings_text(&cfg) else {
         return location.to_string();
     };
     let prompt = format!(
@@ -978,13 +971,12 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
     })
 }
 
-/// Build the description provider settings for one asset kind from the
-/// effective configuration, following per-kind overrides. `None` when the
-/// provider for that kind is disabled.
-pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
-    let eff = cfg
-        .description
-        .kind_effective(&kind.name())
+/// Resolve the description provider settings for one content modality key,
+/// falling back to the base `[description]` entry when no per-modality
+/// override exists.
+fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<ProviderSettings> {
+    let eff = modality
+        .and_then(|m| cfg.description.modality_effective(m))
         .unwrap_or_else(|| cfg.description.base_effective());
     if !eff.enabled {
         return None;
@@ -1020,6 +1012,21 @@ pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<Provide
         model: eff.model,
         max_words: Some(eff.max_words),
     })
+}
+
+/// The description provider for one asset kind:ithe per-modality override
+/// for its content modality (e.g. `[description.image]` for a photo),
+/// or the base `[description]` entry for kinds without a modality.
+pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
+    description_settings_for(cfg, description_modality(*kind))
+}
+
+/// The text description provider, used for location summaries (a pure-text
+/// task) and for describing text documents:ithe per-modality
+/// `[description.text]` override when present, else the base `[description]`
+/// entry.
+pub fn description_settings_text(cfg: &RawConfig) -> Option<ProviderSettings> {
+    description_settings_for(cfg, Some("text"))
 }
 
 /// Plan provider work for a completed scan: one job per unit whose
@@ -1058,12 +1065,11 @@ pub async fn plan_provider_jobs(
                 let lat_bytes = lat.to_le_bytes();
                 let lon_bytes = lon.to_le_bytes();
                 let lang = g.language.as_deref().unwrap_or("");
-                // The cached value may be the LLM summary, so the
+                // The cached value may be the LLM summary, so the text
                 // description provider's identity joins the key: a model or
-                // word-budget change re-summarizes. Hoisted so the borrow
-                // outlives the `sha256` call below.
+                // word-budget change re-summarizes.
                 let desc_hash: Option<[u8; 32]> = if g.max_words.unwrap_or(0) > 0 {
-                    description_settings(cfg, &f.kind).map(|d| d.settings_hash)
+                    description_settings_text(cfg).map(|d| d.settings_hash)
                 } else {
                     None
                 };
@@ -1860,15 +1866,15 @@ mod tests {
         let s = description_settings(&cfg, &AssetKind::Document).unwrap();
         assert_eq!(s.min_interval, Duration::from_millis(750));
 
-        // Unset -> no delay; a per-kind override inherits the base and
-        // can raise the floor for its own kind.
+        // Unset -> no delay; a per-modality override inherits the base and
+        // can raise the floor for its own modality.
         let cfg2: RawConfig = toml::from_str(
             r#"
             [description]
             enabled = true
             model = "m"
 
-            [description.photo]
+            [description.image]
             rate_limit_ms = 2000
             "#,
         )

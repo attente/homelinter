@@ -160,7 +160,7 @@ impl GeocoderConfig {
 }
 
 /// A description provider entry: the base `[description]` table or one
-/// per-kind override such as `[description.photo]`. LLM transport settings
+/// per-modality override such as `[description.image]`. LLM transport settings
 /// (`service`, `endpoint`, `model`, `api_key`, `max_words`, `rate_limit_ms`)
 /// live directly on each entry; unset keys fall back to the base entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -225,23 +225,26 @@ impl DescriptionConfig {
         self.base.effective(&self.base)
     }
 
-    /// Effective settings for one per-kind entry, if present.
-    pub fn kind_effective(&self, kind: &str) -> Option<EffectiveDescription> {
-        self.per_kind.get(kind).map(|p| p.effective(&self.base))
+    /// Effective settings for one per-modality entry, if present.
+    pub fn modality_effective(&self, modality: &str) -> Option<EffectiveDescription> {
+        self.per_modality
+            .get(modality)
+            .map(|p| p.effective(&self.base))
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DescriptionConfig {
     /// Base provider fields; the base entry is the default provider for
-    /// every content kind without an explicit per-kind override.
+    /// every content kind without an explicit per-modality override.
     #[serde(default, flatten)]
     pub base: DescriptionProvider,
-    /// Per-kind overrides, e.g. `[description.photo]`. Serde cannot combine
-    /// `flatten` with `deny_unknown_fields`, so unknown per-kind keys are
+    /// Per-modality overrides, e.g. `[description.text]` (keys are
+    /// `text`, `image`, `video`, `audio`). Serde cannot combine
+    /// `flatten` with `deny_unknown_fields`, so unknown per-modality keys are
     /// validated manually by `validate_config`.
     #[serde(default, flatten)]
-    pub per_kind: BTreeMap<String, DescriptionProvider>,
+    pub per_modality: BTreeMap<String, DescriptionProvider>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,12 +653,12 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         ));
     }
 
-    // description: per-kind key names are structural (an unknown kind can
+    // description: per-modality key names are structural (an unknown key can
     // never become valid); every other provider rule degrades at runtime
     // and is reported as a warning instead.
     let desc = &raw.description;
-    asset_kind::validate_per_kind_description_keys(
-        desc.per_kind
+    asset_kind::validate_per_modality_description_keys(
+        desc.per_modality
             .keys()
             .cloned()
             .collect::<Vec<_>>()
@@ -692,11 +695,11 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     }
     check_provider("description".into(), desc.base_effective(), &mut fields);
-    for kind in desc.per_kind.keys() {
+    for modality in desc.per_modality.keys() {
         let eff = desc
-            .kind_effective(kind)
-            .expect("per-kind key iterated from the same map");
-        check_provider(format!("description.{kind}"), eff, &mut fields);
+            .modality_effective(modality)
+            .expect("per-modality key iterated from the same map");
+        check_provider(format!("description.{modality}"), eff, &mut fields);
     }
 
     // document_extraction
@@ -908,11 +911,11 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
     }
     let desc = &raw.description;
     provider_warnings("description".into(), desc.base_effective(), &mut warnings);
-    for kind in desc.per_kind.keys() {
+    for modality in desc.per_modality.keys() {
         let eff = desc
-            .kind_effective(kind)
-            .expect("per-kind key iterated from the same map");
-        provider_warnings(format!("description.{kind}"), eff, &mut warnings);
+            .modality_effective(modality)
+            .expect("per-modality key iterated from the same map");
+        provider_warnings(format!("description.{modality}"), eff, &mut warnings);
     }
 
     warnings
@@ -1090,10 +1093,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         "rate_limit_ms".into(),
         JsonValue::from(base_eff.rate_limit_ms),
     );
-    for (kind, p) in &raw.description.per_kind {
+    for (modality, p) in &raw.description.per_modality {
         let eff = p.effective(&raw.description.base);
         desc.insert(
-            kind.clone(),
+            modality.clone(),
             serde_json::json!({
                 "enabled": eff.enabled,
                 "service": llm_backend_name(eff.service),
@@ -1221,14 +1224,14 @@ mod tests {
     fn rejects_bad_description_kind() {
         let err = parse("[description.other]\nenabled = true\n");
         assert!(err.is_err());
-        let ok = parse("[description.photo]\nenabled = true\nmodel = \"m\"\n");
+        let ok = parse("[description.image]\nenabled = true\nmodel = \"m\"\n");
         assert!(ok.is_ok());
     }
 
     #[test]
     fn description_key_requirements() {
         // Structural rules stay hard errors: an unknown service name and an
-        // unknown per-kind key can never become valid.
+        // unknown per-modality key can never become valid.
         assert!(
             parse("[description]\nenabled = true\nmodel = \"m\"\nservice = \"openrouter\"\n")
                 .is_ok()
@@ -1288,28 +1291,28 @@ mod tests {
     }
 
     #[test]
-    fn description_per_kind_fallback() {
-        // A per-kind entry overrides only the keys it sets; enabled and
+    fn description_per_modality_fallback() {
+        // A per-modality entry overrides only the keys it sets; enabled and
         // model inherit from the base entry.
         let rc = parse(
-            "[description]\nenabled = true\nmodel = \"base\"\n[description.photo]\nmodel = \"vision\"\n",
+            "[description]\nenabled = true\nmodel = \"base\"\n[description.image]\nmodel = \"vision\"\n",
         )
         .unwrap();
-        let photo = rc.description.kind_effective("photo").unwrap();
-        assert!(photo.enabled);
-        assert_eq!(photo.model.as_deref(), Some("vision"));
-        assert_eq!(photo.service, LlmBackend::Ollama);
-        // An explicitly disabled entry suppresses the base for that kind.
+        let img = rc.description.modality_effective("image").unwrap();
+        assert!(img.enabled);
+        assert_eq!(img.model.as_deref(), Some("vision"));
+        assert_eq!(img.service, LlmBackend::Ollama);
+        // An explicitly disabled entry suppresses the base for that modality.
         let rc = parse(
             "[description]\nenabled = true\nmodel = \"base\"\n[description.audio]\nenabled = false\n",
         )
         .unwrap();
-        assert!(!rc.description.kind_effective("audio").unwrap().enabled);
-        // An enabled per-kind entry with no model anywhere warns on its
+        assert!(!rc.description.modality_effective("audio").unwrap().enabled);
+        // An enabled per-modality entry with no model anywhere warns on its
         // effective settings while the disabled base stays silent.
-        let rc = parse("[description.photo]\nenabled = true\n").unwrap();
+        let rc = parse("[description.image]\nenabled = true\n").unwrap();
         let ws = config_warnings(&rc);
-        assert!(ws.iter().any(|(f, _)| f == "description.photo.model"));
+        assert!(ws.iter().any(|(f, _)| f == "description.image.model"));
         assert!(!ws.iter().any(|(f, _)| f == "description.model"));
     }
 
@@ -1326,16 +1329,16 @@ mod tests {
 
     #[test]
     fn deep_merge_semantics() {
-        let mut base: TomlValue = "[description]\nenabled = false\n[description.photo]\nenabled = false\n[scan]\nexclude_paths = [\".cache/**\"]\n"
+        let mut base: TomlValue = "[description]\nenabled = false\n[description.image]\nenabled = false\n[scan]\nexclude_paths = [\".cache/**\"]\n"
             .parse()
             .unwrap();
-        let higher: TomlValue = "[description.photo]\nenabled = true\n[scan]\nexclude_paths = []\n"
+        let higher: TomlValue = "[description.image]\nenabled = true\n[scan]\nexclude_paths = []\n"
             .parse()
             .unwrap();
         deep_merge_toml(&mut base, higher);
         let t = base.as_table().unwrap();
         assert_eq!(t["description"]["enabled"].as_bool(), Some(false));
-        assert_eq!(t["description"]["photo"]["enabled"].as_bool(), Some(true));
+        assert_eq!(t["description"]["image"]["enabled"].as_bool(), Some(true));
         // Arrays are replaced wholesale, not unioned.
         assert_eq!(t["scan"]["exclude_paths"].as_array().unwrap().len(), 0);
     }
