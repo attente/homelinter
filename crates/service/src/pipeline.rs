@@ -122,7 +122,10 @@ pub async fn start_scan(
     let cancel_token = app.cancel.load(Ordering::SeqCst);
     // Provider results are gated by the epoch of the scan that enqueued
     // them; superseded scans' outstanding jobs are dropped without effect.
-    let provider_epoch = app.provider_epoch.fetch_add(1, Ordering::SeqCst);
+    // The epoch handed to the jobs is the post-increment value, so the worker's
+    // comparison against the live counter treats them as current until the next
+    // scan bumps the counter.
+    let provider_epoch = app.provider_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     let start = Instant::now();
 
     let (scan_opts, threshold) = (

@@ -45,7 +45,6 @@ use hyper::body::Bytes;
 use hyper::header::HeaderValue;
 use hyper::Method;
 use hyper::Request;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
@@ -402,7 +401,14 @@ async fn get_json(
     api_key: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<Value, String> {
-    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let client = {
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        HyperClient::builder(TokioExecutor::new()).build(connector)
+    };
     let uri: hyper::Uri = endpoint
         .parse()
         .map_err(|e| format!("invalid provider endpoint: {e}"))?;
@@ -586,7 +592,14 @@ async fn openrouter_complete(
 /// api key is configured, JSON content-type, and a bounded failure on any
 /// non-2xx status, unreadable body, or non-JSON response.
 async fn post_json(endpoint: &str, api_key: Option<&str>, body: Value) -> Result<Value, String> {
-    let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
+    let client = {
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        HyperClient::builder(TokioExecutor::new()).build(connector)
+    };
     let uri: hyper::Uri = endpoint
         .parse()
         .map_err(|e| format!("invalid provider endpoint: {e}"))?;
