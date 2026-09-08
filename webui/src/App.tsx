@@ -155,7 +155,12 @@ export default function App() {
           const state = String(d.state ?? "");
           const cur = stRef.current;
           if (state === "ready" || state === "done") {
-            if (cur.phase === "scanning" || cur.phase === "idle") {
+            // A deliberately open scan setup page (showScanForm) is not
+            // "idle" in the recovery sense; never yank the user off it.
+            if (
+              !cur.showScanForm &&
+              (cur.phase === "scanning" || cur.phase === "idle")
+            ) {
               await enterBrowse();
             }
             if (state === "done" && cur.phase === "running" && !cur.report) {
@@ -173,7 +178,12 @@ export default function App() {
           break;
         case "scan.complete":
           setSt((prev) => ({ ...prev, progress: null }));
-          await enterBrowse();
+          // If the user is on the scan setup page, the completed scan was
+          // started elsewhere; leave them where they are. The new batch is
+          // already applied via suggestion.batch and waiting on resume.
+          if (!stRef.current.showScanForm) {
+            await enterBrowse();
+          }
           break;
         case "suggestion.batch":
           setSt((prev) => ({
@@ -248,6 +258,7 @@ export default function App() {
       setSt((prev) => ({ ...prev, phase: "scanning", showScanForm: false }));
     } else if (
       (state === "ready" || state === "done") &&
+      !cur.showScanForm &&
       (cur.phase === "scanning" || cur.phase === "idle")
     ) {
       await enterBrowse();
