@@ -140,12 +140,20 @@ enum Phase {
     Browse,
     Run,
     Report,
+    Config,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StaleAction {
+    Run,
+    Export,
 }
 
 #[derive(Debug, Clone)]
 enum ConfirmAction {
     Quit,
     Run,
+    ProceedStale,
 }
 
 struct Confirm {
@@ -200,6 +208,12 @@ struct App {
     run: RunView,
     frame: u64,
     quit: bool,
+    config_doc: Option<Value>,
+    config_scroll: u16,
+    config_hash: Option<String>,
+    batch_config_hash: Option<String>,
+    failure_reason: Option<String>,
+    stale_action: Option<StaleAction>,
 }
 
 impl App {
@@ -231,6 +245,12 @@ impl App {
             run: RunView::default(),
             frame: 0,
             quit: false,
+            config_doc: None,
+            config_scroll: 0,
+            config_hash: None,
+            batch_config_hash: None,
+            failure_reason: None,
+            stale_action: None,
         }
     }
 
@@ -370,8 +390,21 @@ impl App {
         }
     }
 
+    fn batch_is_stale(&self) -> bool {
+        matches!((&self.config_hash, &self.batch_config_hash), (Some(current), Some(batch)) if current != batch)
+    }
+
     /// Start an execution for the current selection.
     async fn run_selected(&mut self) -> Result<(), String> {
+        if self.batch_is_stale() && self.stale_action.is_none() {
+            self.stale_action = Some(StaleAction::Run);
+            self.confirm = Some(Confirm {
+                title: "Stale suggestions".to_string(),
+                message: "Configuration changed since scan. Proceed anyway? (y) or cancel (n). Press r to rescan.".to_string(),
+                yes: ConfirmAction::ProceedStale,
+            });
+            return Ok(());
+        }
         let ids = self.ensure_selection().await?;
         if ids.is_empty() {
             self.toast = Some("nothing to run: the batch is empty".to_string());
@@ -396,6 +429,15 @@ impl App {
                 return;
             }
         };
+        if self.batch_is_stale() && self.stale_action.is_none() {
+            self.stale_action = Some(StaleAction::Export);
+            self.confirm = Some(Confirm {
+                title: "Stale suggestions".to_string(),
+                message: "Configuration changed since scan. Proceed anyway? (y) or cancel (n). Press r to rescan.".to_string(),
+                yes: ConfirmAction::ProceedStale,
+            });
+            return;
+        }
         let ids = match self.ensure_selection().await {
             Ok(ids) => ids,
             Err(e) => {
@@ -573,6 +615,9 @@ impl App {
         self.frame += 1;
         if let Ok(sess) = self.client.session().await {
             self.state = str_field(&sess, "state");
+            self.config_hash = sess["config_hash"].as_str().map(str::to_string);
+            self.batch_config_hash = sess["batch_config_hash"].as_str().map(str::to_string);
+            self.failure_reason = sess["failure"]["reason"].as_str().map(str::to_string);
         }
         match self.phase {
             Phase::Scan => {
@@ -583,14 +628,20 @@ impl App {
                     self.phase = Phase::Browse;
                 } else if self.state == "failed" {
                     self.phase = Phase::Browse;
-                    self.toast = Some("scan failed; no suggestions were generated".to_string());
+                    self.toast = Some(match &self.failure_reason {
+                        Some(reason) => format!("scan failed: {reason}"),
+                        None => "scan failed; no suggestions were generated".to_string(),
+                    });
                 }
             }
             Phase::Run => {
                 if self.state == "done" {
                     self.finish_run().await;
                 } else if self.state == "failed" {
-                    self.run.failed_message = Some("the run failed".to_string());
+                    self.run.failed_message = Some(match &self.failure_reason {
+                        Some(reason) => format!("run failed: {reason}"),
+                        None => "the run failed".to_string(),
+                    });
                     self.phase = Phase::Report;
                 }
             }
@@ -606,6 +657,17 @@ impl App {
             }
         }
         self.phase = Phase::Report;
+    }
+
+    async fn open_config(&mut self) {
+        match self.client.config().await {
+            Ok(config) => {
+                self.config_doc = Some(config);
+                self.config_scroll = 0;
+                self.phase = Phase::Config;
+            }
+            Err(e) => self.toast = Some(format!("cannot read config: {e}")),
+        }
     }
 
     async fn report_done(&mut self) {
@@ -660,6 +722,16 @@ impl App {
             Phase::Report => {
                 self.report_done().await;
             }
+            Phase::Config => match key.code {
+                KeyCode::Up => self.config_scroll = self.config_scroll.saturating_sub(1),
+                KeyCode::Down => self.config_scroll = self.config_scroll.saturating_add(1),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => self.phase = Phase::Browse,
+                KeyCode::Char('C') => match self.client.cache_clear().await {
+                    Ok(()) => self.toast = Some("cache cleared".to_string()),
+                    Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
+                },
+                _ => {}
+            },
         }
     }
 
@@ -754,6 +826,7 @@ impl App {
                     });
                 }
             }
+            KeyCode::Char('g') => self.open_config().await,
             KeyCode::Char('n') => {
                 self.prompt = Some(Prompt {
                     title: self.scan_prompt_title(),
@@ -798,6 +871,18 @@ impl App {
                 ConfirmAction::Run => {
                     if let Err(e) = self.run_selected().await {
                         self.toast = Some(e);
+                    }
+                }
+                ConfirmAction::ProceedStale => {
+                    let action = self.stale_action.take();
+                    match action {
+                        Some(StaleAction::Run) => {
+                            if let Err(e) = self.run_selected().await { self.toast = Some(e); }
+                        }
+                        Some(StaleAction::Export) => {
+                            self.prompt = Some(Prompt { title: "Export path (absolute; no ~ or $)".to_string(), kind: PromptKind::ExportPath, value: String::new(), cursor: 0 });
+                        }
+                        None => {}
                     }
                 }
             },
@@ -903,6 +988,7 @@ impl App {
             Phase::Browse => self.draw_browse(f),
             Phase::Run => self.draw_run(f),
             Phase::Report => self.draw_report(f),
+            Phase::Config => self.draw_config(f),
         }
         if let Some(p) = &self.prompt {
             self.draw_prompt(f, p);
@@ -1137,9 +1223,25 @@ impl App {
         );
     }
 
+    fn draw_config(&self, f: &mut Frame) {
+        let area = f.area();
+        let text = self.config_doc.as_ref()
+            .and_then(|v| serde_json::to_string_pretty(v).ok())
+            .unwrap_or_else(|| "configuration unavailable".to_string());
+        let mut lines: Vec<Line> = text.lines().map(|line| Line::from(line.to_string())).collect();
+        lines.push(Line::from(""));
+        lines.push(Line::from("Up/Down scroll  C clear cache  Esc/q/c return to suggestions"));
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block("Configuration (read-only)"))
+                .scroll((self.config_scroll, 0)),
+            area,
+        );
+    }
+
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  e export  n scan  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  e export  n scan  g config  ? help  q quit",
         )];
         if let Some(t) = &self.toast {
             lines.push(Line::from(vec![Span::styled(
