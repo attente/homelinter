@@ -269,6 +269,20 @@ fn build_move_suggestion(
     )))
 }
 
+/// Format embedded GPS coordinates as a stable, filesystem-safe decimal
+/// degree fallback when no reverse-geocoded location is available.
+/// Six fractional digits gives roughly meter-scale precision while avoiding
+/// noisy path names from provider-specific coordinate formatting.
+fn coordinate_fallback(latitude: Option<f64>, longitude: Option<f64>) -> Option<String> {
+    let (Some(latitude), Some(longitude)) = (latitude, longitude) else {
+        return None;
+    };
+    if !latitude.is_finite() || !longitude.is_finite() {
+        return None;
+    }
+    Some(format!("{latitude:.6},{longitude:.6}"))
+}
+
 fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     let (stem, ext) = split_name(&f.path);
     let (year, year2, month, day, hour, minute, second) = match f.extracted_date {
@@ -294,7 +308,10 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         second,
         title: Some(title),
         author: f.embedded_author.clone(),
-        location: f.location.clone(),
+        location: f
+            .location
+            .clone()
+            .or_else(|| coordinate_fallback(f.latitude, f.longitude)),
         subject: f.subject.clone(),
         camera: f.camera_model.clone(),
         remote_host: None,
@@ -515,6 +532,14 @@ pub fn relative_to(from: &Path, to: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinate_fallback_uses_decimal_degrees() {
+        assert_eq!(coordinate_fallback(Some(48.8566), Some(2.3522)), Some("48.856600,2.352200".into()));
+        assert_eq!(coordinate_fallback(Some(-0.5), Some(-73.25)), Some("-0.500000,-73.250000".into()));
+        assert_eq!(coordinate_fallback(Some(f64::NAN), Some(2.0)), None);
+        assert_eq!(coordinate_fallback(Some(1.0), None), None);
+    }
 
     #[test]
     fn relative_paths() {
