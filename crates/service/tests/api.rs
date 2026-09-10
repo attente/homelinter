@@ -807,7 +807,7 @@ async fn spa_serves_index_with_csp() {
         .contains("text/html"));
     assert_eq!(
         headers.get("content-security-policy").unwrap().to_str().unwrap(),
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'self' https://www.openstreetmap.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     );
     assert_eq!(
         headers.get("cache-control").unwrap().to_str().unwrap(),

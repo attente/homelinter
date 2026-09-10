@@ -257,6 +257,38 @@ fn build_move_suggestion(
     if let Some(p) = f.page_count {
         metadata.insert("page_count".into(), serde_json::Value::from(p));
     }
+    // Location / EXIF facts surfaced for the SPA detail pane (preview,
+    // location-with-map, and metadata tabs). Only inserted when present.
+    if let Some(loc) = &f.location {
+        metadata.insert(
+            "location".into(),
+            serde_json::Value::String(loc.clone()),
+        );
+    }
+    if let Some(lat) = f.latitude {
+        metadata.insert("latitude".into(), serde_json::Value::from(lat));
+    }
+    if let Some(lon) = f.longitude {
+        metadata.insert("longitude".into(), serde_json::Value::from(lon));
+    }
+    if let Some(cam) = &f.camera_model {
+        metadata.insert(
+            "camera".into(),
+            serde_json::Value::String(cam.clone()),
+        );
+    }
+    if let Some(t) = &f.embedded_title {
+        metadata.insert(
+            "title".into(),
+            serde_json::Value::String(t.clone()),
+        );
+    }
+    if let Some(a) = &f.embedded_author {
+        metadata.insert(
+            "author".into(),
+            serde_json::Value::String(a.clone()),
+        );
+    }
     let reason = format!("Moved to the {} destination.", f.kind.name());
     Ok(Some(Suggestion::new_move(
         f.kind,

@@ -150,6 +150,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/api/v1/session", get(session_get))
         .route("/api/v1/suggestions", get(suggestions_list))
         .route("/api/v1/suggestions/{id}", get(suggestion_get))
+        .route("/api/v1/suggestions/{id}/preview", get(suggestion_preview))
         .route("/api/v1/selection", get(selection_get).put(selection_put))
         .route("/api/v1/selection/add", post(selection_add))
         .route("/api/v1/selection/remove", post(selection_remove))
@@ -172,9 +173,12 @@ pub fn router(app: AppHandle) -> Router {
 // ---------------------------------------------------------------------------
 
 /// Strict Content-Security-Policy for the served SPA: same-origin only, no
-/// inline scripts/styles, no eval, no external origins.
+/// inline scripts/styles, no eval. One external origin is allowed: the
+/// OpenStreetMap embed iframe used by the suggestion detail pane's map
+/// preview (`frame-src`); the framed page governs its own subresources.
 const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
 img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; \
+frame-src 'self' https://www.openstreetmap.org; \
 base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Content types for the file extensions the Vite build can emit.
@@ -529,6 +533,67 @@ async fn suggestion_get(State(app): State<AppHandle>, AxumPath(id): AxumPath<Str
             ErrorCode::NotFound,
             format!("no suggestion with id {id}"),
         )),
+    }
+}
+
+/// Serve a safe, inline preview for file types browsers can render directly.
+/// The target is taken from the in-memory suggestion rather than from a path
+/// supplied by the client, and only a small allowlist of media/document types
+/// is exposed.
+async fn suggestion_preview(
+    State(app): State<AppHandle>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult {
+    let target = {
+        let sess = app.session.lock().await;
+        sess.suggestion_by_id(&id).map(|s| s.target.clone())
+    };
+    let Some(target) = target else {
+        return Err(err(
+            ErrorCode::NotFound,
+            format!("no suggestion with id {id}"),
+        ));
+    };
+    let path = PathBuf::from(&target);
+    let Some(content_type) = preview_content_type(&path) else {
+        return Err(err(
+            ErrorCode::NotFound,
+            "no browser preview is available for this file type",
+        ));
+    };
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| err(ErrorCode::NotFound, "preview file is not available"))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static(content_type),
+    );
+    headers.insert(
+        HeaderName::from_static("content-disposition"),
+        HeaderValue::from_static("inline"),
+    );
+    Ok((headers, Body::from(data)).into_response())
+}
+
+fn preview_content_type(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str())?.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "avif" => Some("image/avif"),
+        "svg" => Some("image/svg+xml"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "ogg" | "oga" => Some("audio/ogg"),
+        "m4a" => Some("audio/mp4"),
+        "pdf" => Some("application/pdf"),
+        "txt" | "md" | "csv" | "log" => Some("text/plain; charset=utf-8"),
+        _ => None,
     }
 }
 

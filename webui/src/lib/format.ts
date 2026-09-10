@@ -42,6 +42,11 @@ export function rowLabel(s: Suggestion): string {
   return `${marker} ${action}${status}${pending}${rejected}`;
 }
 
+/** rowLabel without the leading selection marker, for use next to a real checkbox. */
+export function rowText(s: Suggestion): string {
+  return rowLabel(s).slice(4);
+}
+
 /** Keep the head of a string, truncating the tail when too long. */
 export function head(s: string, max: number): string {
   if (s.length <= max) return s;
