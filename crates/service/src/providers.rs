@@ -904,6 +904,18 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             trial.location = m.location.clone().or(trial.location);
             trial.subject = m.subject.clone().or(trial.subject);
         }
+        // A description provider failure should degrade to the stable source
+        // filename stem rather than the generic `unknown` placeholder. This
+        // keeps `%s` useful without pretending that the provider produced a
+        // description.
+        if job.kind == ProviderKind::Description && value.is_none() {
+            trial.subject = f
+                .path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .filter(|stem| !stem.is_empty())
+                .or(trial.subject);
+        }
         let fmt = ctx.formats.get(&trial.kind);
         let rebuilt = rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks);
         (Suggestion::id_for_target(&f.path), rebuilt)
@@ -1886,12 +1898,15 @@ mod tests {
         );
     }
 
+    /// A provider failure clears pending and uses the original filename stem
+    /// as the `%s` fallback instead of `unknown`.
     #[tokio::test]
-    async fn failed_provider_clears_pending_keeps_fallback() {
-        let (app, epoch) = primed_app().await;
-        let job = geocode_job(&app, 1, epoch).await;
+    async fn failed_provider_clears_pending_uses_filename_stem() {
+        let (app, epoch) = primed_app_with_format("Pictures/%Y/%s/%f").await;
+        let mut job = geocode_job(&app, 1, epoch).await;
+        job.kind = ProviderKind::Description;
         // The provider failed: the suggestion stays published with its
-        // fallback path and is no longer pending.
+        // filename-stem fallback and is no longer pending.
         let resolved = resolve_provider_job(&app, &job, None).await;
         assert!(resolved);
         let sess = app.session.lock().await;
@@ -1899,8 +1914,7 @@ mod tests {
         assert!(sess.suggestions[0]
             .new_path
             .as_deref()
-            .unwrap()
-            .contains("unknown"));
+            .is_some_and(|p| p.contains("IMG_0001")));
     }
 
     #[test]
