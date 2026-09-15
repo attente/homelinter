@@ -22,6 +22,7 @@ type TabId = 'preview' | 'location' | 'metadata';
 interface BrowseProps {
   suggestions: Suggestion[];
   actionsDisabled?: boolean;
+  root?: string | null;
   onToggle: (id: string, select: boolean) => void;
   onSelectMany: (ids: string[]) => void;
   onClearSelection: () => void;
@@ -216,7 +217,7 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
 }
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, actionsDisabled, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
+  const { suggestions, actionsDisabled, root, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
   const [filter, setFilter] = useState<Filter>(ALL_FILTER);
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -303,7 +304,7 @@ export function Browse(props: BrowseProps) {
                   className="row-hit"
                   onClick={() => setOpenId(s.id)}
                 >
-                  {rowText(s)}
+                  {rowText(s, root)}
                 </button>
               </li>
             ))}

@@ -1109,7 +1109,10 @@ impl App {
             .filter_map(|&i| self.rows.get(i))
             .collect();
 
-        let items: Vec<ListItem> = shown.iter().map(|r| ListItem::new(row_label(r))).collect();
+        let items: Vec<ListItem> = shown
+            .iter()
+            .map(|r| ListItem::new(row_label(r, &self.root)))
+            .collect();
         let title = format!(" Suggestions ({n} matching) ");
         let list = List::new(items)
             .block(Block::bordered().title(title))
@@ -1343,13 +1346,13 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// One-line label for the suggestions list, ASCII only.
-fn row_label(r: &Row) -> Line<'static> {
+fn row_label(r: &Row, root: &str) -> Line<'static> {
     let marker = if r.selected { "[x]" } else { "[ ]" };
-    let name = tail(&r.target, 3);
+    let name = path_label(&r.target, root);
     let dest = if r.new_path.is_empty() {
         "delete".to_string()
     } else {
-        tail(&r.new_path, 3)
+        path_label(&r.new_path, root)
     };
     let status = if r.status == "pending" {
         String::new()
@@ -1378,18 +1381,34 @@ fn row_label(r: &Row) -> Line<'static> {
     Line::from(Span::styled(text, Style::new().fg(color)))
 }
 
-/// The last `n` path segments joined by '/', or the whole path when shorter.
-fn tail(path: &str, n: usize) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
+/// A path as shown in a suggestion row: made relative to the scan root when
+/// it lives under it, kept verbatim up to three segments, and truncated to
+/// the last three segments with an ellipsis prefix beyond that. Paths
+/// outside the scan root (e.g. a destination resolved elsewhere under
+/// $HOME) fall back to the absolute path under the same truncation rule.
+fn path_label(path: &str, root: &str) -> String {
+    let rel = relative_to_scan_root(path, root);
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= 3 {
+        return rel.to_string();
+    }
+    let last = &parts[parts.len() - 3..];
+    format!(".../{}", last.join("/"))
+}
+
+/// Strip the scan root prefix when `path` is under it; else the path as-is.
+fn relative_to_scan_root(path: &str, root: &str) -> String {
+    let base = root.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        return path.to_string();
+    }
+    if path == base {
         return "/".to_string();
     }
-    let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.len() <= n {
-        return format!("/{}", parts.join("/"));
+    if let Some(rest) = path.strip_prefix(&format!("{base}/")) {
+        return rest.to_string();
     }
-    let last = &parts[parts.len() - n..];
-    format!("/{}", last.join("/"))
+    path.to_string()
 }
 
 fn detail_text(r: &Row) -> Text<'static> {
@@ -1632,10 +1651,24 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_last_segments() {
-        assert_eq!(tail("/a/b/c/d.jpg", 2), "/c/d.jpg");
-        assert_eq!(tail("/a/b.jpg", 3), "/a/b.jpg");
-        assert_eq!(tail("/", 3), "/");
+    fn path_label_is_scan_root_relative_and_ellipsis_truncated() {
+        let root = "/home/a";
+        assert_eq!(path_label("/home/a/IMG_1.jpg", root), "IMG_1.jpg");
+        assert_eq!(path_label("/home/a/raw/IMG_1.jpg", root), "raw/IMG_1.jpg");
+        assert_eq!(
+            path_label("/home/a/Pictures/2024/IMG_1.jpg", root),
+            "Pictures/2024/IMG_1.jpg"
+        );
+        assert_eq!(
+            path_label("/home/a/Pictures/2024/03/IMG_1.jpg", root),
+            ".../2024/03/IMG_1.jpg"
+        );
+        assert_eq!(path_label("/home/a", root), "/");
+        assert_eq!(path_label("/other/x.jpg", root), "/other/x.jpg");
+        assert_eq!(
+            path_label("/home/a/Pictures/2024/IMG_1.jpg", ""),
+            ".../Pictures/2024/IMG_1.jpg"
+        );
     }
 
     #[test]
@@ -1649,12 +1682,13 @@ mod tests {
     #[test]
     fn row_label_is_ascii_and_marks_selection() {
         let r = sample_row();
-        let label = row_label(&r).to_string();
+        let label = row_label(&r, "/home/a").to_string();
         assert!(label.starts_with("[ ]"));
+        assert!(label.contains("IMG_1.jpg -> Pictures/2024/IMG_1.jpg"));
         assert!(!label.contains('\u{2192}'));
         let mut sel = r.clone();
         sel.selected = true;
-        assert!(row_label(&sel).to_string().starts_with("[x]"));
+        assert!(row_label(&sel, "/home/a").to_string().starts_with("[x]"));
     }
 
     #[test]

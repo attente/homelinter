@@ -3,15 +3,35 @@
 
 import type { ReportEntry, Suggestion } from '../types';
 
-/** The last `n` path segments joined by '/', or the whole path when shorter. */
-export function tail(path: string, n: number): string {
-  const trimmed = path.trimEnd();
-  if (!trimmed) return '/';
-  const parts = trimmed.split('/').filter((p) => p.length > 0);
-  if (parts.length <= n) {
-    return `/${parts.join('/')}`;
+/**
+ * A path as shown in a suggestion row: made relative to the scan root when
+ * it lives under it, kept verbatim up to three segments, and truncated to
+ * the last three segments with an ellipsis prefix beyond that. Paths
+ * outside the scan root (e.g. a destination resolved elsewhere under
+ * $HOME) fall back to the absolute path under the same truncation rule.
+ */
+export function pathLabel(path: string, root?: string | null): string {
+  const rel = relativeToScanRoot(path, root);
+  const parts = rel.split('/').filter((p) => p.length > 0);
+  if (parts.length <= 3) {
+    return rel;
   }
-  return `/${parts.slice(parts.length - n).join('/')}`;
+  return `.../${parts.slice(parts.length - 3).join('/')}`;
+}
+
+/** Strip the scan root prefix when `path` is under it; else the path as-is. */
+function relativeToScanRoot(path: string, root?: string | null): string {
+  const base = root?.trimEnd().replace(/\/+$/, '');
+  if (!base || base === '/') {
+    return path;
+  }
+  if (path === base) {
+    return '/';
+  }
+  if (path.startsWith(`${base}/`)) {
+    return path.slice(base.length + 1);
+  }
+  return path;
 }
 
 /** Elide the middle of a long string, keeping a short tail. */
@@ -21,17 +41,17 @@ export function shorten(s: string, max: number): string {
   return `...${s.slice(s.length - keep)}`;
 }
 
-export function rowLabel(s: Suggestion): string {
+export function rowLabel(s: Suggestion, root?: string | null): string {
   const marker = s.selected ? '[x]' : '[ ]';
-  const name = tail(s.target, 3);
+  const name = pathLabel(s.target, root);
   let action: string;
   if (s.type === 'delete') {
     const dupOf = s.metadata?.duplicate_of;
     action = typeof dupOf === 'string' && dupOf.length > 0
-      ? `delete ${name}, duplicate of ${tail(dupOf, 3)}`
+      ? `delete ${name}, duplicate of ${pathLabel(dupOf, root)}`
       : `delete ${name}`;
   } else {
-    const dest = s.new_path ? tail(s.new_path, 3) : '?';
+    const dest = s.new_path ? pathLabel(s.new_path, root) : '?';
     action = `move ${name} to ${dest}`;
   }
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
@@ -43,8 +63,8 @@ export function rowLabel(s: Suggestion): string {
 }
 
 /** rowLabel without the leading selection marker, for use next to a real checkbox. */
-export function rowText(s: Suggestion): string {
-  return rowLabel(s).slice(4);
+export function rowText(s: Suggestion, root?: string | null): string {
+  return rowLabel(s, root).slice(4);
 }
 
 /** Keep the head of a string, truncating the tail when too long. */

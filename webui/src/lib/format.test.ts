@@ -12,9 +12,9 @@ import {
   countsOf,
   countsSummary,
   entryLine,
+  pathLabel,
   rowLabel,
   shorten,
-  tail,
 } from './format';
 import type { ReportEntry, Suggestion } from '../types';
 
@@ -64,11 +64,16 @@ describe('filter', () => {
 });
 
 describe('format', () => {
-  it('tails keep the last segments', () => {
-    expect(tail('/a/b/c/d.jpg', 2)).toBe('/c/d.jpg');
-    expect(tail('/a/b.jpg', 3)).toBe('/a/b.jpg');
-    expect(tail('/', 3)).toBe('/');
-    expect(tail('', 1)).toBe('/');
+  it('path labels are scan-root relative, verbatim to three segments', () => {
+    const root = '/home/a';
+    expect(pathLabel('/home/a/IMG_1.jpg', root)).toBe('IMG_1.jpg');
+    expect(pathLabel('/home/a/raw/IMG_1.jpg', root)).toBe('raw/IMG_1.jpg');
+    expect(pathLabel('/home/a/Pictures/2024/IMG_1.jpg', root)).toBe('Pictures/2024/IMG_1.jpg');
+    expect(pathLabel('/home/a/Pictures/2024/03/IMG_1.jpg', root)).toBe('.../2024/03/IMG_1.jpg');
+    expect(pathLabel('/home/a', root)).toBe('/');
+    expect(pathLabel('/other/x.jpg', root)).toBe('/other/x.jpg');
+    expect(pathLabel('/home/a/1/2/3/4.jpg', root)).toBe('.../2/3/4.jpg');
+    expect(pathLabel('/home/a/Pictures/2024/IMG_1.jpg')).toBe('.../Pictures/2024/IMG_1.jpg');
   });
 
 
@@ -82,19 +87,20 @@ describe('format', () => {
 
 
   it('row label is ascii, marks selection, and reads move/delete', () => {
-    const label = rowLabel(sampleSuggestion());
+    const root = '/home/a';
+    const label = rowLabel(sampleSuggestion(), root);
     expect(label.startsWith('[ ]')).toBe(true);
-    expect(label).toContain('move /home/a/IMG_1.jpg to /Pictures/2024/IMG_1.jpg');
-    const sel = rowLabel(sampleSuggestion({ selected: true }));
+    expect(label).toContain('move IMG_1.jpg to Pictures/2024/IMG_1.jpg');
+    const sel = rowLabel(sampleSuggestion({ selected: true }), root);
     expect(sel.startsWith('[x]')).toBe(true);
     const del = rowLabel(sampleSuggestion({
       type: 'delete',
       new_path: null,
       metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
-    }));
-    expect(del).toContain('delete /home/a/IMG_1.jpg, duplicate of /a/keeper/IMG_1.jpg');
-    const delNoMeta = rowLabel(sampleSuggestion({ type: 'delete', new_path: null }));
-    expect(delNoMeta).toContain('delete /home/a/IMG_1.jpg');
+    }), root);
+    expect(del).toContain('delete IMG_1.jpg, duplicate of keeper/IMG_1.jpg');
+    const delNoMeta = rowLabel(sampleSuggestion({ type: 'delete', new_path: null }), root);
+    expect(delNoMeta).toContain('delete IMG_1.jpg');
     expect(delNoMeta).not.toContain('duplicate of');
     expect(asciiOnly(label)).toBe(true);
   });

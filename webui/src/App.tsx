@@ -583,6 +583,7 @@ export default function App() {
         <Browse
           suggestions={st.suggestions}
           actionsDisabled={!canAct}
+          root={st.session?.scan_root ?? null}
           onToggle={(id, sel) => void toggle(id, sel)}
           onSelectMany={(ids) => void selectMany(ids)}
           onClearSelection={clearSelection}
