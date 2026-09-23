@@ -66,14 +66,16 @@ impl AssetKind {
     }
 
     /// The opinionated default destination format string for the kind.
-    /// These preserve the original filename via `%f`.
+    /// Media and document kinds name the target from metadata; `%e` keeps
+    /// the original extension. Archive/data/executable/other preserve the
+    /// original filename via `%f`.
     pub fn default_format(self) -> &'static str {
         match self {
-            AssetKind::Document => "Documents/%f",
-            AssetKind::Photo => "Pictures/%Y/%m/%f",
-            AssetKind::Video => "Videos/%Y/%m/%f",
-            AssetKind::Audio => "Music/%f",
-            AssetKind::Repository => "Projects/%f",
+            AssetKind::Document => "Documents/%a-%t.%e",
+            AssetKind::Photo => "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
+            AssetKind::Video => "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
+            AssetKind::Audio => "Audio/%a-%t.%e",
+            AssetKind::Repository => "Projects/%o/%n",
             AssetKind::Archive => "Archives/%f",
             AssetKind::Data => "Data/%f",
             AssetKind::Executable => "bin/%f",
@@ -250,9 +252,12 @@ mod tests {
     }
 
     #[test]
-    fn default_formats_preserve_name() {
+    fn default_formats_parse() {
         for k in AssetKind::ALL {
-            assert!(k.default_format().contains("%f"));
+            let raw = k.default_format();
+            let parsed = crate::format::FormatString::parse(raw)
+                .unwrap_or_else(|e| panic!("default format for {} is invalid: {e}", k.name()));
+            assert!(!parsed.segments().is_empty());
         }
     }
 }

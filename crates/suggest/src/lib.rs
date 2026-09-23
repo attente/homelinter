@@ -79,7 +79,11 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
             Ok(c) => c,
             Err(_) => continue,
         };
-        let values = repo_values(&repo.root, meta.remote_host.clone());
+        let values = repo_values(
+            &repo.root,
+            meta.remote_host.clone(),
+            meta.remote_owner.clone(),
+        );
         let fmt = input
             .formats
             .get(&AssetKind::Repository)
@@ -331,9 +335,10 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
             .location
             .clone()
             .or_else(|| coordinate_fallback(f.latitude, f.longitude)),
-        subject: f.subject.clone(),
+        subject: f.subject.clone().or_else(|| Some(stem.clone())),
         camera: f.camera_model.clone(),
         remote_host: None,
+        remote_owner: None,
         file_name: Some(
             f.path
                 .file_name()
@@ -346,7 +351,11 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     }
 }
 
-fn repo_values(root: &Path, remote_host: Option<String>) -> PlaceholderValues {
+fn repo_values(
+    root: &Path,
+    remote_host: Option<String>,
+    remote_owner: Option<String>,
+) -> PlaceholderValues {
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -357,6 +366,7 @@ fn repo_values(root: &Path, remote_host: Option<String>) -> PlaceholderValues {
         file_name: Some(name.clone()),
         stem: Some(name),
         remote_host,
+        remote_owner,
         ..Default::default()
     }
 }

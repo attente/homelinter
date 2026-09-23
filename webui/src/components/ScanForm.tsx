@@ -14,11 +14,11 @@ export interface ScanFormValues {
 // defaults double as input placeholders. Empty input = use the configured
 // (or built-in) default for that kind.
 const KINDS: Array<[string, string]> = [
-  ["document", "Documents/%f"],
-  ["photo", "Pictures/%Y/%m/%f"],
-  ["video", "Videos/%Y/%m/%f"],
-  ["audio", "Music/%f"],
-  ["repository", "Projects/%f"],
+  ["document", "Documents/%a-%t.%e"],
+  ["photo", "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
+  ["video", "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
+  ["audio", "Audio/%a-%t.%e"],
+  ["repository", "Projects/%o/%n"],
   ["archive", "Archives/%f"],
   ["data", "Data/%f"],
   ["executable", "bin/%f"],

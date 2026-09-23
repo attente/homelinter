@@ -536,7 +536,10 @@ async fn config_put_null_deletes_and_get_reports_defaults() {
     // GET /config carries the built-in target-path defaults and the
     // geocoder contact field.
     let (_, v) = request(&app, "GET", "/api/v1/config", None).await;
-    assert_eq!(v["target_path_defaults"]["photo"], "Pictures/%Y/%m/%f");
+    assert_eq!(
+        v["target_path_defaults"]["photo"],
+        "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
+    );
     assert_eq!(v["target_path_defaults"]["other"], "Other/%f");
     assert_eq!(v["geocoder"]["user_agent_contact"], serde_json::Value::Null);
 
@@ -569,7 +572,10 @@ async fn config_put_null_deletes_and_get_reports_defaults() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["geocoder"]["language"], serde_json::Value::Null);
     assert!(v["target_paths"].get("photo").is_none());
-    assert_eq!(v["target_path_defaults"]["photo"], "Pictures/%Y/%m/%f");
+    assert_eq!(
+        v["target_path_defaults"]["photo"],
+        "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -18,6 +18,7 @@ use quick_xml::Reader;
 pub struct RepoMeta {
     pub remote_url: Option<String>,
     pub remote_host: Option<String>,
+    pub remote_owner: Option<String>,
     pub default_branch: Option<String>,
     pub commit_count: Option<u64>,
     pub last_activity: Option<SystemTime>,
@@ -58,6 +59,7 @@ impl<'a> RepoAnalyzer<'a> {
         });
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
             remote_url,
             default_branch,
             commit_count,
@@ -92,6 +94,7 @@ impl<'a> RepoAnalyzer<'a> {
         .and_then(|s| parse_hgdate(&s));
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
             remote_url,
             default_branch,
             commit_count,
@@ -119,6 +122,7 @@ impl<'a> RepoAnalyzer<'a> {
         let last_activity = info.last_changed_date.and_then(|s| parse_iso_date(&s));
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
+            remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
             remote_url,
             default_branch,
             commit_count: None,
@@ -189,6 +193,34 @@ fn parse_host(url: &str) -> Option<String> {
             .map(str::to_string);
     }
     None
+}
+
+/// Extract the owner/username from common remote URL forms: the first path
+/// segment after the host. `git@github.com:owner/repo.git` -> `owner`,
+/// `https://gitlab.com/owner/repo` -> `owner`. URLs without an owner
+/// segment (e.g. `file:///srv/repo`) yield `None`.
+fn parse_owner(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.starts_with("file://") {
+        return None;
+    }
+    let path = if let Some(rest) = url.strip_prefix("git@") {
+        rest.split_once(':').map(|(_, p)| p)
+    } else if let Some((_, rest)) = url.split_once("://") {
+        let after_user = rest.split('@').last().unwrap_or(rest);
+        after_user.split_once('/').map(|(_, p)| p)
+    } else if let Some((_, rest)) = url.split_once('@') {
+        rest.split_once(':').map(|(_, p)| p)
+    } else {
+        None
+    }?;
+    let owner = path.split('/').find(|s| !s.is_empty())?;
+    let owner = owner.strip_suffix(".git").unwrap_or(owner);
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
 }
 
 /// Mercurial `{date|hgdate}` prints "<unix seconds> <utc offset minutes>";
@@ -304,6 +336,25 @@ mod tests {
         );
         assert_eq!(parse_host("file:///srv/repo"), None);
         assert_eq!(parse_host("/srv/repo"), None);
+    }
+
+    #[test]
+    fn owner_parsing() {
+        assert_eq!(
+            parse_owner("https://github.com/foo/bar.git"),
+            Some("foo".into())
+        );
+        assert_eq!(
+            parse_owner("git@github.com:foo/bar.git"),
+            Some("foo".into())
+        );
+        assert_eq!(parse_owner("ssh://git@gitlab.com/x/y"), Some("x".into()));
+        assert_eq!(
+            parse_owner("https://user:pass@example.com/x"),
+            Some("x".into())
+        );
+        assert_eq!(parse_owner("file:///srv/repo"), None);
+        assert_eq!(parse_owner("/srv/repo"), None);
     }
 
     #[test]

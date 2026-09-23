@@ -27,6 +27,7 @@ pub enum Placeholder {
     Subject,      // %s
     Camera,       // %c
     RemoteHost,   // %h
+    RemoteOwner,  // %o
     AssetKind,    // %k
     FileName,     // %f
     FileNameNorm, // %F
@@ -50,6 +51,7 @@ impl Placeholder {
             's' => Placeholder::Subject,
             'c' => Placeholder::Camera,
             'h' => Placeholder::RemoteHost,
+            'o' => Placeholder::RemoteOwner,
             'k' => Placeholder::AssetKind,
             'f' => Placeholder::FileName,
             'F' => Placeholder::FileNameNorm,
@@ -74,6 +76,7 @@ impl Placeholder {
             Placeholder::Subject => 's',
             Placeholder::Camera => 'c',
             Placeholder::RemoteHost => 'h',
+            Placeholder::RemoteOwner => 'o',
             Placeholder::AssetKind => 'k',
             Placeholder::FileName => 'f',
             Placeholder::FileNameNorm => 'F',
@@ -313,6 +316,9 @@ pub struct PlaceholderValues {
     pub subject: Option<String>,
     pub camera: Option<String>,
     pub remote_host: Option<String>,
+    /// Repository remote URL owner/username: the first path segment after
+    /// the host in a remote URL (e.g. `github.com/<owner>/<repo>`).
+    pub remote_owner: Option<String>,
     /// Original filename including extension (`%f`), kept verbatim.
     pub file_name: Option<String>,
     /// Filename stem without the extension (`%n`), kept verbatim.
@@ -399,6 +405,10 @@ impl PlaceholderValues {
                 .as_deref()
                 .map(str::to_lowercase)
                 .unwrap_or_default(),
+            Placeholder::RemoteOwner => match self.remote_owner.as_deref() {
+                Some(v) if !v.trim().is_empty() => sanitize_metadata_segment(v),
+                _ => String::new(),
+            },
             Placeholder::AssetKind => self.asset_kind.name().to_string(),
             Placeholder::FileName => self.file_name.clone().unwrap_or_default(),
             Placeholder::FileNameNorm => {
@@ -521,6 +531,7 @@ mod tests {
             subject: None,
             camera: None,
             remote_host: None,
+            remote_owner: None,
             file_name: Some("IMG_0001.jpg".into()),
             stem: Some("IMG_0001".into()),
             extension: Some("jpg".into()),
@@ -596,5 +607,20 @@ mod tests {
         assert!(fs.resolve(&v, home).unwrap().is_none());
         v.extension = Some("jpg".into());
         assert!(fs.resolve(&v, home).unwrap().is_some());
+    }
+
+    #[test]
+    fn remote_owner_segment_optional() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Projects/%o/%n").unwrap();
+        let mut v = vals();
+        v.stem = Some("homelinter".into());
+        v.remote_owner = Some("William".into());
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Projects/william/homelinter"));
+        // With no remote, the owner segment is omitted (no `unknown`).
+        v.remote_owner = None;
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Projects/homelinter"));
     }
 }
