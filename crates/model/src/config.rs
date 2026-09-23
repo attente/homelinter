@@ -19,6 +19,21 @@ use crate::format::FormatString;
 
 pub const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 104_857_600;
 pub const DEFAULT_MAX_WORDS: u64 = 8;
+/// Default description prompt template; `{words}` is substituted before the
+/// request, and the full source path plus any extracted document text are
+/// appended verbatim after it (description providers always receive the
+/// path, which carries the filename, so neither needs a placeholder). The
+/// wording asks for keywords/tags rather than a sentence, because the `%s`
+/// value is normalized into a lowercased, hyphenated path segment for a
+/// file stem or folder name.
+pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Reply with only the keywords separated by spaces.";
+/// Default location-summary prompt template; `{words}` is substituted
+/// before the request, and the reverse-geocoded address is appended
+/// verbatim after it (location summaries always receive the address, so
+/// it needs no placeholder). The wording asks for a compact place name
+/// rather than a sentence, because the summary is normalized into a
+/// lowercased, hyphenated path segment for a file stem or folder name.
+pub const DEFAULT_LOCATION_PROMPT: &str = "Summarize this location into at most {words} words, for use as a file or folder name. Reply with only the place name.";
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
@@ -176,11 +191,26 @@ pub struct GeocoderConfig {
     /// `0` (the default) means no additional delay.
     #[serde(default)]
     pub rate_limit_ms: Option<u64>,
+    /// Prompt template for location summaries, used when summarization is
+    /// enabled (`max_words > 0`). `{location}` carries the full
+    /// reverse-geocoded address and `{words}`the effective word budget;
+    /// unknown placeholders are rejected at config time. Unset uses the
+    /// built-in template, keeping the wording identical to before this
+    /// key existed.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 impl GeocoderConfig {
     pub fn geocoder_service(&self) -> GeocoderService {
         self.service.unwrap_or(GeocoderService::Nominatim)
+    }
+
+    /// The effective location-summary prompt template (default when unset).
+    pub fn summary_prompt(&self) -> String {
+        self.prompt
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LOCATION_PROMPT.to_string())
     }
 }
 
@@ -203,7 +233,16 @@ pub struct DescriptionProvider {
     pub api_key: Option<String>,
     #[serde(default)]
     pub max_words: Option<u64>,
-    /// Longest side in pixels allowed for a photo sent to a vision backend.
+    /// Prompt template for description requests. Placeholders: `{name}`
+    /// (file name), `{path}` (full source path), and `{words}` (the
+    /// effective word budget). Extracted document text is appended verbatim
+    /// after the rendered template when an extractor produced it, so it needs
+    /// no placeholder and always reaches the provider for text documents.
+    /// Unknown placeholders are rejected at config time; `{{` and `}}`
+    /// escape literal braces. Unset inherits the base entry, then the
+    /// built-in template (wording identical to before this key existed).
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Larger photos are downscaled (preserving aspect ratio) before the
     /// request so the model processes far fewer image tokens; the value
     /// joins the cache key and the vision settings hash. `0` disables the
@@ -231,6 +270,7 @@ pub struct EffectiveDescription {
     pub max_words: u64,
     pub max_image_dimension: u64,
     pub rate_limit_ms: u64,
+    pub prompt: String,
 }
 
 impl DescriptionProvider {
@@ -252,6 +292,11 @@ impl DescriptionProvider {
                 .or(base.max_image_dimension)
                 .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION),
             rate_limit_ms: self.rate_limit_ms.or(base.rate_limit_ms).unwrap_or(0),
+            prompt: self
+                .prompt
+                .clone()
+                .or_else(|| base.prompt.clone())
+                .unwrap_or_else(|| DEFAULT_DESCRIPTION_PROMPT.to_string()),
         }
     }
 }
@@ -717,6 +762,17 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
     // description: per-modality key names are structural (an unknown key can
     // never become valid); every other provider rule degrades at runtime
     // and is reported as a warning instead.
+    // prompt templates are validated structurally: an unsupported
+    // placeholder can never become valid, so it stays a hard error like
+    // the document_extraction placeholder rule.
+    if let Some(t) = raw.geocoder.prompt.as_deref() {
+        if let Some(bad) = crate::prompt::prompt_template_error(t, &["words"]) {
+            fields.push((
+                "geocoder.prompt".into(),
+                format!("unsupported placeholder {bad} in prompt template (supported: {{words}}; the address is always appended, so {{location}} is not a placeholder; escape literal braces by doubling them)"),
+            ));
+        }
+    }
     let desc = &raw.description;
     asset_kind::validate_per_modality_description_keys(
         desc.per_modality
@@ -752,6 +808,16 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             fields.push((
                 format!("{prefix}.max_words"),
                 "max_words must be positive".into(),
+            ));
+        }
+        // `{path}` and `{name}` are intentionally not placeholders: the
+        // full source path (which carries the filename) is always appended
+        // after the rendered template, so a custom prompt cannot omit it and
+        // only the word budget is template-driven.
+        if let Some(bad) = crate::prompt::prompt_template_error(&eff.prompt, &["words"]) {
+            fields.push((
+                format!("{prefix}.prompt"),
+                format!("unsupported placeholder {bad} in prompt template (supported: {{words}}; the path is always appended, so {{name}} and {{path}} are not placeholders; escape literal braces by doubling them)"),
             ));
         }
     }
@@ -1143,6 +1209,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             "user_agent_contact": raw.geocoder.user_agent_contact,
             "max_words": raw.geocoder.max_words,
             "rate_limit_ms": raw.geocoder.rate_limit_ms,
+            "prompt": raw.geocoder.summary_prompt(),
         }),
     );
     let mut desc = serde_json::Map::new();
@@ -1168,6 +1235,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         serde_json::to_value(&base_eff.model).unwrap_or(JsonValue::Null),
     );
     desc.insert("max_words".into(), JsonValue::from(base_eff.max_words));
+    desc.insert("prompt".into(), JsonValue::from(base_eff.prompt.clone()));
     desc.insert(
         "max_image_dimension".into(),
         JsonValue::from(base_eff.max_image_dimension),
@@ -1186,6 +1254,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "endpoint": eff.endpoint.clone().unwrap_or_else(|| eff.service.default_endpoint().into()),
                 "model": eff.model,
                 "max_words": eff.max_words,
+                "prompt": eff.prompt,
                 "max_image_dimension": eff.max_image_dimension,
                 "rate_limit_ms": eff.rate_limit_ms,
             }),
@@ -1310,6 +1379,52 @@ mod tests {
         assert!(err.is_err());
         let ok = parse("[description.image]\nenabled = true\nmodel = \"m\"\n");
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn prompt_templates_validate_and_default() {
+        // Unknown placeholders are hard errors, per provider entry and per
+        // override; known ones and literal-brace escapes pass.
+        let err = parse(
+            "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Describe {nme} with {words}\"\n"
+        );
+        assert!(err.is_err());
+        // `{name}` and `{path}` are not placeholders: the full source path
+        // (which carries the filename) is always forwarded verbatim after the
+        // rendered template, so referencing either is a hard error rather
+        // than a no-op.
+        let err = parse(
+            "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Describe {name} at {path}\"\n"
+        );
+        assert!(err.is_err());
+        let ok = parse(
+            "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Describe with {words}, literal {{braces}}\"\n"
+        );
+        assert!(ok.is_ok());
+        let err = parse("[geocoder]\nenabled = true\nprompt = \"At {wat}\"\n");
+        assert!(err.is_err());
+        // `{location}` is not a placeholder: the address is always appended.
+        let err = parse("[geocoder]\nenabled = true\nprompt = \"At {location}\"\n");
+        assert!(err.is_err());
+        let ok = parse("[geocoder]\nenabled = true\nprompt = \"At {words}\"\n");
+        assert!(ok.is_ok());
+
+        // Unset resolves to the built-in templates (the default wording). An
+        // override inherits the base entry's prompt when it sets none.
+        let rc = parse("").unwrap();
+        assert_eq!(
+            rc.description.base_effective().prompt,
+            DEFAULT_DESCRIPTION_PROMPT
+        );
+        assert_eq!(rc.geocoder.summary_prompt(), DEFAULT_LOCATION_PROMPT);
+        let rc = parse(
+            "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Custom {words}\"\n\n[description.image]\nmodel = \"v\"\n"
+        )
+        .unwrap();
+        let base = rc.description.base_effective();
+        let image = rc.description.modality_effective("image").unwrap();
+        assert_eq!(base.prompt, "Custom {words}");
+        assert_eq!(image.prompt, "Custom {words}");
     }
 
     #[test]
@@ -1530,7 +1645,8 @@ mod tests {
         )
         .unwrap();
         let cli = file.clone();
-        let loaded = merge_and_write_config_chain(&chain, &serde_json::json!({}), Some(&cli)).unwrap();
+        let loaded =
+            merge_and_write_config_chain(&chain, &serde_json::json!({}), Some(&cli)).unwrap();
         assert_eq!(loaded.raw.geocoder.language.as_deref(), Some("fr"));
         let cleared = merge_and_write_config_chain(
             &chain,

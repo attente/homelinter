@@ -46,6 +46,11 @@ endpoint = "http://localhost:11434"
 model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer
 max_words = 8                   # maximum words in the generated description
+# Optional prompt template; placeholder {words} ({{ }} for literal braces).
+# Unset = built-in wording describing the file in at most max_words words.
+# The full file path (carrying the filename) and any extracted document text
+# are always appended automatically.
+# prompt = "Describe the file in at most {words} words"
 # Minimum milliseconds between requests (description backends have no
 # built-in pacing; requests stay serialized one-in-flight regardless).
 # rate_limit_ms = 0

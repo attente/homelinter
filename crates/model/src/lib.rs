@@ -10,6 +10,7 @@ pub mod error;
 pub mod format;
 pub mod hash;
 pub mod path;
+pub mod prompt;
 pub mod suggestion;
 
 pub use asset_kind::AssetKind;

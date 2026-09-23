@@ -54,9 +54,11 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_LOCATION_PROMPT, DEFAULT_MAX_IMAGE_DIMENSION,
+    DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
+use homelinter_model::prompt::render_prompt_template;
 use homelinter_model::suggestion::{Suggestion, SuggestionStatus};
 use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
@@ -136,6 +138,11 @@ pub struct ProviderSettings {
     pub user_agent_contact: Option<String>,
     pub model: Option<String>,
     pub max_words: Option<u64>,
+    /// Prompt template for the request. For description jobs it carries the
+    /// file identity placeholders (`{name}`, `{path}`, `{words}`); for geocode
+    /// jobs it is the location-summary template (`{location}`, `{words}`).
+    /// Substituted per request by `render_prompt_template`.
+    pub prompt: String,
     /// Longest side in pixels for photos forwarded to a vision backend;
     /// `None`/`0` forwards the original bytes unchanged.
     pub max_image_dimension: Option<u64>,
@@ -414,8 +421,7 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
                     return Err("mismatched provider input".to_string())
                 }
             };
-            let max_words = job.settings.max_words.unwrap_or(DEFAULT_MAX_WORDS);
-            let prompt = description_prompt(&job.unit.path, text, max_words);
+            let prompt = description_prompt(&job.unit.path, text, &job.settings);
             complete(&job.settings, &prompt, image).await
         }
     }
@@ -790,20 +796,22 @@ fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Assemble the prompt for a description request: the file identity and
-/// the effective word budget, plus the extracted text when a document
-/// extractor produced it (documents are preprocessed to plain text before
-/// the request per `[document_extraction]`). The completion the model
-/// returns is used verbatim as the `%s` value, so the prompt asks for a
-/// short noun phrase.
-fn description_prompt(path: &Path, text: Option<&str>, max_words: u64) -> String {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    let mut prompt = format!(
-        "Describe the subject matter of this file in at most {max_words} words, for use as an archive folder name. Reply with only the phrase.\n\nFile: {name}"
-    );
+/// Assemble the prompt for a description request: render the configured
+/// prompt template (`{words}`) with the effective word budget, then always
+/// append the full source path and any extracted document text verbatim
+/// (documents are preprocessed to plain text before the request per
+/// `[document_extraction]`), so the provider receives the path (which
+/// carries the filename) for every file and the content for text documents,
+/// and a custom template cannot omit either. `None` text degrades to the
+/// template plus the path block alone. The completion the model returns is
+/// used verbatim as the `%s` value, so the prompt asks for a short noun
+/// phrase.
+fn description_prompt(path: &Path, text: Option<&str>, settings: &ProviderSettings) -> String {
+    let full_path = path.display().to_string();
+    let max_words = settings.max_words.unwrap_or(DEFAULT_MAX_WORDS);
+    let mut prompt = render_prompt_template(&settings.prompt, &[("words", &max_words.to_string())]);
+    prompt.push_str("\n\nPath: ");
+    prompt.push_str(&full_path);
     if let Some(t) = text {
         if !t.is_empty() {
             prompt.push_str("\n\nContent:\n");
@@ -834,9 +842,13 @@ async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> Str
     let Some(desc) = description_settings_text(&cfg) else {
         return location.to_string();
     };
-    let prompt = format!(
-        "Summarize this location into at most {max_words} words, for use as an archive folder name. Reply with only the phrase.\n\nLocation: {location}"
-    );
+    let mut prompt =
+        render_prompt_template(&job.settings.prompt, &[("words", &max_words.to_string())]);
+    // The address is always forwarded verbatim after the rendered template,
+    // like the description provider's path and content blocks, so a custom
+    // summary template cannot omit it.
+    prompt.push_str("\n\nLocation: ");
+    prompt.push_str(location);
     match complete(&desc, &prompt, None).await {
         Ok(s) if !s.trim().is_empty() => s,
         _ => location.to_string(),
@@ -1046,6 +1058,13 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         // The word budget governs the summary, so a different cap must not
         // reuse cached locations from another budget.
         cfg.geocoder.max_words.unwrap_or(0).to_le_bytes().as_slice(),
+        // The summary prompt template shapes the request, so a different
+        // template must not reuse cached locations from another wording.
+        cfg.geocoder
+            .prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_LOCATION_PROMPT)
+            .as_bytes(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -1058,6 +1077,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
         max_words: cfg.geocoder.max_words,
+        prompt: cfg.geocoder.summary_prompt(),
         max_image_dimension: None,
     })
 }
@@ -1090,6 +1110,9 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         // The word budget governs the request, so a different cap must not
         // reuse cached descriptions from another budget.
         eff.max_words.to_le_bytes().as_slice(),
+        // The prompt template shapes the request, so a different template
+        // must not reuse cached descriptions from another wording.
+        eff.prompt.as_bytes(),
         // The downscale cap shapes the pixels the model sees, so a different
         // cap must not reuse descriptions produced from another resolution.
         eff.max_image_dimension.to_le_bytes().as_slice(),
@@ -1105,6 +1128,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         user_agent_contact: None,
         model: eff.model,
         max_words: Some(eff.max_words),
+        prompt: eff.prompt,
         max_image_dimension: Some(eff.max_image_dimension),
     })
 }
@@ -1295,6 +1319,7 @@ pub fn warmup_vision_models(jobs: &[ProviderJob]) {
 mod tests {
     use super::*;
 
+    use homelinter_model::config::DEFAULT_DESCRIPTION_PROMPT;
     use std::time::SystemTime;
 
     use axum::routing::post;
@@ -1476,6 +1501,7 @@ mod tests {
                 model: None,
                 max_words: None,
                 max_image_dimension: None,
+                prompt: DEFAULT_LOCATION_PROMPT.to_string(),
             },
             unit: UnitRef {
                 epoch,
@@ -1512,6 +1538,7 @@ mod tests {
                 model: Some("test-model".to_string()),
                 max_words: Some(8),
                 max_image_dimension: Some(1024),
+                prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             },
             unit: UnitRef {
                 epoch,
@@ -1667,6 +1694,7 @@ mod tests {
             model: Some("contract-model".to_string()),
             max_words: Some(12),
             max_image_dimension: None,
+            prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
         };
         let unit = UnitRef {
             epoch: 1,
@@ -1746,6 +1774,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
             max_image_dimension: None,
+            prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
         };
         let out = ollama_complete(&settings, "describe this", Some(&b"fake-image-bytes"[..]))
             .await
@@ -1783,6 +1812,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
             max_image_dimension: None,
+            prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
         };
         let out2 = ollama_complete(&settings2, "describe this", None)
             .await
@@ -1820,6 +1850,7 @@ mod tests {
             model: None,
             max_words: None,
             max_image_dimension: None,
+            prompt: DEFAULT_LOCATION_PROMPT.to_string(),
         };
         let mut last = BTreeMap::new();
         pace(&settings, &mut last).await;
@@ -2000,6 +2031,56 @@ mod tests {
         assert_eq!(base.min_interval, Duration::ZERO);
         let photo = description_settings(&cfg2, &AssetKind::Photo).unwrap();
         assert_eq!(photo.min_interval, Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn description_prompt_uses_template_and_appends_content() {
+        let path = PathBuf::from("/home/u/docs/letter.pdf");
+        let settings = ProviderSettings {
+            provider_id: String::new(),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: String::new(),
+            endpoint: String::new(),
+            api_key: None,
+            language: None,
+            user_agent_contact: None,
+            model: None,
+            max_words: Some(8),
+            prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            max_image_dimension: None,
+        };
+        // The default template renders the word budget; the full source path
+        // (carrying the filename) is always appended as a `Path:` block, and
+        // content is always appended when the extractor produced text.
+        let p = description_prompt(&path, Some("Dear Finance Team"), &settings);
+        assert!(p.starts_with(
+            "Describe the subject matter of this file in at most 8 keywords"
+        ));
+        // The default asks for keywords/tags (normalized into a path
+        // segment), not a sentence.
+        assert!(p.contains("keywords separated by spaces"));
+        assert!(p.contains("Path: /home/u/docs/letter.pdf"));
+        assert!(p.contains("Content:\nDear Finance Team"));
+
+        // No text -> no dangling content block; the path block stays.
+        let q = description_prompt(&path, None, &settings);
+        assert!(!q.contains("Content:"));
+        assert!(q.contains("Path: /home/u/docs/letter.pdf"));
+
+        // A custom template can relocate the wording; `{words}` plugs the
+        // budget, `{{`/`}}` escape literal braces so format strings or JSON
+        // can be quoted, and the path and any content are still appended
+        // verbatim - the template cannot omit them.
+        let custom = ProviderSettings {
+            prompt: "Give a short title in at most {words} words, brace {{literal}}".to_string(),
+            max_words: Some(8),
+            ..settings.clone()
+        };
+        let r = description_prompt(&path, Some("Dear Finance Team"), &custom);
+        assert!(r.starts_with("Give a short title in at most 8 words, brace {literal}"));
+        assert!(r.contains("Path: /home/u/docs/letter.pdf"));
+        assert!(r.contains("Content:\nDear Finance Team"));
     }
 
     fn file_at(
