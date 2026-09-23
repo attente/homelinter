@@ -30,7 +30,7 @@ fn provenance_for(p: &Path) -> Provenance {
     prov.size = m.len();
     if let Ok(d) = m
         .modified()
-        .and_then(|t| Ok(t.duration_since(std::time::UNIX_EPOCH).unwrap()))
+        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap())
     {
         prov.mtime_ns = d.as_nanos() as i128;
     }

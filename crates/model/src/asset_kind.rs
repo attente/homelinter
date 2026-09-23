@@ -11,7 +11,9 @@ use crate::error::ApiError;
 /// homelinter's file categories. Every discovered unit is classified into
 /// exactly one kind; classification drives destination format strings and
 /// reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetKind {
     Document,
@@ -22,6 +24,7 @@ pub enum AssetKind {
     Archive,
     Data,
     Executable,
+    #[default]
     Other,
 }
 
@@ -76,12 +79,6 @@ impl AssetKind {
             AssetKind::Executable => "bin/%f",
             AssetKind::Other => "Other/%f",
         }
-    }
-}
-
-impl Default for AssetKind {
-    fn default() -> Self {
-        AssetKind::Other
     }
 }
 

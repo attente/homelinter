@@ -500,7 +500,7 @@ impl RawConfig {
         }
         // Reject overrides that name an unknown kind (checked by caller too,
         // but keep this function total).
-        for (k, _) in overrides {
+        for k in overrides.keys() {
             if asset_kind::AssetKind::from_name(k).is_none() {
                 return Err(ApiError::validation(format!("unknown asset kind '{k}'")));
             }
@@ -729,19 +729,17 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
 
     // target_paths: a malformed destination cannot be planned, so it stays
     // a hard error.
-    crate::format::validate_target_paths(&raw.target_paths)
-        .err()
-        .map(|e| {
-            if let Some(details) = e.body.details {
-                fields.extend(
-                    details
-                        .into_iter()
-                        .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_default())),
-                );
-            } else {
-                fields.push(("target_paths".into(), e.body.message));
-            }
-        });
+    if let Some(e) = crate::format::validate_target_paths(&raw.target_paths).err() {
+        if let Some(details) = e.body.details {
+            fields.extend(
+                details
+                    .into_iter()
+                    .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_default())),
+            );
+        } else {
+            fields.push(("target_paths".into(), e.body.message));
+        }
+    }
 
     // geocoder: structural rules only. Cross-field readiness (enabled but
     // missing a companion value, or a key that a service ignores) is
@@ -774,7 +772,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     }
     let desc = &raw.description;
-    asset_kind::validate_per_modality_description_keys(
+    if let Some(e) = asset_kind::validate_per_modality_description_keys(
         desc.per_modality
             .keys()
             .cloned()
@@ -782,7 +780,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             .into_iter(),
     )
     .err()
-    .map(|e| {
+    {
         if let Some(details) = e.body.details {
             fields.extend(
                 details
@@ -790,7 +788,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                     .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_default())),
             );
         }
-    });
+    }
     fn check_provider(
         prefix: String,
         eff: EffectiveDescription,
@@ -1161,15 +1159,10 @@ pub fn json_to_toml(v: &JsonValue) -> Option<TomlValue> {
         }
         JsonValue::String(s) => Some(TomlValue::String(s.clone())),
         JsonValue::Bool(b) => Some(TomlValue::Boolean(*b)),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Some(TomlValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Some(TomlValue::Float(f))
-            } else {
-                None
-            }
-        }
+        JsonValue::Number(n) => n
+            .as_i64()
+            .map(TomlValue::Integer)
+            .or_else(|| n.as_f64().map(TomlValue::Float)),
         JsonValue::Null => None,
     }
 }

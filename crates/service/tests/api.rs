@@ -349,7 +349,7 @@ async fn scan_config_overlay_applies_for_one_scan_only() {
     seed_duplicates(&env.home);
 
     // Overlay excluding the Downloads tree: the duplicates are not found.
-    let (status, v) = request(
+    let (status, _) = request(
         &app,
         "POST",
         "/api/v1/session/scan",
@@ -381,7 +381,7 @@ async fn scan_config_overlay_validated_before_state_change() {
     seed_duplicates(&env.home);
 
     // Session-scoped scan keys stay rejected through the overlay.
-    let (status, v) = request(
+    let (status, _) = request(
         &app,
         "POST",
         "/api/v1/session/scan",
@@ -904,7 +904,7 @@ async fn spa_rejects_path_traversal() {
         !resp2.contains("TOP-SECRET"),
         "encoded traversal served outside file: {resp2}"
     );
-    let _ = serve.abort();
+    serve.abort();
 }
 
 #[tokio::test]

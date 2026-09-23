@@ -160,12 +160,14 @@ pub fn analyze(
             let m = ex.extract(&f.path, kind, &opts.ctx);
             merge_meta(&mut merged, &m);
         }
-        let (date, source) = match merged.date_taken.clone() {
+        let (date, source) = match merged.date_taken {
             Some(d) => (Some(d), "embedded"),
             None => filename_date(f),
         };
-        let mut prov = Provenance::default();
-        prov.size = f.size;
+        let mut prov = Provenance {
+            size: f.size,
+            ..Default::default()
+        };
         if let Ok(m) = f.modified.duration_since(std::time::UNIX_EPOCH) {
             prov.mtime_ns = m.as_nanos() as i128;
         }
@@ -271,11 +273,9 @@ fn dedup_groups(
             if let Ok(h) = hash::hash_file_fast(&f.path, size) {
                 fast_pending.entry(h).or_default().push(i);
             }
-        } else {
-            if let Ok(h) = hash::hash_file_full(&f.path) {
-                f.full_hash = Some(h);
-                full.entry(h).or_default().push(i);
-            }
+        } else if let Ok(h) = hash::hash_file_full(&f.path) {
+            f.full_hash = Some(h);
+            full.entry(h).or_default().push(i);
         }
         // Progress: report hashed files so a long content-hashing pass
         // (large files at or above the threshold) shows movement too.

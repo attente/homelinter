@@ -90,7 +90,7 @@ impl MetadataExtractor for PdfInfoExtractor {
 /// values. Unknown keys are dropped.
 fn parse_pairs(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for (_, line) in text.lines().enumerate() {
+    for line in text.lines() {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
@@ -158,7 +158,6 @@ mod tests {
     /// A tiny single-page PDF with a valid xref table and an Info dict.
     /// Offsets are computed while assembling each object, so the xref is
     /// byte-accurate without hand counting.
-
     fn build_pdf() -> Vec<u8> {
         let entries = [
             "<< /Type /Catalog /Pages 2 0 R >>",
@@ -177,8 +176,8 @@ mod tests {
         let xref_pos = buf.len();
         buf.extend_from_slice(b"xref\n0 5\n");
         buf.extend_from_slice(b"0000000000 65535 f \n");
-        for num in 1..=4 {
-            buf.extend_from_slice(format!("{:010} 00000 n \n", offsets[num]).as_bytes());
+        for offset in offsets.iter().skip(1) {
+            buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
         buf.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R /Info  4 0 R >>\nstartxref\n");
         buf.extend_from_slice(format!("{xref_pos}\n").as_bytes());

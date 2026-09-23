@@ -44,7 +44,7 @@ pub fn execute_batch(
 
     // Deterministic order: the caller sorts, but a defensive re-sort keeps
     // validation and dependency order identical to generation.
-    items.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    items.sort_by_key(|a| a.sort_key());
 
     for s in items.iter_mut() {
         if selected_only && !s.selected {

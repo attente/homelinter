@@ -34,10 +34,8 @@ pub fn prompt_template_error(template: &str, allowed: &[&str]) -> Option<String>
                     return Some(format!("{{{token}}}"));
                 }
             }
-        } else if c == '}' {
-            if chars.peek() == Some(&'}') {
-                chars.next(); // escaped literal brace
-            }
+        } else if c == '}' && chars.peek() == Some(&'}') {
+            chars.next(); // escaped literal brace
         }
     }
     None

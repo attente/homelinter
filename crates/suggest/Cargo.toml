@@ -9,9 +9,7 @@ homelinter-model = { path = "../model" }
 homelinter-scan = { path = "../scan" }
 homelinter-analyze = { path = "../analyze" }
 chrono = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 filetime = "0.2"

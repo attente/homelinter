@@ -177,8 +177,7 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
         }
     }
 
-    out.suggestions
-        .sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    out.suggestions.sort_by_key(|a| a.sort_key());
     Ok(out)
 }
 
@@ -260,10 +259,7 @@ fn build_move_suggestion(
     // Location / EXIF facts surfaced for the SPA detail pane (preview,
     // location-with-map, and metadata tabs). Only inserted when present.
     if let Some(loc) = &f.location {
-        metadata.insert(
-            "location".into(),
-            serde_json::Value::String(loc.clone()),
-        );
+        metadata.insert("location".into(), serde_json::Value::String(loc.clone()));
     }
     if let Some(lat) = f.latitude {
         metadata.insert("latitude".into(), serde_json::Value::from(lat));
@@ -272,22 +268,13 @@ fn build_move_suggestion(
         metadata.insert("longitude".into(), serde_json::Value::from(lon));
     }
     if let Some(cam) = &f.camera_model {
-        metadata.insert(
-            "camera".into(),
-            serde_json::Value::String(cam.clone()),
-        );
+        metadata.insert("camera".into(), serde_json::Value::String(cam.clone()));
     }
     if let Some(t) = &f.embedded_title {
-        metadata.insert(
-            "title".into(),
-            serde_json::Value::String(t.clone()),
-        );
+        metadata.insert("title".into(), serde_json::Value::String(t.clone()));
     }
     if let Some(a) = &f.embedded_author {
-        metadata.insert(
-            "author".into(),
-            serde_json::Value::String(a.clone()),
-        );
+        metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
     let reason = format!("Moved to the {} destination.", f.kind.name());
     Ok(Some(Suggestion::new_move(
@@ -429,9 +416,9 @@ fn split_name(p: &Path) -> (String, String) {
     }
 }
 
-fn date_from_time(
-    t: std::time::SystemTime,
-) -> (
+/// `(year, year2, month, day, hour, minute, second)` placeholders derived
+/// from an instant, in the order `file_values` unpacks them.
+type DateFields = (
     Option<String>,
     Option<String>,
     Option<String>,
@@ -439,7 +426,9 @@ fn date_from_time(
     Option<String>,
     Option<String>,
     Option<String>,
-) {
+);
+
+fn date_from_time(t: std::time::SystemTime) -> DateFields {
     use chrono::{DateTime, Datelike, Local, Timelike};
     let dt: DateTime<Local> = DateTime::from(t);
     (
@@ -520,12 +509,14 @@ fn make_repair(link: &SymlinkEntry, replacement_abs: &Path) -> DependentOperatio
     } else {
         replacement_abs.to_string_lossy().into_owned()
     };
-    let mut prov = Provenance::default();
-    prov.link_resolved_target = link
-        .resolved_target
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-    prov.link_raw_relative = Some(link.target_relative);
+    let prov = Provenance {
+        link_resolved_target: link
+            .resolved_target
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        link_raw_relative: Some(link.target_relative),
+        ..Default::default()
+    };
     DependentOperation {
         op_type: DependentOpType::RepairSymlink,
         link_path: link.link_path.to_string_lossy().into_owned(),
@@ -567,8 +558,14 @@ mod tests {
 
     #[test]
     fn coordinate_fallback_uses_decimal_degrees() {
-        assert_eq!(coordinate_fallback(Some(48.8566), Some(2.3522)), Some("48.856600,2.352200".into()));
-        assert_eq!(coordinate_fallback(Some(-0.5), Some(-73.25)), Some("-0.500000,-73.250000".into()));
+        assert_eq!(
+            coordinate_fallback(Some(48.8566), Some(2.3522)),
+            Some("48.856600,2.352200".into())
+        );
+        assert_eq!(
+            coordinate_fallback(Some(-0.5), Some(-73.25)),
+            Some("-0.500000,-73.250000".into())
+        );
         assert_eq!(coordinate_fallback(Some(f64::NAN), Some(2.0)), None);
         assert_eq!(coordinate_fallback(Some(1.0), None), None);
     }

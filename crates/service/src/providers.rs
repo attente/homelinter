@@ -458,10 +458,17 @@ fn query_escape(value: &str) -> String {
         .collect()
 }
 
-async fn get_json(
+/// Shared JSON transport for provider calls: builds the HTTPS client,
+/// applies bearer auth and the homelinter user-agent, sends an optional
+/// JSON body, and parses a JSON response. Fails cleanly on an invalid
+/// endpoint, transport error, non-2xx status, unreadable body, or
+/// non-JSON response.
+async fn request_json(
+    method: Method,
     endpoint: &str,
     api_key: Option<&str>,
     user_agent: Option<&str>,
+    body: Option<Value>,
 ) -> Result<Value, String> {
     let client = {
         let connector = hyper_rustls::HttpsConnectorBuilder::new()
@@ -474,31 +481,40 @@ async fn get_json(
     let uri: hyper::Uri = endpoint
         .parse()
         .map_err(|e| format!("invalid provider endpoint: {e}"))?;
-    let mut builder = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("accept", "application/json");
     let ua = format!(
         "homelinter/{}{}",
         env!("CARGO_PKG_VERSION"),
         user_agent.map(|v| format!(" ({v})")).unwrap_or_default()
     );
-    builder = builder.header(
-        "user-agent",
-        HeaderValue::from_str(&ua).map_err(|e| e.to_string())?,
-    );
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("accept", "application/json")
+        .header(
+            "user-agent",
+            HeaderValue::from_str(&ua).map_err(|e| e.to_string())?,
+        );
     if let Some(key) = api_key {
         builder = builder.header(
             "authorization",
             HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
         );
     }
-    let resp = client
-        .request(
+    let req = match body {
+        Some(value) => {
+            let bytes =
+                serde_json::to_vec(&value).map_err(|e| format!("provider serialize: {e}"))?;
             builder
-                .body(Full::new(Bytes::new()))
-                .map_err(|e| e.to_string())?,
-        )
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(bytes)))
+                .map_err(|e| format!("provider request build: {e}"))?
+        }
+        None => builder
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| format!("provider request build: {e}"))?,
+    };
+    let resp = client
+        .request(req)
         .await
         .map_err(|e| format!("provider transport error: {e}"))?;
     let status = resp.status();
@@ -512,6 +528,14 @@ async fn get_json(
         return Err(format!("provider returned {}", status.as_u16()));
     }
     serde_json::from_slice(&bytes).map_err(|_| "provider response is not JSON".to_string())
+}
+
+async fn get_json(
+    endpoint: &str,
+    api_key: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<Value, String> {
+    request_json(Method::GET, endpoint, api_key, user_agent, None).await
 }
 
 async fn nominatim_reverse(
@@ -655,48 +679,9 @@ async fn openrouter_complete(s: &ProviderSettings, prompt: &str) -> Result<Strin
 }
 
 /// POST `body` JSON to `endpoint` and parse the JSON response. Shared by
-/// the neutral geocoder and description transports: bearer auth when an
-/// api key is configured, JSON content-type, and a bounded failure on any
-/// non-2xx status, unreadable body, or non-JSON response.
+/// the neutral geocoder and description transports.
 async fn post_json(endpoint: &str, api_key: Option<&str>, body: Value) -> Result<Value, String> {
-    let client = {
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-        HyperClient::builder(TokioExecutor::new()).build(connector)
-    };
-    let uri: hyper::Uri = endpoint
-        .parse()
-        .map_err(|e| format!("invalid provider endpoint: {e}"))?;
-    let mut builder = Request::builder().method(Method::POST).uri(uri);
-    if let Some(key) = api_key {
-        builder = builder.header(
-            "authorization",
-            HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| e.to_string())?,
-        );
-    }
-    let bytes = serde_json::to_vec(&body).map_err(|e| format!("provider serialize: {e}"))?;
-    builder = builder.header("content-type", "application/json");
-    let req = builder
-        .body(Full::new(Bytes::from(bytes)))
-        .map_err(|e| format!("provider request build: {e}"))?;
-    let resp = client
-        .request(req)
-        .await
-        .map_err(|e| format!("provider transport error: {e}"))?;
-    let status = resp.status();
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| format!("provider body read: {e}"))?
-        .to_bytes();
-    if !status.is_success() {
-        return Err(format!("provider returned {}", status.as_u16()));
-    }
-    serde_json::from_slice(&bytes).map_err(|_| "provider response is not JSON".to_string())
+    request_json(Method::POST, endpoint, api_key, None, Some(body)).await
 }
 
 /// Reverse geocode against the neutral `custom` contract.
@@ -1133,7 +1118,6 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
     })
 }
 
-/// The description provider for one asset kind:ithe per-modality override
 /// The description provider for one asset kind: the per-modality override
 /// for its content modality (e.g. `[description.image]` for a photo).
 /// Kinds without a content modality (repository, archive, data,
@@ -1141,9 +1125,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 /// guess from the filename - so no provider is planned and `%s` resolves
 /// to `unknown`.
 pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
-    let Some(m) = description_modality(*kind) else {
-        return None;
-    };
+    let m = description_modality(*kind)?;
     description_settings_for(cfg, Some(m))
 }
 
@@ -2054,9 +2036,7 @@ mod tests {
         // (carrying the filename) is always appended as a `Path:` block, and
         // content is always appended when the extractor produced text.
         let p = description_prompt(&path, Some("Dear Finance Team"), &settings);
-        assert!(p.starts_with(
-            "Describe the subject matter of this file in at most 8 keywords"
-        ));
+        assert!(p.starts_with("Describe the subject matter of this file in at most 8 keywords"));
         // The default asks for keywords/tags (normalized into a path
         // segment), not a sentence.
         assert!(p.contains("keywords separated by spaces"));
@@ -2084,7 +2064,7 @@ mod tests {
     }
 
     fn file_at(
-        dir: &PathBuf,
+        dir: &Path,
         name: &str,
         kind: AssetKind,
         lat: Option<f64>,

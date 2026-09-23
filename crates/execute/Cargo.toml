@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 homelinter-model = { path = "../model" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 rustix = { workspace = true }
-tracing = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

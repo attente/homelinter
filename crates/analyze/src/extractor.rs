@@ -71,7 +71,7 @@ pub trait MetadataExtractor: Send + Sync {
 /// per field, matching the "consulted in priority order" contract.
 pub fn merge_meta(acc: &mut EmbeddedMeta, m: &EmbeddedMeta) {
     if acc.date_taken.is_none() {
-        acc.date_taken = m.date_taken.clone();
+        acc.date_taken = m.date_taken;
     }
     if acc.title.is_none() {
         acc.title = m.title.clone();
@@ -83,10 +83,10 @@ pub fn merge_meta(acc: &mut EmbeddedMeta, m: &EmbeddedMeta) {
         acc.camera = m.camera.clone();
     }
     if acc.latitude.is_none() {
-        acc.latitude = m.latitude.clone();
+        acc.latitude = m.latitude;
     }
     if acc.longitude.is_none() {
-        acc.longitude = m.longitude.clone();
+        acc.longitude = m.longitude;
     }
     if acc.bitrate_kbps.is_none() {
         acc.bitrate_kbps = m.bitrate_kbps;

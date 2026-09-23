@@ -7,11 +7,8 @@ license.workspace = true
 [dependencies]
 homelinter-model = { path = "../model" }
 homelinter-scan = { path = "../scan" }
-serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 chrono = { workspace = true }
-thiserror = { workspace = true }
 kamadak-exif = "0.6.1"
 lofty = "0.22"
 quick-xml = "0.36"

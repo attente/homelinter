@@ -165,8 +165,7 @@ fn run_vcs(tool: &str, root: &Path, args: &[&str]) -> Option<String> {
 /// `svn+ssh://host/...`, `file:///path` (no host -> `None`).
 fn parse_host(url: &str) -> Option<String> {
     let url = url.trim();
-    if url.starts_with("git@") {
-        let rest = &url[4..];
+    if let Some(rest) = url.strip_prefix("git@") {
         return rest
             .split(':')
             .next()

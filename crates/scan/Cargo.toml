@@ -6,7 +6,4 @@ license.workspace = true
 
 [dependencies]
 homelinter-model = { path = "../model" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 globset = { workspace = true }
-thiserror = { workspace = true }

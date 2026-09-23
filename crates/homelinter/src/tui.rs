@@ -725,7 +725,9 @@ impl App {
             Phase::Config => match key.code {
                 KeyCode::Up => self.config_scroll = self.config_scroll.saturating_sub(1),
                 KeyCode::Down => self.config_scroll = self.config_scroll.saturating_add(1),
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => self.phase = Phase::Browse,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                    self.phase = Phase::Browse
+                }
                 KeyCode::Char('C') => match self.client.cache_clear().await {
                     Ok(()) => self.toast = Some("cache cleared".to_string()),
                     Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
@@ -877,10 +879,17 @@ impl App {
                     let action = self.stale_action.take();
                     match action {
                         Some(StaleAction::Run) => {
-                            if let Err(e) = self.run_selected().await { self.toast = Some(e); }
+                            if let Err(e) = self.run_selected().await {
+                                self.toast = Some(e);
+                            }
                         }
                         Some(StaleAction::Export) => {
-                            self.prompt = Some(Prompt { title: "Export path (absolute; no ~ or $)".to_string(), kind: PromptKind::ExportPath, value: String::new(), cursor: 0 });
+                            self.prompt = Some(Prompt {
+                                title: "Export path (absolute; no ~ or $)".to_string(),
+                                kind: PromptKind::ExportPath,
+                                value: String::new(),
+                                cursor: 0,
+                            });
                         }
                         None => {}
                     }
@@ -1228,12 +1237,19 @@ impl App {
 
     fn draw_config(&self, f: &mut Frame) {
         let area = f.area();
-        let text = self.config_doc.as_ref()
+        let text = self
+            .config_doc
+            .as_ref()
             .and_then(|v| serde_json::to_string_pretty(v).ok())
             .unwrap_or_else(|| "configuration unavailable".to_string());
-        let mut lines: Vec<Line> = text.lines().map(|line| Line::from(line.to_string())).collect();
+        let mut lines: Vec<Line> = text
+            .lines()
+            .map(|line| Line::from(line.to_string()))
+            .collect();
         lines.push(Line::from(""));
-        lines.push(Line::from("Up/Down scroll  C clear cache  Esc/q/c return to suggestions"));
+        lines.push(Line::from(
+            "Up/Down scroll  C clear cache  Esc/q/c return to suggestions",
+        ));
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(block("Configuration (read-only)"))

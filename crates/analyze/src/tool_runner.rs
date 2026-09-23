@@ -34,9 +34,7 @@ pub fn run_capture(
     cmd.stdin(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd.stdout(Stdio::piped());
-    let Some(mut child) = cmd.spawn().ok() else {
-        return None;
-    };
+    let mut child = cmd.spawn().ok()?;
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() >= deadline {

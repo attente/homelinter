@@ -118,31 +118,7 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<(StatusCode, Value), ClientsError> {
-        let uri: hyper::Uri = format!("{}{}", self.base, path)
-            .parse()
-            .map_err(|e| ClientsError::Transport(format!("invalid uri: {e}")))?;
-        let mut builder = Request::builder().method(method).uri(uri);
-        builder = builder.header("host", self.host_header());
-        let req = match body {
-            Some(v) => {
-                let bytes = serde_json::to_vec(&v)
-                    .map_err(|e| ClientsError::Decode(format!("serialize: {e}")))?;
-                builder = builder.header("content-type", "application/json");
-                builder
-                    .body(Full::new(Bytes::from(bytes)))
-                    .map_err(|e| ClientsError::Transport(format!("request build: {e}")))?
-            }
-            None => builder
-                .body(Full::new(Bytes::new()))
-                .map_err(|e| ClientsError::Transport(format!("request build: {e}")))?,
-        };
-        let resp = self
-            .inner
-            .request(req)
-            .await
-            .map_err(|e| ClientsError::Transport(e.to_string()))?;
-        let status = resp.status();
-        let body_bytes = self.collect_body(resp.into_body()).await?;
+        let (status, _, body_bytes) = self.send(method, path, body).await?;
         let value = if body_bytes.is_empty() {
             Value::Null
         } else {
@@ -169,10 +145,30 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<(StatusCode, Vec<(String, String)>, String), ClientsError> {
+        let (status, headers, body_bytes) = self.send(Method::POST, path, body).await?;
+        if !status.is_success() {
+            let value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+                json!({ "error": { "code": "unknown", "message": String::from_utf8_lossy(&body_bytes).into_owned() } })
+            });
+            return Err(self.envelope(status, &value));
+        }
+        let text = String::from_utf8(body_bytes.to_vec())
+            .map_err(|e| ClientsError::Decode(format!("script body utf-8: {e}")))?;
+        Ok((status, headers, text))
+    }
+
+    /// Send a request and return its status, headers, and raw body. Shared
+    /// by the JSON and text response decoders.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Vec<(String, String)>, Bytes), ClientsError> {
         let uri: hyper::Uri = format!("{}{}", self.base, path)
             .parse()
             .map_err(|e| ClientsError::Transport(format!("invalid uri: {e}")))?;
-        let mut builder = Request::builder().method(Method::POST).uri(uri);
+        let mut builder = Request::builder().method(method).uri(uri);
         builder = builder.header("host", self.host_header());
         let req = match body {
             Some(v) => {
@@ -204,14 +200,7 @@ impl Client {
             })
             .collect::<Vec<_>>();
         let body_bytes = self.collect_body(resp.into_body()).await?;
-        if !status.is_success() {
-            let value = serde_json::from_slice(&body_bytes)
-                .unwrap_or_else(|_| json!({ "error": { "code": "unknown", "message": String::from_utf8_lossy(&body_bytes).into_owned() } }));
-            return Err(self.envelope(status, &value));
-        }
-        let text = String::from_utf8(body_bytes.to_vec())
-            .map_err(|e| ClientsError::Decode(format!("script body utf-8: {e}")))?;
-        Ok((status, headers, text))
+        Ok((status, headers, body_bytes))
     }
 
     fn host_header(&self) -> HeaderValue {

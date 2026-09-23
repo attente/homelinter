@@ -187,12 +187,9 @@ fn is_hidden_name(name: &str, def: HiddenDefinition) -> bool {
 
 /// Marker-name lookup over a directory's children, returning the VCS kind.
 fn repo_marker_in(names: &[PathBuf]) -> Option<VcsKind> {
-    for kind in [VcsKind::Git, VcsKind::Hg, VcsKind::Svn] {
-        if names.iter().any(|n| n == Path::new(kind.marker())) {
-            return Some(kind);
-        }
-    }
-    None
+    [VcsKind::Git, VcsKind::Hg, VcsKind::Svn]
+        .into_iter()
+        .find(|&kind| names.iter().any(|n| n == Path::new(kind.marker())))
 }
 
 fn is_vcs_marker_name(n: &std::ffi::OsStr) -> bool {
@@ -220,12 +217,9 @@ pub fn discover(
     walk_dir(&root, &root, opts, &excludes, cancel, &mut out)?;
     // Deterministic order: repository roots before files keeps reporting
     // stable; each list is sorted by normalized absolute path.
-    out.files
-        .sort_by(|a, b| path::sort_key(&a.path).cmp(&path::sort_key(&b.path)));
-    out.repos
-        .sort_by(|a, b| path::sort_key(&a.root).cmp(&path::sort_key(&b.root)));
-    out.dirs
-        .sort_by(|a, b| path::sort_key(a).cmp(&path::sort_key(b)));
+    out.files.sort_by_key(|a| path::sort_key(&a.path));
+    out.repos.sort_by_key(|a| path::sort_key(&a.root));
+    out.dirs.sort_by_key(|a| path::sort_key(a));
     Ok(out)
 }
 

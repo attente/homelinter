@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{
-    config_hash, effective_config_json, merge_and_validate_config_chain, merge_and_write_config_chain,
-    overlay_scan_config, platform_name,
+    config_hash, effective_config_json, merge_and_validate_config_chain,
+    merge_and_write_config_chain, overlay_scan_config, platform_name,
 };
 use homelinter_model::error::{ApiError, ErrorCode};
 use homelinter_model::format::FormatString;
@@ -527,7 +527,7 @@ async fn suggestion_get(State(app): State<AppHandle>, AxumPath(id): AxumPath<Str
     let sess = app.session.lock().await;
     match sess.suggestion_by_id(&id) {
         Some(s) => serde_json::to_value(s)
-            .map(|v| ok(v))
+            .map(ok)
             .unwrap_or_else(|_| Err(err(ErrorCode::Internal, "cannot serialize suggestion"))),
         None => Err(err(
             ErrorCode::NotFound,
@@ -577,7 +577,12 @@ async fn suggestion_preview(
 }
 
 fn preview_content_type(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|e| e.to_str())?.to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "jpg" | "jpeg" => Some("image/jpeg"),
         "png" => Some("image/png"),
         "gif" => Some("image/gif"),
@@ -811,7 +816,7 @@ async fn execution_get(State(app): State<AppHandle>) -> ApiResult {
     let sess = app.session.lock().await;
     match &sess.report {
         Some(r) => serde_json::to_value(r)
-            .map(|v| ok(v))
+            .map(ok)
             .unwrap_or_else(|_| Err(err(ErrorCode::Internal, "cannot serialize report"))),
         None => Err(err(ErrorCode::NotFound, "no execution report yet")),
     }
@@ -921,11 +926,12 @@ async fn config_put(State(app): State<AppHandle>, Json(body): Json<Value>) -> Ap
     }
     let cli = app.cli_config.clone();
     let chain = app.config_chain.clone();
-    let loaded =
-        tokio::task::spawn_blocking(move || merge_and_write_config_chain(&chain, &body, cli.as_deref()))
-            .await
-            .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
-            .map_err(api_err)?;
+    let loaded = tokio::task::spawn_blocking(move || {
+        merge_and_write_config_chain(&chain, &body, cli.as_deref())
+    })
+    .await
+    .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
+    .map_err(api_err)?;
     let cfg = {
         let mut sess = app.session.lock().await;
         sess.config = loaded.raw;
@@ -948,11 +954,12 @@ async fn config_validate(State(app): State<AppHandle>, Json(body): Json<Value>) 
     }
     let cli = app.cli_config.clone();
     let chain = app.config_chain.clone();
-    let raw =
-        tokio::task::spawn_blocking(move || merge_and_validate_config_chain(&chain, &body, cli.as_deref()))
-            .await
-            .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
-            .map_err(api_err)?;
+    let raw = tokio::task::spawn_blocking(move || {
+        merge_and_validate_config_chain(&chain, &body, cli.as_deref())
+    })
+    .await
+    .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
+    .map_err(api_err)?;
     ok(json!({ "valid": true, "config": effective_config_json(&raw, None) }))
 }
 
@@ -975,7 +982,7 @@ async fn report_summary(State(app): State<AppHandle>) -> ApiResult {
         .clone()
         .unwrap_or_else(homelinter_model::suggestion::ScanSummary::default);
     serde_json::to_value(s)
-        .map(|v| ok(v))
+        .map(ok)
         .unwrap_or_else(|_| Err(err(ErrorCode::Internal, "cannot serialize summary")))
 }
 
