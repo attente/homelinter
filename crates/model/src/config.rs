@@ -26,7 +26,7 @@ pub const DEFAULT_MAX_WORDS: u64 = 8;
 /// wording asks for keywords/tags rather than a sentence, because the `%s`
 /// value is normalized into a lowercased, hyphenated path segment for a
 /// file stem or folder name.
-pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Reply with only the keywords separated by spaces.";
+pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Do not mention the file type, extension, medium, path, or folder names (for example photo, image, video, movie, or document). Reply with only the keywords separated by spaces.";
 /// Default location-summary prompt template; `{words}` is substituted
 /// before the request, and the reverse-geocoded address is appended
 /// verbatim after it (location summaries always receive the address, so
