@@ -33,8 +33,8 @@ language = "en"
 user_agent_contact = ""     # recommended for public services
 # Word cap for the location summary (default 2); 0 keeps the full address.
 # The reverse-geocoded address is condensed by the text description provider
-# before it is cached and rendered into %l, then hard-truncated to this many
-# words.
+# before it is cached and rendered into %l; the prompt asks the model to
+# respect the budget.
 max_words = 2
 # Optional prompt template for that condensation; {words} is the effective
 # max_words. The address is always appended verbatim, so it cannot be omitted.
@@ -55,7 +55,7 @@ service = "ollama"          # ollama | openrouter | custom
 endpoint = "http://localhost:11434"
 model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer
-max_words = 8                   # maximum words in the generated description
+max_words = 4                   # maximum words in the generated description
 # Optional prompt template; placeholder {words} ({{ }} for literal braces).
 # Unset = built-in wording describing the file in at most max_words words.
 # The full file path (carrying the filename) and any extracted document text

@@ -874,22 +874,9 @@ async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> Str
     prompt.push_str("\n\nLocation: ");
     prompt.push_str(location);
     match complete(&desc, &prompt, None).await {
-        // Trust the model for the wording, but hard-enforce the word budget
-        // so `%l` cannot bloat a folder name, and a backend that echoes the
-        // description budget (e.g. `custom`) still obeys `[geocoder]
-        // max_words`.
-        Ok(s) if !s.trim().is_empty() => clamp_words(&s, max_words),
+        Ok(s) if !s.trim().is_empty() => s,
         _ => location.to_string(),
     }
-}
-
-/// Truncate `s` to its first `max` whitespace-delimited words. A value of
-/// `0` yields an empty string; callers skip summarization entirely at `0`.
-fn clamp_words(s: &str, max: u64) -> String {
-    s.split_whitespace()
-        .take(max as usize)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Resolve one provider job for a unit: record a successful value (when
@@ -2171,17 +2158,6 @@ mod tests {
         let q = author_prompt(&path, None);
         assert!(!q.contains("Content:"));
         assert!(q.contains("Path: /home/u/docs/letter.pdf"));
-    }
-
-    #[test]
-    fn clamp_words_enforces_budget() {
-        assert_eq!(
-            clamp_words("Paris, Ile-de-France, France", 2),
-            "Paris, Ile-de-France,"
-        );
-        assert_eq!(clamp_words("  Berlin  Germany  ", 2), "Berlin Germany");
-        assert_eq!(clamp_words("Tokyo", 2), "Tokyo");
-        assert_eq!(clamp_words("a b c", 0), "");
     }
 
     fn file_at(

@@ -18,7 +18,9 @@ use crate::error::ApiError;
 use crate::format::FormatString;
 
 pub const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 104_857_600;
-pub const DEFAULT_MAX_WORDS: u64 = 8;
+/// Default word cap for a `[description]` entry (and its per-modality
+/// overrides) when `max_words` is unset.
+pub const DEFAULT_MAX_WORDS: u64 = 4;
 /// Default description prompt template; `{words}` is substituted before the
 /// request, and the full source path plus any extracted document text are
 /// appended verbatim after it (description providers always receive the
