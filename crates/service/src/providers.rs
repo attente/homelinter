@@ -54,8 +54,8 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_LOCATION_PROMPT, DEFAULT_MAX_IMAGE_DIMENSION,
-    DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_LOCATION_MAX_WORDS, DEFAULT_LOCATION_PROMPT,
+    DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
@@ -874,9 +874,22 @@ async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> Str
     prompt.push_str("\n\nLocation: ");
     prompt.push_str(location);
     match complete(&desc, &prompt, None).await {
-        Ok(s) if !s.trim().is_empty() => s,
+        // Trust the model for the wording, but hard-enforce the word budget
+        // so `%l` cannot bloat a folder name, and a backend that echoes the
+        // description budget (e.g. `custom`) still obeys `[geocoder]
+        // max_words`.
+        Ok(s) if !s.trim().is_empty() => clamp_words(&s, max_words),
         _ => location.to_string(),
     }
+}
+
+/// Truncate `s` to its first `max` whitespace-delimited words. A value of
+/// `0` yields an empty string; callers skip summarization entirely at `0`.
+fn clamp_words(s: &str, max: u64) -> String {
+    s.split_whitespace()
+        .take(max as usize)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Resolve one provider job for a unit: record a successful value (when
@@ -1102,7 +1115,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         language,
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
-        max_words: cfg.geocoder.max_words,
+        max_words: Some(cfg.geocoder.max_words.unwrap_or(DEFAULT_LOCATION_MAX_WORDS)),
         prompt: cfg.geocoder.summary_prompt(),
         max_image_dimension: None,
     })
@@ -1376,7 +1389,7 @@ pub fn warmup_vision_models(jobs: &[ProviderJob]) {
 mod tests {
     use super::*;
 
-    use homelinter_model::config::DEFAULT_DESCRIPTION_PROMPT;
+    use homelinter_model::config::{DEFAULT_DESCRIPTION_PROMPT, DEFAULT_LOCATION_MAX_WORDS};
     use std::time::SystemTime;
 
     use axum::routing::post;
@@ -2022,6 +2035,15 @@ mod tests {
         assert_eq!(s.endpoint, "http://geo.local");
         assert_eq!(s.min_interval, Duration::ZERO);
         assert_eq!(s.language.as_deref(), Some("en"));
+        // `[geocoder] max_words` defaults to a two-word summary; `0`
+        // explicitly disables summarization.
+        assert_eq!(s.max_words, Some(DEFAULT_LOCATION_MAX_WORDS));
+        let capped: RawConfig =
+            toml::from_str("[geocoder]\nenabled = true\nmax_words = 4\n").unwrap();
+        assert_eq!(geocoder_settings(&capped).unwrap().max_words, Some(4));
+        let uncapped: RawConfig =
+            toml::from_str("[geocoder]\nenabled = true\nmax_words = 0\n").unwrap();
+        assert_eq!(geocoder_settings(&uncapped).unwrap().max_words, Some(0));
 
         // A configured rate limit paces the custom service.
         let paced: RawConfig = toml::from_str(
@@ -2149,6 +2171,17 @@ mod tests {
         let q = author_prompt(&path, None);
         assert!(!q.contains("Content:"));
         assert!(q.contains("Path: /home/u/docs/letter.pdf"));
+    }
+
+    #[test]
+    fn clamp_words_enforces_budget() {
+        assert_eq!(
+            clamp_words("Paris, Ile-de-France, France", 2),
+            "Paris, Ile-de-France,"
+        );
+        assert_eq!(clamp_words("  Berlin  Germany  ", 2), "Berlin Germany");
+        assert_eq!(clamp_words("Tokyo", 2), "Tokyo");
+        assert_eq!(clamp_words("a b c", 0), "");
     }
 
     fn file_at(

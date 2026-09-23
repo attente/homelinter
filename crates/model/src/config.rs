@@ -34,6 +34,10 @@ pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of thi
 /// rather than a sentence, because the summary is normalized into a
 /// lowercased, hyphenated path segment for a file stem or folder name.
 pub const DEFAULT_LOCATION_PROMPT: &str = "Summarize this location into at most {words} words, for use as a file or folder name. Reply with only the place name.";
+/// Default word cap for `[geocoder] max_words`: a reverse-geocoded address
+/// is condensed to at most this many words before it is rendered into `%l`.
+/// `0` disables summarization and keeps the full address.
+pub const DEFAULT_LOCATION_MAX_WORDS: u64 = 2;
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
@@ -1200,7 +1204,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
             "language": raw.geocoder.language,
             "user_agent_contact": raw.geocoder.user_agent_contact,
-            "max_words": raw.geocoder.max_words,
+            "max_words": raw.geocoder.max_words.unwrap_or(DEFAULT_LOCATION_MAX_WORDS),
             "rate_limit_ms": raw.geocoder.rate_limit_ms,
             "prompt": raw.geocoder.summary_prompt(),
         }),

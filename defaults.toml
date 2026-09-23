@@ -31,9 +31,11 @@ endpoint = "https://nominatim.openstreetmap.org"
 api_key = ""
 language = "en"
 user_agent_contact = ""     # recommended for public services
-# Optional word cap; when set (> 0) the reverse-geocoded address is condensed
-# by the text description provider before it is cached and rendered into %l.
-# max_words = 8
+# Word cap for the location summary (default 2); 0 keeps the full address.
+# The reverse-geocoded address is condensed by the text description provider
+# before it is cached and rendered into %l, then hard-truncated to this many
+# words.
+max_words = 2
 # Optional prompt template for that condensation; {words} is the effective
 # max_words. The address is always appended verbatim, so it cannot be omitted.
 # prompt = "Condense the location into at most {words} words."
