@@ -454,9 +454,9 @@ pub fn validate_target_paths(
 }
 
 /// Validate that a filename-only segment is safe on the host: no separator,
-/// NUL, or control character, and not `.`/`..`. Existing host file names
-/// satisfy this by construction; kept for path-assembly sanity checks.
-#[allow(dead_code)]
+/// NUL, or control character, not `.`/`..`, and (on Windows) not a reserved
+/// device name. Existing host file names satisfy this by construction; it
+/// guards resolved destinations whose final segment came from metadata.
 pub fn validate_file_name_segment(name: &str) -> bool {
     !name.is_empty()
         && name != "."

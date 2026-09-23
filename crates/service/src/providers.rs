@@ -458,6 +458,24 @@ fn query_escape(value: &str) -> String {
         .collect()
 }
 
+/// Append a URL-encoded query parameter to `url` when `value` is set.
+fn append_query_param(url: &mut String, name: &str, value: Option<&str>) {
+    if let Some(v) = value {
+        url.push_str(&format!("&{name}={}", query_escape(v)));
+    }
+}
+
+/// Return the first non-empty string among the JSON pointers in `paths`.
+/// Backends use it to pick a place name or completion across vendor-specific
+/// response shapes.
+fn first_nonempty_pointer(value: &Value, paths: &[&str]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|p| value.pointer(p).and_then(Value::as_str))
+        .map(str::to_owned)
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Shared JSON transport for provider calls: builds the HTTPS client,
 /// applies bearer auth and the homelinter user-agent, sends an optional
 /// JSON body, and parses a JSON response. Fails cleanly on an invalid
@@ -544,19 +562,13 @@ async fn nominatim_reverse(
     lon: f64,
     language: Option<&str>,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1{}",
-        s.endpoint.trim_end_matches('/'),
-        language
-            .map(|v| format!("&accept-language={}", query_escape(v)))
-            .unwrap_or_default()
+    let mut url = format!(
+        "{}/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1",
+        s.endpoint.trim_end_matches('/')
     );
+    append_query_param(&mut url, "accept-language", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    v.get("display_name")
-        .and_then(Value::as_str)
-        .or_else(|| v.pointer("/address/city").and_then(Value::as_str))
-        .map(str::to_owned)
-        .filter(|x| !x.trim().is_empty())
+    first_nonempty_pointer(&v, &["/display_name", "/address/city"])
         .ok_or_else(|| "nominatim response has no place name".into())
 }
 
@@ -570,19 +582,18 @@ async fn photon_reverse(
         "{}/reverse?lat={lat}&lon={lon}",
         s.endpoint.trim_end_matches('/')
     );
-    if let Some(lang) = language {
-        url.push_str(&format!("&lang={}", query_escape(lang)));
-    }
+    append_query_param(&mut url, "lang", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    let p = v
-        .pointer("/features/0/properties")
-        .ok_or("photon response has no feature")?;
-    ["name", "city", "state", "country"]
-        .iter()
-        .find_map(|k| p.get(*k).and_then(Value::as_str))
-        .map(str::to_owned)
-        .filter(|x| !x.trim().is_empty())
-        .ok_or_else(|| "photon response has no place name".into())
+    first_nonempty_pointer(
+        &v,
+        &[
+            "/features/0/properties/name",
+            "/features/0/properties/city",
+            "/features/0/properties/state",
+            "/features/0/properties/country",
+        ],
+    )
+    .ok_or_else(|| "photon response has no place name".into())
 }
 
 async fn google_reverse(
@@ -600,9 +611,7 @@ async fn google_reverse(
         s.endpoint.trim_end_matches('/'),
         query_escape(key)
     );
-    if let Some(lang) = language {
-        url.push_str(&format!("&language={}", query_escape(lang)));
-    }
+    append_query_param(&mut url, "language", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
     if v.get("status").and_then(Value::as_str) != Some("OK") {
         return Err(format!(
@@ -610,9 +619,7 @@ async fn google_reverse(
             v["status"].as_str().unwrap_or("unknown")
         ));
     }
-    v.pointer("/results/0/formatted_address")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    first_nonempty_pointer(&v, &["/results/0/formatted_address"])
         .ok_or_else(|| "google response has no place name".into())
 }
 
@@ -631,14 +638,9 @@ async fn mapbox_reverse(
         s.endpoint.trim_end_matches('/'),
         query_escape(token)
     );
-    if let Some(lang) = language {
-        url.push_str(&format!("&language={}", query_escape(lang)));
-    }
+    append_query_param(&mut url, "language", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    v.pointer("/features/0/place_name")
-        .and_then(Value::as_str)
-        .or_else(|| v.pointer("/features/0/text").and_then(Value::as_str))
-        .map(str::to_owned)
+    first_nonempty_pointer(&v, &["/features/0/place_name", "/features/0/text"])
         .ok_or_else(|| "mapbox response has no place name".into())
 }
 
@@ -659,10 +661,7 @@ async fn ollama_complete(
     }
     let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4 }, "keep_alive": OLLAMA_KEEP_ALIVE });
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
-    v.pointer("/message/content")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|x| !x.trim().is_empty())
+    first_nonempty_pointer(&v, &["/message/content"])
         .ok_or_else(|| "ollama response has no message content".into())
 }
 
@@ -671,10 +670,7 @@ async fn openrouter_complete(s: &ProviderSettings, prompt: &str) -> Result<Strin
     let max = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
     let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": prompt}], "max_tokens": max * 4});
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
-    v.pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|x| !x.trim().is_empty())
+    first_nonempty_pointer(&v, &["/choices/0/message/content"])
         .ok_or_else(|| "openrouter response has no completion content".into())
 }
 
@@ -700,10 +696,7 @@ async fn neutral_reverse_geocode(
         "language": language.unwrap_or(""),
     });
     let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
-    value["name"]
-        .as_str()
-        .map(str::to_string)
-        .filter(|n| !n.trim().is_empty())
+    first_nonempty_pointer(&value, &["/name"])
         .ok_or_else(|| "geocoder response has no 'name' field".to_string())
 }
 
@@ -722,10 +715,7 @@ async fn neutral_complete(s: &ProviderSettings, prompt: &str) -> Result<String, 
         "max_words": max_words,
     });
     let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
-    value["content"]
-        .as_str()
-        .map(str::to_string)
-        .filter(|c| !c.trim().is_empty())
+    first_nonempty_pointer(&value, &["/content"])
         .ok_or_else(|| "description response has no 'content' field".to_string())
 }
 

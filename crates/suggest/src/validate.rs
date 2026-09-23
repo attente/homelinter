@@ -70,6 +70,13 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
                 if s.target == dest {
                     reasons.push("noop_move".to_string());
                 }
+                let name = std::path::Path::new(&dest)
+                    .file_name()
+                    .and_then(|n| n.to_str());
+                match name {
+                    Some(n) if homelinter_model::format::validate_file_name_segment(n) => {}
+                    _ => reasons.push("invalid_destination_segment".to_string()),
+                }
                 if let Some(&j) = dest_claims.get(&dest).filter(|&&j| j != i) {
                     reasons.push(format!("destination_collision:also={}", sort_keys[j]));
                 }
@@ -149,5 +156,19 @@ mod tests {
             .iter()
             .filter(|s| s.status == SuggestionStatus::Rejected)
             .all(|s| s.rejection_reason.is_some()));
+    }
+
+    #[test]
+    fn rejects_destination_with_invalid_final_segment() {
+        // A control character in the resolved filename segment is rejected
+        // before execution rather than passed through to a rename.
+        let mut items = vec![move_suggestion("/a/x.jpg", "/d/bad\nname.jpg")];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert!(items[0]
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("invalid_destination_segment"));
     }
 }
