@@ -64,7 +64,7 @@ use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
 use homelinter_suggest::rebuild_move_suggestion;
 
-use crate::cache::{cache_key, KIND_DESCRIPTION, KIND_GEOCODE};
+use crate::cache::{cache_key, KIND_AUTHOR, KIND_DESCRIPTION, KIND_GEOCODE};
 use crate::events::{RejectedId, ServerEvent};
 use crate::pipeline::{App, AppHandle};
 
@@ -73,6 +73,10 @@ use crate::pipeline::{App, AppHandle};
 pub enum ProviderKind {
     Geocode,
     Description,
+    /// Infer a document's author from its path and extracted text (the `%a`
+    /// fallback when no embedded author exists); uses the text description
+    /// provider.
+    Author,
 }
 
 impl ProviderKind {
@@ -80,6 +84,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Geocode => KIND_GEOCODE,
             ProviderKind::Description => KIND_DESCRIPTION,
+            ProviderKind::Author => KIND_AUTHOR,
         }
     }
 }
@@ -117,6 +122,11 @@ pub enum ProviderInput {
         /// lazily by the worker. `None` degrades to the text-only prompt.
         image: Option<Vec<u8>>,
     },
+    /// An author-inference (LLM) request for a document whose format uses
+    /// `%a` and whose embedded metadata carried no author. `text` carries
+    /// extracted plain text when a document extractor produced it, like
+    /// `Describe`.
+    Author { text: Option<String> },
 }
 
 /// Provider facts: cache identity, pacing, and transport.
@@ -182,6 +192,7 @@ pub struct ProviderScanCtx {
 pub struct ProviderUnitMeta {
     pub location: Option<String>,
     pub subject: Option<String>,
+    pub author: Option<String>,
 }
 
 /// FIFO queue of provider jobs. The pipeline enqueues synchronously (it may
@@ -295,6 +306,7 @@ pub async fn run_provider_worker(app: AppHandle) {
 /// kind only. Extraction is local and bounded, never a scan failure.
 async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> ProviderJob {
     let mut job = job.clone();
+    let unit_path = job.unit.path.clone();
     match &mut job.input {
         ProviderInput::Describe {
             text,
@@ -302,21 +314,10 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
             image,
         } => {
             if text.is_none() {
-                let cfg = {
-                    let sess = app.session.lock().await;
-                    sess.config.clone()
-                };
-                let path = job.unit.path.clone();
-                let tools = tools.clone();
-                *text = tokio::task::spawn_blocking(move || {
-                    crate::document_text::extract_document_text(&cfg, &path, &tools)
-                })
-                .await
-                .ok()
-                .flatten();
+                *text = extract_document_text_for(app, unit_path.clone(), tools).await;
             }
             if *vision && image.is_none() {
-                let path = job.unit.path.clone();
+                let path = unit_path.clone();
                 let max_dim = job
                     .settings
                     .max_image_dimension
@@ -327,9 +328,33 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
                     .flatten();
             }
         }
+        ProviderInput::Author { text } => {
+            if text.is_none() {
+                *text = extract_document_text_for(app, unit_path.clone(), tools).await;
+            }
+        }
         ProviderInput::Geocode { .. } => {}
     }
     job
+}
+
+/// Extract plain document text for a provider job on a cache miss. The
+/// extraction config (commands plus `[limits]`) is snapshotted from the
+/// session at call time; a missing or failed extractor yields `None` and the
+/// provider sees the unit path and kind only. Extraction is local and
+/// bounded, never a scan failure.
+async fn extract_document_text_for(app: &App, path: PathBuf, tools: &ToolSet) -> Option<String> {
+    let cfg = {
+        let sess = app.session.lock().await;
+        sess.config.clone()
+    };
+    let tools = tools.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::document_text::extract_document_text(&cfg, &path, &tools)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Sleep so consecutive requests to the same provider are at least
@@ -395,9 +420,7 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
                     longitude,
                     language,
                 } => (*latitude, *longitude, language.as_deref()),
-                ProviderInput::Describe { .. } => {
-                    return Err("mismatched provider input".to_string())
-                }
+                _ => return Err("mismatched provider input".to_string()),
             };
             match job.settings.backend.as_str() {
                 "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await,
@@ -417,12 +440,18 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
         ProviderKind::Description => {
             let (text, image) = match &job.input {
                 ProviderInput::Describe { text, image, .. } => (text.as_deref(), image.as_deref()),
-                ProviderInput::Geocode { .. } => {
-                    return Err("mismatched provider input".to_string())
-                }
+                _ => return Err("mismatched provider input".to_string()),
             };
             let prompt = description_prompt(&job.unit.path, text, &job.settings);
             complete(&job.settings, &prompt, image).await
+        }
+        ProviderKind::Author => {
+            let text = match &job.input {
+                ProviderInput::Author { text } => text.as_deref(),
+                _ => return Err("mismatched provider input".to_string()),
+            };
+            let prompt = author_prompt(&job.unit.path, text);
+            complete(&job.settings, &prompt, None).await
         }
     }
 }
@@ -796,6 +825,26 @@ fn description_prompt(path: &Path, text: Option<&str>, settings: &ProviderSettin
     prompt
 }
 
+/// Built-in author-inference prompt for the `%a` document fallback. The
+/// provider receives the file path and any extracted text; a short answer
+/// (the author name) or the literal `unknown` is expected. Unlike the
+/// description prompt this is fixed: a caller only ever asks one question,
+/// and the answer is a name, not a configurable summary.
+const DEFAULT_AUTHOR_PROMPT: &str = "Who is the author of this document? Reply with only the author's name, or \"unknown\" if it cannot be determined from the information given.";
+
+fn author_prompt(path: &Path, text: Option<&str>) -> String {
+    let mut prompt = DEFAULT_AUTHOR_PROMPT.to_string();
+    prompt.push_str("\n\nPath: ");
+    prompt.push_str(&path.display().to_string());
+    if let Some(t) = text {
+        if !t.is_empty() {
+            prompt.push_str("\n\nContent:\n");
+            prompt.push_str(t);
+        }
+    }
+    prompt
+}
+
 /// Summarize a reverse-geocoded location into at most `max_words`
 /// words using the text description provider, when `[geocoder] max_words`
 /// is set and the text description provider is enabled. Any
@@ -867,6 +916,7 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             match job.kind {
                 ProviderKind::Geocode => unit.location = Some(v.to_string()),
                 ProviderKind::Description => unit.subject = Some(v.to_string()),
+                ProviderKind::Author => unit.author = Some(v.to_string()),
             }
         }
         let Some(pending) = ctx.pending.get_mut(&job.unit.index) else {
@@ -890,6 +940,7 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
         if let Some(m) = ctx.meta.get(&job.unit.index) {
             trial.location = m.location.clone().or(trial.location);
             trial.subject = m.subject.clone().or(trial.subject);
+            trial.embedded_author = m.author.clone().or(trial.embedded_author);
         }
         // A description provider failure should degrade to the stable source
         // filename stem rather than the generic `unknown` placeholder. This
@@ -1112,8 +1163,9 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 /// for its content modality (e.g. `[description.image]` for a photo).
 /// Kinds without a content modality (repository, archive, data,
 /// executable, other) have no content source for `%s` - the LLM would only
-/// guess from the filename - so no provider is planned and `%s` resolves
-/// to `unknown`.
+/// guess from the filename - so no provider is planned and `%s` falls back
+/// to the filename stem. Documents also use this provider for `%a` author
+/// inference.
 pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
     let m = description_modality(*kind)?;
     description_settings_for(cfg, Some(m))
@@ -1136,8 +1188,9 @@ pub fn description_settings_text(cfg: &RawConfig) -> Option<ProviderSettings> {
 /// `%l` (location), the geocoder is enabled, and the unit carries raw GPS
 /// coordinates; a description job only when the format contains `%s`
 /// (subject/subtitle) and a description provider is enabled for the unit's
-/// kind. A unit whose format never uses a placeholder never triggers a
-/// provider call.
+/// kind; an author job only when a document's format contains `%a` and no
+/// embedded author exists. A unit whose format never uses a placeholder
+/// never triggers a provider call.
 pub async fn plan_provider_jobs(
     cfg: &RawConfig,
     analysis: &Analysis,
@@ -1158,6 +1211,10 @@ pub async fn plan_provider_jobs(
             .segments()
             .iter()
             .any(|s| matches!(s, Segment::Placeholder(Placeholder::Subject)));
+        let uses_author = fmt
+            .segments()
+            .iter()
+            .any(|s| matches!(s, Segment::Placeholder(Placeholder::Author)));
         if uses_location {
             if let (Some(g), Some(lat), Some(lon)) = (&geo, f.latitude, f.longitude) {
                 let lat_bytes = lat.to_le_bytes();
@@ -1235,6 +1292,34 @@ pub async fn plan_provider_jobs(
                         vision,
                         image: None,
                     },
+                });
+            }
+        }
+        // A document whose format uses `%a` but whose embedded metadata
+        // (EXIF/PDF/container) carried no author falls back to asking the
+        // text description provider who it thinks the author is. Only
+        // documents get this: other kinds have no extracted prose to reason
+        // from.
+        if uses_author
+            && f.kind == AssetKind::Document
+            && f.embedded_author
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            if let Some(desc) = description_settings(cfg, &f.kind) {
+                let input_hash = sha256(&[b"author", f.path.as_os_str().as_encoded_bytes()]);
+                jobs.push(ProviderJob {
+                    kind: ProviderKind::Author,
+                    settings: desc,
+                    unit: UnitRef {
+                        epoch,
+                        index: i,
+                        path: f.path.clone(),
+                    },
+                    input_hash,
+                    input: ProviderInput::Author { text: None },
                 });
             }
         }
@@ -2053,6 +2138,19 @@ mod tests {
         assert!(r.contains("Content:\nDear Finance Team"));
     }
 
+    #[test]
+    fn author_prompt_appends_path_and_content() {
+        let path = PathBuf::from("/home/u/docs/letter.pdf");
+        let p = author_prompt(&path, Some("Dear Finance Team"));
+        assert!(p.starts_with("Who is the author of this document?"));
+        assert!(p.contains("Path: /home/u/docs/letter.pdf"));
+        assert!(p.contains("Content:\nDear Finance Team"));
+        // No text -> no dangling content block; the path block stays.
+        let q = author_prompt(&path, None);
+        assert!(!q.contains("Content:"));
+        assert!(q.contains("Path: /home/u/docs/letter.pdf"));
+    }
+
     fn file_at(
         dir: &Path,
         name: &str,
@@ -2157,6 +2255,49 @@ mod tests {
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
         assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn plans_author_job_only_for_document_missing_author() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("author");
+        let mut no_author = file_at(&dir, "letter.pdf", AssetKind::Document, None, None);
+        // Whitespace-only embedded author counts as missing.
+        no_author.embedded_author = Some("   ".into());
+        let mut with_author = file_at(&dir, "memo.pdf", AssetKind::Document, None, None);
+        with_author.embedded_author = Some("Jane Doe".into());
+        // A photo with `%a` uses EXIF only; the provider never guesses
+        // authors for non-documents.
+        let photo = file_at(&dir, "IMG.jpg", AssetKind::Photo, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![no_author, with_author, photo],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%a/%f").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%a/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 3).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].unit.index, 0);
+        assert_eq!(jobs[0].kind, ProviderKind::Author);
+        assert!(matches!(
+            jobs[0].input,
+            ProviderInput::Author { text: None }
+        ));
     }
 
     #[tokio::test]

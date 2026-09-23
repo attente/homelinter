@@ -21,6 +21,7 @@ pub const SCHEMA_VERSION: &str = "1";
 /// `kind` column is constrained by convention.
 pub const KIND_GEOCODE: &str = "geocode";
 pub const KIND_DESCRIPTION: &str = "description";
+pub const KIND_AUTHOR: &str = "author";
 pub const KIND_FILENAME_ANALYSIS: &str = "filename_analysis";
 
 pub struct Cache {

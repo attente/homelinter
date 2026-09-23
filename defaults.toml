@@ -5,9 +5,9 @@
 # Use with: homelinter --config defaults.toml
 # Placeholders: %Y/%y year, %m/%d month/day, %H/%M/%S hour/minute/second,
 # %t title, %a artist/author, %l location, %s description, %c camera,
-# %h remote host, %k asset kind, %f original filename, %F normalized name,
-# %n stem, %e extension. See DESIGN.md "Destination Path Format Strings"
-# for the full placeholder list and sanitization rules.
+# %h remote host, %o remote owner, %k asset kind, %f original filename,
+# %F normalized name, %n stem, %e extension. See DESIGN.md "Destination
+# Path Format Strings" for the full placeholder list and sanitization rules.
 
 [target_paths]
 # Destination per asset kind, relative to $HOME (or absolute). Each value
