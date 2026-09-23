@@ -55,7 +55,7 @@ interface OverrideState {
   geoLanguage: string;
   geoContact: string;
   geoRate: string;
-  geoMaxWords: string;
+  geoNeighbourhoodCities: string;
   descEnabled: boolean;
   descService: string;
   descEndpoint: string;
@@ -81,7 +81,7 @@ const SCALAR_KEYS: Array<keyof OverrideState> = [
   "geoLanguage",
   "geoContact",
   "geoRate",
-  "geoMaxWords",
+  "geoNeighbourhoodCities",
   "descEnabled",
   "descService",
   "descEndpoint",
@@ -104,6 +104,10 @@ function str(v: unknown): string {
 
 function num(v: unknown): string {
   return typeof v === "number" ? String(v) : "";
+}
+
+function cityList(v: unknown): string {
+  return Array.isArray(v) ? v.map(String).join(", ") : "";
 }
 
 function obj(v: unknown): Json {
@@ -151,7 +155,7 @@ function formFromDoc(doc: Json): OverrideState {
     geoLanguage: str(geo.language),
     geoContact: str(geo.user_agent_contact),
     geoRate: num(geo.rate_limit_ms),
-    geoMaxWords: num(geo.max_words),
+    geoNeighbourhoodCities: cityList(geo.neighbourhood_cities),
     descEnabled: desc.enabled === true,
     descService: str(desc.service) || "ollama",
     descEndpoint: str(desc.endpoint),
@@ -253,11 +257,12 @@ function buildPatch(
       form.geoRate.trim() === "" || Number.isNaN(n) ? null : n;
     fields.push("geoRate");
   }
-  if (form.geoMaxWords.trim() !== num(effGeo.max_words)) {
-    const n = Number(form.geoMaxWords);
-    geo.max_words =
-      form.geoMaxWords.trim() === "" || Number.isNaN(n) ? null : n;
-    fields.push("geoMaxWords");
+  if (form.geoNeighbourhoodCities.trim() !== cityList(effGeo.neighbourhood_cities)) {
+    geo.neighbourhood_cities = form.geoNeighbourhoodCities
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0);
+    fields.push("geoNeighbourhoodCities");
   }
   if (Object.keys(geo).length > 0) patch.geocoder = geo;
 
@@ -510,7 +515,7 @@ export function ScanForm(props: ScanFormProps) {
         geoLanguage: "geocoder",
         geoContact: "geocoder",
         geoRate: "geocoder",
-        geoMaxWords: "geocoder",
+        geoNeighbourhoodCities: "geocoder",
         descEnabled: "description",
         descService: "description",
         descEndpoint: "description",
@@ -558,7 +563,7 @@ export function ScanForm(props: ScanFormProps) {
             geoLanguage: "language",
             geoContact: "user_agent_contact",
             geoRate: "rate_limit_ms",
-            geoMaxWords: "max_words",
+            geoNeighbourhoodCities: "neighbourhood_cities",
             descEnabled: "enabled",
             descService: "service",
             descEndpoint: "endpoint",
@@ -832,12 +837,14 @@ export function ScanForm(props: ScanFormProps) {
                   />
                 </label>
                 <label className="field">
-                  <span>location max words (0 = full)</span>
+                  <span>neighbourhood cities</span>
                   <input
-                    type="number"
-                    min={0}
-                    value={form.geoMaxWords}
-                    onChange={(e) => patch({ geoMaxWords: e.target.value })}
+                    type="text"
+                    placeholder="e.g. Toronto, Shibuya"
+                    value={form.geoNeighbourhoodCities}
+                    onChange={(e) =>
+                      patch({ geoNeighbourhoodCities: e.target.value })
+                    }
                   />
                 </label>
                 <label className="field">

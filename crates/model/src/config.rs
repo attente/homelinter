@@ -29,17 +29,6 @@ pub const DEFAULT_MAX_WORDS: u64 = 4;
 /// value is normalized into a lowercased, hyphenated path segment for a
 /// file stem or folder name.
 pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Do not mention the file type, extension, medium, path, or folder names (for example photo, image, video, movie, or document). Reply with only the keywords separated by spaces.";
-/// Default location-summary prompt template; `{words}` is substituted
-/// before the request, and the reverse-geocoded address is appended
-/// verbatim after it (location summaries always receive the address, so
-/// it needs no placeholder). The wording asks for a compact place name
-/// rather than a sentence, because the summary is normalized into a
-/// lowercased, hyphenated path segment for a file stem or folder name.
-pub const DEFAULT_LOCATION_PROMPT: &str = "Summarize this location into at most {words} words, for use as a file or folder name. Reply with only the place name.";
-/// Default word cap for `[geocoder] max_words`: a reverse-geocoded address
-/// is condensed to at most this many words before it is rendered into `%l`.
-/// `0` disables summarization and keeps the full address.
-pub const DEFAULT_LOCATION_MAX_WORDS: u64 = 2;
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
@@ -183,13 +172,13 @@ pub struct GeocoderConfig {
     pub language: Option<String>,
     #[serde(default)]
     pub user_agent_contact: Option<String>,
-    /// When set (> 0), the full reverse-geocoded address is summarized
-    /// into at most this many words by the description provider (LLM)
-    /// before it is used as the `%l` value. `0`/absent keeps the full
-    /// address. The summary is cached like any provider value and degrades
-    /// to the full address when no description provider is enabled.
+    /// Cities whose `%l` uses the finer neighbourhood name instead of the
+    /// settlement name; everywhere else (and when the provider supplies no
+    /// city) resolves at the city level. Matched case-insensitively against
+    /// the provider's `city` component. Empty (the default) uses the city
+    /// everywhere.
     #[serde(default)]
-    pub max_words: Option<u64>,
+    pub neighbourhood_cities: Vec<String>,
     /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. An additional floor on top of
     /// the service's built-in pacing (see "Provider Plugins" in DESIGN.md):
@@ -197,26 +186,11 @@ pub struct GeocoderConfig {
     /// `0` (the default) means no additional delay.
     #[serde(default)]
     pub rate_limit_ms: Option<u64>,
-    /// Prompt template for location summaries, used when summarization is
-    /// enabled (`max_words > 0`). `{location}` carries the full
-    /// reverse-geocoded address and `{words}`the effective word budget;
-    /// unknown placeholders are rejected at config time. Unset uses the
-    /// built-in template, keeping the wording identical to before this
-    /// key existed.
-    #[serde(default)]
-    pub prompt: Option<String>,
 }
 
 impl GeocoderConfig {
     pub fn geocoder_service(&self) -> GeocoderService {
         self.service.unwrap_or(GeocoderService::Nominatim)
-    }
-
-    /// The effective location-summary prompt template (default when unset).
-    pub fn summary_prompt(&self) -> String {
-        self.prompt
-            .clone()
-            .unwrap_or_else(|| DEFAULT_LOCATION_PROMPT.to_string())
     }
 }
 
@@ -763,20 +737,8 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         ));
     }
 
-    // description: per-modality key names are structural (an unknown key can
-    // never become valid); every other provider rule degrades at runtime
-    // and is reported as a warning instead.
-    // prompt templates are validated structurally: an unsupported
-    // placeholder can never become valid, so it stays a hard error like
-    // the document_extraction placeholder rule.
-    if let Some(t) = raw.geocoder.prompt.as_deref() {
-        if let Some(bad) = crate::prompt::prompt_template_error(t, &["words"]) {
-            fields.push((
-                "geocoder.prompt".into(),
-                format!("unsupported placeholder {bad} in prompt template (supported: {{words}}; the address is always appended, so {{location}} is not a placeholder; escape literal braces by doubling them)"),
-            ));
-        }
-    }
+    // geocoder: the address-component selection is structural (no keys to
+    // validate); readiness gaps are warnings instead.
     let desc = &raw.description;
     if let Some(e) = asset_kind::validate_per_modality_description_keys(
         desc.per_modality
@@ -1206,9 +1168,8 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
             "language": raw.geocoder.language,
             "user_agent_contact": raw.geocoder.user_agent_contact,
-            "max_words": raw.geocoder.max_words.unwrap_or(DEFAULT_LOCATION_MAX_WORDS),
+            "neighbourhood_cities": raw.geocoder.neighbourhood_cities,
             "rate_limit_ms": raw.geocoder.rate_limit_ms,
-            "prompt": raw.geocoder.summary_prompt(),
         }),
     );
     let mut desc = serde_json::Map::new();
@@ -1400,12 +1361,13 @@ mod tests {
             "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Describe with {words}, literal {{braces}}\"\n"
         );
         assert!(ok.is_ok());
-        let err = parse("[geocoder]\nenabled = true\nprompt = \"At {wat}\"\n");
+        // Geocoder: `neighbourhood_cities` is an optional string list and
+        // an unknown key is rejected; the default (unset) is empty.
+        let err = parse("[geocoder]\nenabled = true\ngranularity = \"city\"\n");
         assert!(err.is_err());
-        // `{location}` is not a placeholder: the address is always appended.
-        let err = parse("[geocoder]\nenabled = true\nprompt = \"At {location}\"\n");
-        assert!(err.is_err());
-        let ok = parse("[geocoder]\nenabled = true\nprompt = \"At {words}\"\n");
+        let ok = parse(
+            "[geocoder]\nenabled = true\nneighbourhood_cities = [\"Toronto\", \"Shibuya\"]\n",
+        );
         assert!(ok.is_ok());
 
         // Unset resolves to the built-in templates (the default wording). An
@@ -1415,7 +1377,7 @@ mod tests {
             rc.description.base_effective().prompt,
             DEFAULT_DESCRIPTION_PROMPT
         );
-        assert_eq!(rc.geocoder.summary_prompt(), DEFAULT_LOCATION_PROMPT);
+        assert!(rc.geocoder.neighbourhood_cities.is_empty());
         let rc = parse(
             "[description]\nenabled = true\nmodel = \"m\"\nprompt = \"Custom {words}\"\n\n[description.image]\nmodel = \"v\"\n"
         )

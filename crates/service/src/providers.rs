@@ -54,8 +54,7 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_LOCATION_MAX_WORDS, DEFAULT_LOCATION_PROMPT,
-    DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
@@ -149,13 +148,16 @@ pub struct ProviderSettings {
     pub model: Option<String>,
     pub max_words: Option<u64>,
     /// Prompt template for the request. For description jobs it carries the
-    /// file identity placeholders (`{name}`, `{path}`, `{words}`); for geocode
-    /// jobs it is the location-summary template (`{location}`, `{words}`).
+    /// file identity placeholders (`{name}`, `{path}`, `{words}`).
     /// Substituted per request by `render_prompt_template`.
     pub prompt: String,
     /// Longest side in pixels for photos forwarded to a vision backend;
     /// `None`/`0` forwards the original bytes unchanged.
     pub max_image_dimension: Option<u64>,
+    /// Cities whose `%l` uses the finer neighbourhood name instead of the
+    /// settlement name (geocode jobs only; empty everywhere else resolves
+    /// at the city level).
+    pub neighbourhood_cities: Vec<String>,
 }
 
 /// A single queued provider request.
@@ -272,15 +274,9 @@ pub async fn run_provider_worker(app: AppHandle) {
                     let timeout = provider_timeout(&app).await;
                     match tokio::time::timeout(timeout, invoke(&job)).await {
                         Ok(Ok(v)) => {
-                            // Geocode results are the full address; when
-                            // `[geocoder] max_words` is set, condense
-                            // it with the description provider before it is
-                            // cached and rendered into `%l`.
-                            let v = if job.kind == ProviderKind::Geocode {
-                                summarize_location(&app, &job, &v).await
-                            } else {
-                                v
-                            };
+                            // Geocode results already resolve the structured
+                            // locality; the value is cached as-is and
+                            // rendered into `%l`.
                             cache_put(&app, &job, &v).await;
                             Some(v)
                         }
@@ -422,19 +418,29 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
                 } => (*latitude, *longitude, language.as_deref()),
                 _ => return Err("mismatched provider input".to_string()),
             };
-            match job.settings.backend.as_str() {
-                "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await,
+            let locality = match job.settings.backend.as_str() {
+                "custom" => neutral_reverse_geocode(&job.settings, lat, lon, language).await?,
                 "nominatim" => {
                     if job.settings.endpoint.is_empty() {
-                        Err("nominatim geocoder needs an endpoint".to_string())
-                    } else {
-                        nominatim_reverse(&job.settings, lat, lon, language).await
+                        return Err("nominatim geocoder needs an endpoint".to_string());
                     }
+                    nominatim_reverse(&job.settings, lat, lon, language).await?
                 }
-                "photon" => photon_reverse(&job.settings, lat, lon, language).await,
-                "google" => google_reverse(&job.settings, lat, lon, language).await,
-                "mapbox" => mapbox_reverse(&job.settings, lat, lon, language).await,
-                backend => Err(format!("unknown geocoder backend '{backend}'")),
+                "photon" => photon_reverse(&job.settings, lat, lon, language).await?,
+                "google" => google_reverse(&job.settings, lat, lon, language).await?,
+                "mapbox" => mapbox_reverse(&job.settings, lat, lon, language).await?,
+                backend => return Err(format!("unknown geocoder backend '{backend}'")),
+            };
+            // Reduce the structured locality to the city (or the finer
+            // neighbourhood name for a configured city); an empty result is
+            // a failure (not cached), so `%l` keeps its coordinate fallback
+            // instead of rendering `unknown`.
+            let neighbourhood = wants_neighbourhood(&locality, &job.settings.neighbourhood_cities);
+            let resolved = resolve_locality(&locality, neighbourhood);
+            if resolved.trim().is_empty() {
+                Err("geocoder response has no place name".to_string())
+            } else {
+                Ok(resolved)
             }
         }
         ProviderKind::Description => {
@@ -585,20 +591,150 @@ async fn get_json(
     request_json(Method::GET, endpoint, api_key, user_agent, None).await
 }
 
+/// Structured reverse-geocode result: the provider's address components are
+/// split into priority-ordered buckets so `%l` can select a level
+/// deterministically, instead of asking an LLM to summarize free-text
+/// address strings it does not understand. Every provider parses its own
+/// schema into this normalized shape.
+#[derive(Debug, Clone, Default)]
+struct Locality {
+    /// Finest populated level, in provider priority: quarter, suburb, city
+    /// district, neighbourhood (e.g. "Dogenzaka", "Kensington Market").
+    fine: Option<String>,
+    /// Settlement level, in provider priority: city, town, village, hamlet,
+    /// municipality (e.g. "Toronto", or the Tokyo ward "Shibuya").
+    city: Option<String>,
+    /// Regional level, in provider priority: state, province, county
+    /// (e.g. "Ontario", "Gunma Prefecture").
+    region: Option<String>,
+    country: Option<String>,
+    /// Final free-text fallback (typically the full display address); used
+    /// only when every component at the requested level is empty, so a
+    /// provider that returns only free text still fulfills `%l`.
+    fallback: Option<String>,
+}
+
+/// First non-empty value among the given buckets (highest priority first).
+fn pick(parts: &[&Option<String>]) -> Option<String> {
+    parts
+        .iter()
+        .find_map(|p| p.as_ref().filter(|s| !s.trim().is_empty()).cloned())
+}
+
+/// Select the locality value for `%l`: the settlement (city) by default,
+/// falling down to coarser components (region, then country) and finally the
+/// provider's free-text display name when a level is absent. When
+/// `neighbourhood` is set (the unit's city is listed in
+/// `[geocoder] neighbourhood_cities`), the finest meaningful level
+/// (quarter/suburb/neighbourhood) is preferred instead, so frequented
+/// places read at neighbourhood level while trips stay a recognizable city.
+fn resolve_locality(loc: &Locality, neighbourhood: bool) -> String {
+    let selected = if neighbourhood {
+        pick(&[&loc.fine, &loc.city, &loc.region, &loc.country])
+    } else {
+        pick(&[&loc.city, &loc.region, &loc.country])
+    };
+    selected
+        .or_else(|| pick(&[&loc.fallback]))
+        .unwrap_or_default()
+}
+
+/// Whether the provider's `city` component matches one of the configured
+/// `neighbourhood_cities` (case-insensitive, trimmed on both sides).
+fn wants_neighbourhood(loc: &Locality, configured: &[String]) -> bool {
+    let Some(city) = loc.city.as_deref() else {
+        return false;
+    };
+    let city = city.trim().to_lowercase();
+    configured
+        .iter()
+        .any(|c| !c.trim().is_empty() && c.trim().to_lowercase() == city)
+}
+
+/// Collect provider address fields in priority order, dropping empty ones.
+fn first_of(addr: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| addr.get(k).and_then(Value::as_str))
+        .find(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// First Google `address_components` entry matching a type in priority order.
+fn google_component(components: &Value, types: &[&str]) -> Option<String> {
+    let named = |want: &str| -> Option<String> {
+        components.as_array()?.iter().find_map(|comp| {
+            let is_match = comp
+                .get("types")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|t| t.as_str() == Some(want)));
+            if !is_match {
+                return None;
+            }
+            comp.get("long_name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        })
+    };
+    types.iter().find_map(|t| named(t))
+}
+
+/// First Mapbox `context` entry whose `id` carries one of the given prefixes
+/// (priority order).
+fn mapbox_context(place: &Value, prefixes: &[&str]) -> Option<String> {
+    let arr = place.get("context").and_then(Value::as_array)?;
+    prefixes.iter().find_map(|prefix| {
+        arr.iter().find_map(|c| {
+            let id = c.get("id").and_then(Value::as_str).unwrap_or("");
+            let text = c.get("text").and_then(Value::as_str)?;
+            if id.starts_with(prefix) && !text.trim().is_empty() {
+                Some(text.to_string())
+            } else {
+                None
+            }
+        })
+    })
+}
+
 async fn nominatim_reverse(
     s: &ProviderSettings,
     lat: f64,
     lon: f64,
     language: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Locality, String> {
     let mut url = format!(
         "{}/reverse?format=jsonv2&lat={lat}&lon={lon}&addressdetails=1",
         s.endpoint.trim_end_matches('/')
     );
     append_query_param(&mut url, "accept-language", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    first_nonempty_pointer(&v, &["/display_name", "/address/city"])
-        .ok_or_else(|| "nominatim response has no place name".into())
+    Ok(nominatim_locality(&v))
+}
+
+fn nominatim_locality(v: &Value) -> Locality {
+    let addr = v.get("address").unwrap_or(&Value::Null);
+    let region = first_of(
+        addr,
+        &["state", "province", "state_district", "county", "region"],
+    );
+    Locality {
+        fine: first_of(
+            addr,
+            &["quarter", "suburb", "city_district", "neighbourhood"],
+        ),
+        city: first_of(addr, &["city", "town", "village", "hamlet", "municipality"]),
+        region,
+        country: addr
+            .get("country")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+        fallback: v
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+    }
 }
 
 async fn photon_reverse(
@@ -606,23 +742,33 @@ async fn photon_reverse(
     lat: f64,
     lon: f64,
     language: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Locality, String> {
     let mut url = format!(
         "{}/reverse?lat={lat}&lon={lon}",
         s.endpoint.trim_end_matches('/')
     );
     append_query_param(&mut url, "lang", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    first_nonempty_pointer(
-        &v,
-        &[
-            "/features/0/properties/name",
-            "/features/0/properties/city",
-            "/features/0/properties/state",
-            "/features/0/properties/country",
-        ],
-    )
-    .ok_or_else(|| "photon response has no place name".into())
+    let props = v
+        .get("features")
+        .and_then(|f| f.get(0))
+        .and_then(|feat| feat.get("properties"))
+        .unwrap_or(&Value::Null);
+    Ok(Locality {
+        fine: first_of(props, &["district", "locality"]),
+        city: first_of(props, &["city"]),
+        region: first_of(props, &["state", "county"]),
+        country: props
+            .get("country")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+        fallback: props
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+    })
 }
 
 async fn google_reverse(
@@ -630,7 +776,7 @@ async fn google_reverse(
     lat: f64,
     lon: f64,
     language: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Locality, String> {
     let key = s
         .api_key
         .as_deref()
@@ -648,8 +794,22 @@ async fn google_reverse(
             v["status"].as_str().unwrap_or("unknown")
         ));
     }
-    first_nonempty_pointer(&v, &["/results/0/formatted_address"])
-        .ok_or_else(|| "google response has no place name".into())
+    let comps = &v["results"][0]["address_components"];
+    Ok(Locality {
+        fine: google_component(
+            comps,
+            &["sublocality_level_1", "sublocality", "neighborhood"],
+        ),
+        city: google_component(comps, &["locality", "postal_town"]),
+        region: google_component(
+            comps,
+            &["administrative_area_level_1", "administrative_area_level_2"],
+        ),
+        country: google_component(comps, &["country"]),
+        fallback: v["results"][0]["formatted_address"]
+            .as_str()
+            .map(str::to_string),
+    })
 }
 
 async fn mapbox_reverse(
@@ -657,7 +817,7 @@ async fn mapbox_reverse(
     lat: f64,
     lon: f64,
     language: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Locality, String> {
     let token = s
         .api_key
         .as_deref()
@@ -669,8 +829,18 @@ async fn mapbox_reverse(
     );
     append_query_param(&mut url, "language", language);
     let v = get_json(&url, None, s.user_agent_contact.as_deref()).await?;
-    first_nonempty_pointer(&v, &["/features/0/place_name", "/features/0/text"])
-        .ok_or_else(|| "mapbox response has no place name".into())
+    let place = &v["features"][0];
+    Ok(Locality {
+        fine: mapbox_context(place, &["neighborhood", "district"]),
+        city: mapbox_context(place, &["place", "locality"]),
+        region: mapbox_context(place, &["region"]),
+        country: mapbox_context(place, &["country"]),
+        fallback: place
+            .get("place_name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// Raw file bytes are sent to the model's `images` field when present.
@@ -715,7 +885,7 @@ async fn neutral_reverse_geocode(
     latitude: f64,
     longitude: f64,
     language: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Locality, String> {
     if s.endpoint.is_empty() {
         return Err("custom geocoder needs an endpoint".to_string());
     }
@@ -725,8 +895,25 @@ async fn neutral_reverse_geocode(
         "language": language.unwrap_or(""),
     });
     let value = post_json(&s.endpoint, s.api_key.as_deref(), body).await?;
-    first_nonempty_pointer(&value, &["/name"])
-        .ok_or_else(|| "geocoder response has no 'name' field".to_string())
+    // The neutral contract's canonical answer is `name` (free text); a
+    // custom service may additionally return structured `neighbourhood`,
+    // `city`, `region`, and `country` fields, which take precedence over
+    // the raw name.
+    Ok(Locality {
+        fine: first_of(&value, &["neighbourhood", "quarter", "suburb"]),
+        city: first_of(&value, &["city", "town"]),
+        region: first_of(&value, &["region", "state"]),
+        country: value
+            .get("country")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+        fallback: value
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// Complete a description against the neutral `custom` contract: `POST`
@@ -843,40 +1030,6 @@ fn author_prompt(path: &Path, text: Option<&str>) -> String {
         }
     }
     prompt
-}
-
-/// Summarize a reverse-geocoded location into at most `max_words`
-/// words using the text description provider, when `[geocoder] max_words`
-/// is set and the text description provider is enabled. Any
-/// failure (provider disabled, unknown backend, timeout) returns the full
-/// location unchanged, so location resolution never depends on the LLM.
-/// The summary is cached under the geocode job's key.
-async fn summarize_location(app: &App, job: &ProviderJob, location: &str) -> String {
-    let max_words = job.settings.max_words.unwrap_or(0);
-    if max_words == 0 {
-        return location.to_string();
-    }
-    let cfg = {
-        let sess = app.session.lock().await;
-        sess.config.clone()
-    };
-    // Location summarization is a pure-text task:it always uses the
-    // text description provider (`[description.text]`, else the base), not
-    // the provider of the asset's content modality.
-    let Some(desc) = description_settings_text(&cfg) else {
-        return location.to_string();
-    };
-    let mut prompt =
-        render_prompt_template(&job.settings.prompt, &[("words", &max_words.to_string())]);
-    // The address is always forwarded verbatim after the rendered template,
-    // like the description provider's path and content blocks, so a custom
-    // summary template cannot omit it.
-    prompt.push_str("\n\nLocation: ");
-    prompt.push_str(location);
-    match complete(&desc, &prompt, None).await {
-        Ok(s) if !s.trim().is_empty() => s,
-        _ => location.to_string(),
-    }
 }
 
 /// Resolve one provider job for a unit: record a successful value (when
@@ -1081,16 +1234,9 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         endpoint.as_bytes(),
         language.as_deref().unwrap_or("").as_bytes(),
         cfg.geocoder.api_key.as_deref().unwrap_or("").as_bytes(),
-        // The word budget governs the summary, so a different cap must not
-        // reuse cached locations from another budget.
-        cfg.geocoder.max_words.unwrap_or(0).to_le_bytes().as_slice(),
-        // The summary prompt template shapes the request, so a different
-        // template must not reuse cached locations from another wording.
-        cfg.geocoder
-            .prompt
-            .as_deref()
-            .unwrap_or(DEFAULT_LOCATION_PROMPT)
-            .as_bytes(),
+        // The neighbourhood-city exceptions shape the resolved value, so a
+        // different list must not reuse cached locations from another list.
+        cfg.geocoder.neighbourhood_cities.join("\n").as_bytes(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -1102,9 +1248,10 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         language,
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
-        max_words: Some(cfg.geocoder.max_words.unwrap_or(DEFAULT_LOCATION_MAX_WORDS)),
-        prompt: cfg.geocoder.summary_prompt(),
+        max_words: None,
+        prompt: String::new(),
         max_image_dimension: None,
+        neighbourhood_cities: cfg.geocoder.neighbourhood_cities.clone(),
     })
 }
 
@@ -1155,6 +1302,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         model: eff.model,
         max_words: Some(eff.max_words),
         prompt: eff.prompt,
+        neighbourhood_cities: Vec::new(),
         max_image_dimension: Some(eff.max_image_dimension),
     })
 }
@@ -1220,23 +1368,15 @@ pub async fn plan_provider_jobs(
                 let lat_bytes = lat.to_le_bytes();
                 let lon_bytes = lon.to_le_bytes();
                 let lang = g.language.as_deref().unwrap_or("");
-                // The cached value may be the LLM summary, so the text
-                // description provider's identity joins the key: a model or
-                // word-budget change re-summarizes.
-                let desc_hash: Option<[u8; 32]> = if g.max_words.unwrap_or(0) > 0 {
-                    description_settings_text(cfg).map(|d| d.settings_hash)
-                } else {
-                    None
-                };
+                // Locality resolution is deterministic from the geocoder
+                // response; language is the only input that joins the key
+                // (the settings hash already covers the neighbourhood-city
+                // exceptions).
                 let mut input: Vec<u8> = Vec::new();
                 input.extend_from_slice(b"geocode");
                 input.extend_from_slice(&lat_bytes);
                 input.extend_from_slice(&lon_bytes);
                 input.extend_from_slice(lang.as_bytes());
-                if let Some(h) = desc_hash {
-                    input.extend_from_slice(b"summarize");
-                    input.extend_from_slice(&h);
-                }
                 let input_hash = sha256(&[input.as_slice()]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Geocode,
@@ -1376,7 +1516,7 @@ pub fn warmup_vision_models(jobs: &[ProviderJob]) {
 mod tests {
     use super::*;
 
-    use homelinter_model::config::{DEFAULT_DESCRIPTION_PROMPT, DEFAULT_LOCATION_MAX_WORDS};
+    use homelinter_model::config::DEFAULT_DESCRIPTION_PROMPT;
     use std::time::SystemTime;
 
     use axum::routing::post;
@@ -1558,7 +1698,8 @@ mod tests {
                 model: None,
                 max_words: None,
                 max_image_dimension: None,
-                prompt: DEFAULT_LOCATION_PROMPT.to_string(),
+                prompt: String::new(),
+                neighbourhood_cities: Vec::new(),
             },
             unit: UnitRef {
                 epoch,
@@ -1596,6 +1737,7 @@ mod tests {
                 max_words: Some(8),
                 max_image_dimension: Some(1024),
                 prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+                neighbourhood_cities: Vec::new(),
             },
             unit: UnitRef {
                 epoch,
@@ -1752,6 +1894,7 @@ mod tests {
             max_words: Some(12),
             max_image_dimension: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
         };
         let unit = UnitRef {
             epoch: 1,
@@ -1832,6 +1975,7 @@ mod tests {
             max_words: Some(8),
             max_image_dimension: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
         };
         let out = ollama_complete(&settings, "describe this", Some(&b"fake-image-bytes"[..]))
             .await
@@ -1870,6 +2014,7 @@ mod tests {
             max_words: Some(8),
             max_image_dimension: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
         };
         let out2 = ollama_complete(&settings2, "describe this", None)
             .await
@@ -1907,7 +2052,8 @@ mod tests {
             model: None,
             max_words: None,
             max_image_dimension: None,
-            prompt: DEFAULT_LOCATION_PROMPT.to_string(),
+            prompt: String::new(),
+            neighbourhood_cities: Vec::new(),
         };
         let mut last = BTreeMap::new();
         pace(&settings, &mut last).await;
@@ -2022,15 +2168,17 @@ mod tests {
         assert_eq!(s.endpoint, "http://geo.local");
         assert_eq!(s.min_interval, Duration::ZERO);
         assert_eq!(s.language.as_deref(), Some("en"));
-        // `[geocoder] max_words` defaults to a two-word summary; `0`
-        // explicitly disables summarization.
-        assert_eq!(s.max_words, Some(DEFAULT_LOCATION_MAX_WORDS));
-        let capped: RawConfig =
-            toml::from_str("[geocoder]\nenabled = true\nmax_words = 4\n").unwrap();
-        assert_eq!(geocoder_settings(&capped).unwrap().max_words, Some(4));
-        let uncapped: RawConfig =
-            toml::from_str("[geocoder]\nenabled = true\nmax_words = 0\n").unwrap();
-        assert_eq!(geocoder_settings(&uncapped).unwrap().max_words, Some(0));
+        // No neighbourhood-city exceptions by default; a configured list
+        // travels into the settings (and the cache key).
+        assert!(s.neighbourhood_cities.is_empty());
+        let fine: RawConfig = toml::from_str(
+            "[geocoder]\nenabled = true\nneighbourhood_cities = [\"Toronto\", \"Shibuya\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            geocoder_settings(&fine).unwrap().neighbourhood_cities,
+            vec!["Toronto".to_string(), "Shibuya".to_string()]
+        );
 
         // A configured rate limit paces the custom service.
         let paced: RawConfig = toml::from_str(
@@ -2114,6 +2262,7 @@ mod tests {
             model: None,
             max_words: Some(8),
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
             max_image_dimension: None,
         };
         // The default template renders the word budget; the full source path
@@ -2138,6 +2287,7 @@ mod tests {
         // verbatim - the template cannot omit them.
         let custom = ProviderSettings {
             prompt: "Give a short title in at most {words} words, brace {{literal}}".to_string(),
+            neighbourhood_cities: Vec::new(),
             max_words: Some(8),
             ..settings.clone()
         };
@@ -2373,6 +2523,145 @@ mod tests {
         assert_eq!(
             prepare_image_bytes(&path, 1024).unwrap(),
             b"not an image at all"
+        );
+    }
+
+    fn shibuya_locality() -> Locality {
+        nominatim_locality(&json!({
+            "display_name": "Dōgenzaka 2-chōme, Shibuya, Japan",
+            "address": {
+                "neighbourhood": "Dōgenzaka 2",
+                "quarter": "Dōgenzaka",
+                "city": "Shibuya",
+                "country": "Japan"
+            }
+        }))
+    }
+
+    #[test]
+    fn nominatim_locality_splits_structured_address() {
+        let loc = shibuya_locality();
+        // Quarter outranks the chome-level neighbourhood.
+        assert_eq!(loc.fine.as_deref(), Some("Dōgenzaka"));
+        assert_eq!(loc.city.as_deref(), Some("Shibuya"));
+        // The address carries no state/province name at ward level.
+        assert_eq!(loc.region, None);
+        assert_eq!(loc.country.as_deref(), Some("Japan"));
+
+        // A friendly state/province becomes the region fallback.
+        let loc = nominatim_locality(&json!({
+            "address": { "city": "Yokohama", "province": "Kanagawa Prefecture" }
+        }));
+        assert_eq!(loc.region.as_deref(), Some("Kanagawa Prefecture"));
+    }
+
+    #[test]
+    fn resolve_locality_is_city_by_default() {
+        let loc = shibuya_locality();
+        assert_eq!(resolve_locality(&loc, false), "Shibuya");
+        // A listed city uses the finer neighbourhood level instead.
+        assert_eq!(resolve_locality(&loc, true), "Dōgenzaka");
+
+        // An empty city falls through to region, then country, then the
+        // free-text fallback.
+        let loc = Locality {
+            country: Some("Portugal".into()),
+            fallback: Some("Lisbon, Portugal".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_locality(&loc, false), "Portugal");
+        let loc = Locality {
+            fallback: Some("Somewhere".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_locality(&loc, false), "Somewhere");
+        assert_eq!(resolve_locality(&loc, true), "Somewhere");
+    }
+
+    #[test]
+    fn wants_neighbourhood_matches_configured_cities() {
+        let loc = shibuya_locality();
+        assert!(wants_neighbourhood(&loc, &["Shibuya".to_string()]));
+        // Case-insensitive and trimmed; unrelated cities do not match.
+        assert!(wants_neighbourhood(&loc, &[" shibuya ".to_string()]));
+        assert!(!wants_neighbourhood(&loc, &["Toronto".to_string()]));
+        assert!(!wants_neighbourhood(&loc, &[]));
+        // No city component never matches.
+        let loc = Locality::default();
+        assert!(!wants_neighbourhood(&loc, &["Shibuya".to_string()]));
+    }
+
+    #[test]
+    fn photon_locality_splits_structured_address() {
+        let props = json!({
+            "district": "Altstadt",
+            "city": "Zürich",
+            "state": "Zürich",
+            "country": "Schweiz"
+        });
+        assert_eq!(
+            first_of(&props, &["district", "locality"]).as_deref(),
+            Some("Altstadt")
+        );
+        assert_eq!(first_of(&props, &["city"]).as_deref(), Some("Zürich"));
+        assert_eq!(
+            first_of(&props, &["state", "county"]).as_deref(),
+            Some("Zürich")
+        );
+    }
+
+    #[test]
+    fn google_locality_picks_component_types() {
+        let comps = json!([
+            { "long_name": "Kensington Market", "types": ["neighborhood", "political"] },
+            { "long_name": "Toronto", "types": ["locality", "political"] },
+            { "long_name": "Ontario", "types": ["administrative_area_level_1"] },
+            { "long_name": "Canada", "types": ["country"] }
+        ]);
+        assert_eq!(
+            google_component(
+                &comps,
+                &["sublocality_level_1", "sublocality", "neighborhood"]
+            )
+            .as_deref(),
+            Some("Kensington Market")
+        );
+        assert_eq!(
+            google_component(&comps, &["locality"]).as_deref(),
+            Some("Toronto")
+        );
+        assert_eq!(
+            google_component(&comps, &["country"]).as_deref(),
+            Some("Canada")
+        );
+    }
+
+    #[test]
+    fn mapbox_locality_picks_id_prefixes() {
+        let place = json!({
+            "place_name": "Kensington Market, Toronto, Ontario, Canada",
+            "context": [
+                { "id": "neighborhood.123", "text": "Kensington Market" },
+                { "id": "place.456", "text": "Toronto" },
+                { "id": "region.789", "text": "Ontario" },
+                { "id": "country.0", "text": "Canada" }
+            ]
+        });
+        assert_eq!(
+            mapbox_context(&place, &["neighborhood", "district"]).as_deref(),
+            Some("Kensington Market")
+        );
+        assert_eq!(
+            mapbox_context(&place, &["place", "locality"]).as_deref(),
+            Some("Toronto")
+        );
+        assert_eq!(
+            mapbox_context(&place, &["region"]).as_deref(),
+            Some("Ontario")
+        );
+        assert_eq!(
+            mapbox_context(&place, &["country"]).as_deref(),
+            Some("Canada")
         );
     }
 }
