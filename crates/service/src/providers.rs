@@ -995,8 +995,9 @@ fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
 /// carries the filename) for every file and the content for text documents,
 /// and a custom template cannot omit either. `None` text degrades to the
 /// template plus the path block alone. The completion the model returns is
-/// used verbatim as the `%s` value, so the prompt asks for a short noun
-/// phrase.
+/// used verbatim as the `%s` value; for a text document the default template
+/// asks for the original title first and a short noun phrase only as a
+/// fallback, so the same call also backs `%t`.
 fn description_prompt(path: &Path, text: Option<&str>, settings: &ProviderSettings) -> String {
     let full_path = path.display().to_string();
     let max_words = settings.max_words.unwrap_or(DEFAULT_MAX_WORDS);
@@ -1263,9 +1264,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
 /// falling back to the base `[description]` entry when no per-modality
 /// override exists.
 fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<ProviderSettings> {
-    let eff = modality
-        .and_then(|m| cfg.description.modality_effective(m))
-        .unwrap_or_else(|| cfg.description.base_effective());
+    let eff = cfg.description.effective_for_modality(modality);
     if !eff.enabled {
         return None;
     }
@@ -1317,7 +1316,9 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 /// executable, other) have no content source for `%s` - the LLM would only
 /// guess from the filename - so no provider is planned and `%s` falls back
 /// to an existing embedded title or the filename stem. Documents also use
-/// this provider for `%a` author inference. A unit that already carries an
+/// this provider for `%a` author inference, and to recover a title for
+/// `%t` when the destination format uses it but the document carries no
+/// embedded title. A unit that already carries an
 /// authoritative embedded title never gets a provider planned either; the
 /// title is used verbatim.
 pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
@@ -1325,10 +1326,10 @@ pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<Provide
     description_settings_for(cfg, Some(m))
 }
 
-/// The text description provider, used for location summaries (a pure-text
-/// task) and for describing text documents:ithe per-modality
-/// `[description.text]` override when present, else the base `[description]`
-/// entry.
+/// The text description provider, used to describe text documents (and any
+/// other pure-text task): the per-modality `[description.text]` override
+/// when present, else the base `[description]` entry. The built-in wording
+/// recovers a document's original title before falling back to keywords.
 pub fn description_settings_text(cfg: &RawConfig) -> Option<ProviderSettings> {
     description_settings_for(cfg, Some("text"))
 }
@@ -1366,6 +1367,10 @@ pub async fn plan_provider_jobs(
             .segments()
             .iter()
             .any(|s| matches!(s, Segment::Placeholder(Placeholder::Subject)));
+        let uses_title = fmt
+            .segments()
+            .iter()
+            .any(|s| matches!(s, Segment::Placeholder(Placeholder::Title)));
         let uses_author = fmt
             .segments()
             .iter()
@@ -1402,7 +1407,12 @@ pub async fn plan_provider_jobs(
                 });
             }
         }
-        if uses_subject && f.authoritative_title().is_none() {
+        // Documents whose format uses `%t` need a title even when it never
+        // uses `%s`: the provider recovers the original title from the
+        // content (falling back to keywords). Other kinds only consult the
+        // provider for `%s`; their `%t` uses embedded metadata or the stem.
+        let wants_description = uses_subject || (f.kind == AssetKind::Document && uses_title);
+        if wants_description && f.authoritative_title().is_none() {
             if let Some(desc) = description_settings(cfg, &f.kind) {
                 // Photos with an image-capable backend (ollama) get the raw
                 // bytes analyzed; other kinds stay text/filename-only. The vision
@@ -1524,6 +1534,7 @@ mod tests {
     use super::*;
 
     use homelinter_model::config::DEFAULT_DESCRIPTION_PROMPT;
+    use homelinter_model::config::DEFAULT_DOCUMENT_DESCRIPTION_PROMPT;
     use std::time::SystemTime;
 
     use axum::routing::post;
@@ -2461,6 +2472,48 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].unit.index, 1);
         assert_eq!(jobs[0].kind, ProviderKind::Description);
+    }
+
+    #[tokio::test]
+    async fn documents_plan_a_title_job_for_percent_t() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("title-t");
+        // Untitled document whose format uses `%t`: the provider recovers
+        // the title, so a job is planned even without `%s`.
+        let doc = file_at(&dir, "a.pdf", AssetKind::Document, None, None);
+        // Embedded title already answers `%t`: no job.
+        let mut titled_doc = file_at(&dir, "b.pdf", AssetKind::Document, None, None);
+        titled_doc.embedded_title = Some("Report".into());
+        // A photo's `%t` uses embedded metadata only; it never calls the
+        // provider for a title.
+        let photo = file_at(&dir, "c.jpg", AssetKind::Photo, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![doc, titled_doc, photo],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%t.%e").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%t.%e").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 9).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].unit.index, 0);
+        assert_eq!(jobs[0].kind, ProviderKind::Description);
+        // The document modality carries the title-first wording.
+        assert_eq!(jobs[0].settings.prompt, DEFAULT_DOCUMENT_DESCRIPTION_PROMPT);
     }
 
     #[tokio::test]

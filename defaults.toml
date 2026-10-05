@@ -40,7 +40,8 @@ neighbourhood_cities = []
 # rate_limit_ms = 0
 
 [description]
-# Content descriptions for %s via an LLM. Requires a reachable provider
+# Content descriptions for %s (and recovered document titles for %t) via an
+# LLM. Requires a reachable provider
 # when enabled; model is required then, api_key only for openrouter.
 # Per-modality overrides ([description.text], [description.image],
 # [description.video], [description.audio]) inherit unset keys from this base
@@ -53,7 +54,8 @@ model = ""                  # required when enabled = true
 api_key = ""                # optional; sent as Authorization: Bearer
 max_words = 4                   # maximum words in the generated description
 # Optional prompt template; placeholder {words} ({{ }} for literal braces).
-# Unset = built-in wording describing the file in at most max_words words.
+# Unset = built-in wording: documents recover the original title first and
+# fall back to at most max_words keywords, other modalities use keywords.
 # The full file path (carrying the filename) and any extracted document text
 # are always appended automatically.
 # prompt = "Describe the file in at most {words} words"

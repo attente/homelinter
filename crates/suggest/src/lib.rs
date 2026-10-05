@@ -320,7 +320,15 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         ),
         None => date_from_time(f.modified),
     };
-    let title = f.embedded_title.clone().unwrap_or_else(|| stem.clone());
+    // `%t` precedence: embedded title metadata, then a content-derived
+    // title or description (the `%s` provider value, which for documents is
+    // the recovered original title), then the filename stem. `%s` itself
+    // prefers the authoritative title first (see below).
+    let title = f
+        .authoritative_title()
+        .map(str::to_owned)
+        .or_else(|| f.subject.clone())
+        .unwrap_or_else(|| stem.clone());
     PlaceholderValues {
         year,
         year2,
@@ -627,5 +635,19 @@ mod tests {
             file_values(&f).subject.as_deref(),
             Some("Sunset over the River")
         );
+    }
+
+    #[test]
+    fn title_falls_back_to_the_provider_value_then_stem() {
+        let mut f = analyzed("/tmp/Untitled.pdf");
+        // No provider value and no embedded title: the stem is the title.
+        assert_eq!(file_values(&f).title.as_deref(), Some("Untitled"));
+        // A provider value (the recovered original title for documents)
+        // backs `%t` when no embedded title exists.
+        f.subject = Some("Quarterly Report".into());
+        assert_eq!(file_values(&f).title.as_deref(), Some("Quarterly Report"));
+        // Embedded metadata still wins over the provider value.
+        f.embedded_title = Some("  The Real Title ".into());
+        assert_eq!(file_values(&f).title.as_deref(), Some("The Real Title"));
     }
 }

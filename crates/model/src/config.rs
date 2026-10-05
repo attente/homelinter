@@ -29,6 +29,13 @@ pub const DEFAULT_MAX_WORDS: u64 = 4;
 /// value is normalized into a lowercased, hyphenated path segment for a
 /// file stem or folder name.
 pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Do not mention the file type, extension, medium, path, or folder names (for example photo, image, video, movie, or document). Reply with only the keywords separated by spaces.";
+/// Default description prompt for text documents (the `text` modality).
+/// Documents often state their own title, so the model is asked to recover
+/// the full original title first and only fall back to keyword extraction
+/// when the content carries no title. `{words}` bounds the keyword fallback
+/// (a recovered title is used verbatim, however long). As with the generic
+/// prompt, the source path and extracted text are appended after it.
+pub const DEFAULT_DOCUMENT_DESCRIPTION_PROMPT: &str = "Read this document and reply with its full original title if the document states one (for example a title, heading, or subject line), preserving the wording exactly. If the document states no title, reply with a short description of its subject matter in at most {words} keywords instead. Do not mention the file type, extension, medium, path, or folder names (for example document, PDF, or folder names). Reply with only the title or the keywords.";
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
@@ -292,6 +299,39 @@ impl DescriptionConfig {
         self.per_modality
             .get(modality)
             .map(|p| p.effective(&self.base))
+    }
+
+    /// The effective settings for one content modality, applying the
+    /// modality's built-in default prompt when neither the per-modality
+    /// override nor the base entry set one. `None` selects the base entry.
+    /// Unlike [`Self::modality_effective`], this returns settings even when
+    /// no per-modality override exists, so a caller can address the base
+    /// entry as the fallback for a specific modality.
+    pub fn effective_for_modality(&self, modality: Option<&str>) -> EffectiveDescription {
+        let Some(m) = modality else {
+            return self.base_effective();
+        };
+        let mut eff = match self.per_modality.get(m) {
+            Some(p) => p.effective(&self.base),
+            None => self.base.effective(&self.base),
+        };
+        let explicit = self.base.prompt.is_some()
+            || self.per_modality.get(m).is_some_and(|p| p.prompt.is_some());
+        if !explicit {
+            eff.prompt = default_description_prompt(m).to_string();
+        }
+        eff
+    }
+}
+
+/// The built-in prompt for a content modality when neither the base entry
+/// nor a per-modality override sets one. Documents (`text`) recover their
+/// original title and fall back to keywords; every other modality uses the
+/// generic keyword prompt.
+pub fn default_description_prompt(modality: &str) -> &'static str {
+    match modality {
+        "text" => DEFAULT_DOCUMENT_DESCRIPTION_PROMPT,
+        _ => DEFAULT_DESCRIPTION_PROMPT,
     }
 }
 
@@ -1386,6 +1426,39 @@ mod tests {
         let image = rc.description.modality_effective("image").unwrap();
         assert_eq!(base.prompt, "Custom {words}");
         assert_eq!(image.prompt, "Custom {words}");
+    }
+
+    #[test]
+    fn text_modality_defaults_to_the_document_title_prompt() {
+        let rc = parse("").unwrap();
+        // Documents recover their original title; other modalities keep the
+        // generic keyword wording. The base entry (no modality) stays
+        // generic.
+        assert_eq!(
+            rc.description.effective_for_modality(Some("text")).prompt,
+            DEFAULT_DOCUMENT_DESCRIPTION_PROMPT
+        );
+        assert_eq!(
+            rc.description.effective_for_modality(Some("image")).prompt,
+            DEFAULT_DESCRIPTION_PROMPT
+        );
+        assert_eq!(
+            rc.description.effective_for_modality(None).prompt,
+            DEFAULT_DESCRIPTION_PROMPT
+        );
+        // An explicit base prompt is inherited by every modality, so the
+        // document default only applies when nothing was configured.
+        let rc = parse("[description]\nprompt = \"Base {words}\"\n").unwrap();
+        assert_eq!(
+            rc.description.effective_for_modality(Some("text")).prompt,
+            "Base {words}"
+        );
+        // A per-modality override wins over the document default.
+        let rc = parse("[description.text]\nprompt = \"Text {words}\"\n").unwrap();
+        assert_eq!(
+            rc.description.effective_for_modality(Some("text")).prompt,
+            "Text {words}"
+        );
     }
 
     #[test]
