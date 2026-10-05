@@ -82,6 +82,20 @@ pub struct AnalyzedFile {
     pub page_count: Option<u64>,
 }
 
+impl AnalyzedFile {
+    /// The authoritative title for this file when one already exists in
+    /// embedded metadata: a document/container title, an ID3 title, or an
+    /// EXIF title. Occupies the `%s` subject in preference to a generated
+    /// description, so a titled file never needs a description provider
+    /// call. `None` when no extractor produced a non-empty title.
+    pub fn authoritative_title(&self) -> Option<&str> {
+        self.embedded_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    }
+}
+
 /// One confirmed duplicate group: files with identical full-content
 /// hashes. The keeper is the preferred file; the rest are deletion
 /// candidates.

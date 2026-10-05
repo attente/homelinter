@@ -1095,16 +1095,20 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             trial.subject = m.subject.clone().or(trial.subject);
             trial.embedded_author = m.author.clone().or(trial.embedded_author);
         }
-        // A description provider failure should degrade to the stable source
-        // filename stem rather than the generic `unknown` placeholder. This
-        // keeps `%s` useful without pretending that the provider produced a
-        // description.
+        // A description provider failure should degrade to the authoritative
+        // embedded title or the stable source filename stem rather than the
+        // generic `unknown` placeholder. This keeps `%s` useful without
+        // pretending that the provider produced a description.
         if job.kind == ProviderKind::Description && value.is_none() {
             trial.subject = f
-                .path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .filter(|stem| !stem.is_empty())
+                .authoritative_title()
+                .map(str::to_owned)
+                .or_else(|| {
+                    f.path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .filter(|stem| !stem.is_empty())
+                })
                 .or(trial.subject);
         }
         let fmt = ctx.formats.get(&trial.kind);
@@ -1312,8 +1316,10 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 /// Kinds without a content modality (repository, archive, data,
 /// executable, other) have no content source for `%s` - the LLM would only
 /// guess from the filename - so no provider is planned and `%s` falls back
-/// to the filename stem. Documents also use this provider for `%a` author
-/// inference.
+/// to an existing embedded title or the filename stem. Documents also use
+/// this provider for `%a` author inference. A unit that already carries an
+/// authoritative embedded title never gets a provider planned either; the
+/// title is used verbatim.
 pub fn description_settings(cfg: &RawConfig, kind: &AssetKind) -> Option<ProviderSettings> {
     let m = description_modality(*kind)?;
     description_settings_for(cfg, Some(m))
@@ -1335,10 +1341,11 @@ pub fn description_settings_text(cfg: &RawConfig) -> Option<ProviderSettings> {
 /// Gating: a geocode job is planned only when the unit's format contains
 /// `%l` (location), the geocoder is enabled, and the unit carries raw GPS
 /// coordinates; a description job only when the format contains `%s`
-/// (subject/subtitle) and a description provider is enabled for the unit's
-/// kind; an author job only when a document's format contains `%a` and no
-/// embedded author exists. A unit whose format never uses a placeholder
-/// never triggers a provider call.
+/// (subject/subtitle), a description provider is enabled for the unit's
+/// kind, and the unit has no authoritative title (embedded metadata already
+/// supplies `%s`); an author job only when a document's format contains
+/// `%a` and no embedded author exists. A unit whose format never uses a
+/// placeholder never triggers a provider call.
 pub async fn plan_provider_jobs(
     cfg: &RawConfig,
     analysis: &Analysis,
@@ -1395,7 +1402,7 @@ pub async fn plan_provider_jobs(
                 });
             }
         }
-        if uses_subject {
+        if uses_subject && f.authoritative_title().is_none() {
             if let Some(desc) = description_settings(cfg, &f.kind) {
                 // Photos with an image-capable backend (ollama) get the raw
                 // bytes analyzed; other kinds stay text/filename-only. The vision
@@ -2414,6 +2421,46 @@ mod tests {
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
         assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn titled_units_skip_the_description_provider() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("titled");
+        // An embedded title already answers `%s`: no provider call.
+        let mut titled_doc = file_at(&dir, "a.pdf", AssetKind::Document, None, None);
+        titled_doc.embedded_title = Some("Quarterly Report".into());
+        // Whitespace-only title counts as absent and still asks the provider.
+        let mut blank_title = file_at(&dir, "b.pdf", AssetKind::Document, None, None);
+        blank_title.embedded_title = Some("   ".into());
+        // A titled photo is skipped too; the rule is kind-independent.
+        let mut titled_photo = file_at(&dir, "c.jpg", AssetKind::Photo, None, None);
+        titled_photo.embedded_title = Some("Sunset".into());
+        let analysis = Arc::new(Analysis {
+            files: vec![titled_doc, blank_title, titled_photo],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%s/%f").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 5).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].unit.index, 1);
+        assert_eq!(jobs[0].kind, ProviderKind::Description);
     }
 
     #[tokio::test]

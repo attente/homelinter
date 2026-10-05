@@ -335,7 +335,11 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
             .location
             .clone()
             .or_else(|| coordinate_fallback(f.latitude, f.longitude)),
-        subject: f.subject.clone().or_else(|| Some(stem.clone())),
+        subject: f
+            .authoritative_title()
+            .map(str::to_owned)
+            .or_else(|| f.subject.clone())
+            .or_else(|| Some(stem.clone())),
         camera: f.camera_model.clone(),
         remote_host: None,
         remote_owner: None,
@@ -585,5 +589,43 @@ mod tests {
         assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/b/c")), "c");
         assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/x")), "../x");
         assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/b")), ".");
+    }
+
+    fn analyzed(path: &str) -> AnalyzedFile {
+        AnalyzedFile {
+            path: PathBuf::from(path),
+            kind: AssetKind::Photo,
+            size: 1,
+            modified: std::time::SystemTime::now(),
+            created: None,
+            full_hash: None,
+            provenance: Provenance::default(),
+            extracted_date: None,
+            date_source: "",
+            embedded_title: None,
+            embedded_author: None,
+            camera_model: None,
+            latitude: None,
+            longitude: None,
+            location: None,
+            subject: None,
+            bitrate_kbps: None,
+            duration_secs: None,
+            page_count: None,
+        }
+    }
+
+    #[test]
+    fn subject_prefers_authoritative_title_over_provider_and_stem() {
+        let mut f = analyzed("/tmp/IMG_0001.jpg");
+        f.subject = Some("provider guess".into());
+        // No title: the provider description wins over the stem fallback.
+        assert_eq!(file_values(&f).subject.as_deref(), Some("provider guess"));
+        // An embedded title is authoritative and wins over both.
+        f.embedded_title = Some("  Sunset over the River \n".into());
+        assert_eq!(
+            file_values(&f).subject.as_deref(),
+            Some("Sunset over the River")
+        );
     }
 }
