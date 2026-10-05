@@ -304,6 +304,7 @@ export function Browse(props: BrowseProps) {
                   className="row-hit"
                   onClick={() => setOpenId(s.id)}
                 >
+                  {s.metadata_pending && <span className="spinner" aria-hidden="true" />}
                   {rowText(s, root)}
                 </button>
               </li>

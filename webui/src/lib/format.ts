@@ -41,8 +41,19 @@ export function shorten(s: string, max: number): string {
   return `...${s.slice(s.length - keep)}`;
 }
 
+/** Last path segment, for the compact "scanning <filename>" placeholder. */
+function fileName(path: string): string {
+  const part = path.split('/').pop();
+  return part && part.length > 0 ? part : path;
+}
+
 export function rowLabel(s: Suggestion, root?: string | null): string {
   const marker = s.selected ? '[x]' : '[ ]';
+  // A suggestion whose provider metadata is still in flight has no stable
+  // destination yet, so it is shown as an in-progress scan of its file.
+  if (s.metadata_pending) {
+    return `${marker} scanning ${fileName(s.target)}`;
+  }
   const name = pathLabel(s.target, root);
   let action: string;
   if (s.type === 'delete') {
@@ -55,11 +66,10 @@ export function rowLabel(s: Suggestion, root?: string | null): string {
     action = `move ${name} to ${dest}`;
   }
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
-  const pending = s.metadata_pending ? ' [metadata pending]' : '';
   const rejected = s.rejection_reason
     ? ` [rejected: ${head(s.rejection_reason, 48)}]`
     : '';
-  return `${marker} ${action}${status}${pending}${rejected}`;
+  return `${marker} ${action}${status}${rejected}`;
 }
 
 /** rowLabel without the leading selection marker, for use next to a real checkbox. */

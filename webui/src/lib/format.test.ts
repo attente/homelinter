@@ -105,11 +105,12 @@ describe('format', () => {
     expect(asciiOnly(label)).toBe(true);
   });
 
-  it('row label marks pending provider metadata', () => {
+  it('row label shows a scanning placeholder while provider metadata is pending', () => {
     const pending = rowLabel(sampleSuggestion({ metadata_pending: true }));
-    expect(pending).toContain('[metadata pending]');
-    const resolved = rowLabel(sampleSuggestion({ metadata_pending: false }));
-    expect(resolved).not.toContain('[metadata pending]');
+    expect(pending).toBe('[ ] scanning IMG_1.jpg');
+    const resolved = rowLabel(sampleSuggestion({ metadata_pending: false }), '/home/a');
+    expect(resolved).toContain('move IMG_1.jpg to');
+    expect(resolved).not.toContain('scanning');
   });
 
   it('row label shows the rejection reason when present', () => {

@@ -1120,7 +1120,7 @@ impl App {
 
         let items: Vec<ListItem> = shown
             .iter()
-            .map(|r| ListItem::new(row_label(r, &self.root)))
+            .map(|r| ListItem::new(row_label(r, &self.root, self.frame)))
             .collect();
         let title = format!(" Suggestions ({n} matching) ");
         let list = List::new(items)
@@ -1362,8 +1362,22 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// One-line label for the suggestions list, ASCII only.
-fn row_label(r: &Row, root: &str) -> Line<'static> {
+///
+/// A suggestion whose provider metadata is still in flight has no stable
+/// destination yet, so it is shown as an animated "scanning <filename>"
+/// placeholder, using `frame` to pick the spinner glyph.
+fn row_label(r: &Row, root: &str, frame: u64) -> Line<'static> {
     let marker = if r.selected { "[x]" } else { "[ ]" };
+    let color = if r.selected {
+        Color::Green
+    } else {
+        Color::White
+    };
+    if r.pending_meta {
+        let spinner = "-\\|/".chars().nth((frame % 4) as usize).unwrap_or('-');
+        let text = format!("{marker} {spinner} scanning {}", file_name(&r.target));
+        return Line::from(Span::styled(text, Style::new().fg(color)));
+    }
     let name = path_label(&r.target, root);
     let dest = if r.new_path.is_empty() {
         "delete".to_string()
@@ -1380,21 +1394,16 @@ fn row_label(r: &Row, root: &str) -> Line<'static> {
     } else {
         " [rejected]".to_string()
     };
-    let pending = if r.pending_meta {
-        " [metadata pending]".to_string()
-    } else {
-        String::new()
-    };
     let text = format!(
-        "{marker} {:<6} {:<8} {name} -> {dest}{status}{pending}{reject}",
+        "{marker} {:<6} {:<8} {name} -> {dest}{status}{reject}",
         r.typ, r.kind
     );
-    let color = if r.selected {
-        Color::Green
-    } else {
-        Color::White
-    };
     Line::from(Span::styled(text, Style::new().fg(color)))
+}
+
+/// Last path segment, for the compact "scanning <filename>" placeholder.
+fn file_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 /// A path as shown in a suggestion row: made relative to the scan root when
@@ -1698,13 +1707,25 @@ mod tests {
     #[test]
     fn row_label_is_ascii_and_marks_selection() {
         let r = sample_row();
-        let label = row_label(&r, "/home/a").to_string();
+        let label = row_label(&r, "/home/a", 0).to_string();
         assert!(label.starts_with("[ ]"));
         assert!(label.contains("IMG_1.jpg -> Pictures/2024/IMG_1.jpg"));
         assert!(!label.contains('\u{2192}'));
         let mut sel = r.clone();
         sel.selected = true;
-        assert!(row_label(&sel, "/home/a").to_string().starts_with("[x]"));
+        assert!(row_label(&sel, "/home/a", 0).to_string().starts_with("[x]"));
+    }
+
+    #[test]
+    fn row_label_shows_scanning_placeholder_for_pending_metadata() {
+        let mut r = sample_row();
+        r.pending_meta = true;
+        let label = row_label(&r, "/home/a", 0).to_string();
+        assert_eq!(label, "[ ] - scanning IMG_1.jpg");
+        let spun = row_label(&r, "/home/a", 1).to_string();
+        assert_eq!(spun, "[ ] \\ scanning IMG_1.jpg");
+        r.pending_meta = false;
+        assert!(row_label(&r, "/home/a", 0).to_string().contains(" -> "));
     }
 
     #[test]
