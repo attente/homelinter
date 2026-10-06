@@ -1,8 +1,9 @@
 //! Batch validation of a set of suggestions before execution.
 //!
 //! Validation is deterministic and idempotent over the provided slice. It
-//! detects destination collisions (two moves to the same path), moves that
-//! would write into a planned delete or another move's target, deletes of
+//! detects destination collisions (every suggestion in a collision set is
+//! rejected when multiple moves share a destination), moves that would
+//! write into a planned delete or another move's target, deletes of
 //! objects another suggestion depends on, and objects whose identity could
 //! not be captured at scan time. Rejected suggestions are marked
 //! `Rejected` with a machine-readable reason; execution skips them without
@@ -17,7 +18,9 @@
 //! collision detection.
 
 use std::collections::HashMap;
+use std::path::Path;
 
+use homelinter_model::path;
 use homelinter_model::suggestion::{Suggestion, SuggestionStatus, SuggestionType};
 
 /// Validate every suggestion in `items`, marking rejections in place.
@@ -31,7 +34,13 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
     // Precompute sort keys so later indexing never borrows `items` mutably
     // while a suggestion is being inspected.
     let sort_keys: Vec<String> = items.iter().map(|s| s.sort_key()).collect();
-    let mut dest_claims: HashMap<String, usize> = HashMap::new();
+    // Collision maps are keyed by `path::sort_key`, which applies the host
+    // *platform's* collision comparison (case-folded on a Windows build,
+    // exact on a Unix build). Per "Platform Scope" this follows the host
+    // platform's semantics rather than probing the target filesystem's case
+    // sensitivity, so a Unix host scanning a case-insensitive mount (NTFS,
+    // exFAT, SMB) does not fold case here.
+    let mut dest_claims: HashMap<String, Vec<usize>> = HashMap::new();
     let mut delete_targets: HashMap<String, usize> = HashMap::new();
     let mut source_keys: HashMap<String, usize> = HashMap::new();
 
@@ -42,14 +51,17 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
         match s.suggestion_type {
             SuggestionType::Move => {
                 if let Some(new_path) = &s.new_path {
-                    dest_claims.insert(new_path.clone(), i);
+                    dest_claims
+                        .entry(path::sort_key(Path::new(new_path)))
+                        .or_default()
+                        .push(i);
                 }
             }
             SuggestionType::Delete => {
-                delete_targets.insert(s.target.clone(), i);
+                delete_targets.insert(path::sort_key(Path::new(&s.target)), i);
             }
         }
-        source_keys.insert(s.target.clone(), i);
+        source_keys.insert(path::sort_key(Path::new(&s.target)), i);
     }
 
     let mut rejected: Vec<String> = Vec::new();
@@ -67,6 +79,7 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
                     continue;
                 };
                 let dest = new_path.clone();
+                let dest_key = path::sort_key(Path::new(&dest));
                 if s.target == dest {
                     reasons.push("noop_move".to_string());
                 }
@@ -77,13 +90,27 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
                     Some(n) if homelinter_model::format::validate_file_name_segment(n) => {}
                     _ => reasons.push("invalid_destination_segment".to_string()),
                 }
-                if let Some(&j) = dest_claims.get(&dest).filter(|&&j| j != i) {
-                    reasons.push(format!("destination_collision:also={}", sort_keys[j]));
+                // Every suggestion in a collision set is rejected: no
+                // arbitrary survivor is picked, so the user must resolve
+                // the conflict. The reason names every partner via its
+                // source sort key.
+                if let Some(others) = dest_claims.get(&dest_key) {
+                    let partners: Vec<&str> = others
+                        .iter()
+                        .filter(|&&j| j != i)
+                        .map(|&j| sort_keys[j].as_str())
+                        .collect();
+                    if !partners.is_empty() {
+                        reasons.push(format!(
+                            "destination_collision:also={}",
+                            partners.join(",")
+                        ));
+                    }
                 }
-                if delete_targets.contains_key(&dest) {
+                if delete_targets.contains_key(&dest_key) {
                     reasons.push("destination_is_planned_delete".to_string());
                 }
-                if let Some(&j) = source_keys.get(&dest).filter(|&&j| j != i) {
+                if let Some(&j) = source_keys.get(&dest_key).filter(|&&j| j != i) {
                     reasons.push(format!(
                         "destination_is_planned_source:also={}",
                         sort_keys[j]
@@ -92,7 +119,8 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
             }
             SuggestionType::Delete => {
                 let t = s.target.clone();
-                if let Some(&j) = source_keys.get(&t).filter(|&&j| j != i) {
+                let t_key = path::sort_key(Path::new(&t));
+                if let Some(&j) = source_keys.get(&t_key).filter(|&&j| j != i) {
                     reasons.push(format!("delete_of_planned_source:also={}", sort_keys[j]));
                 }
             }
@@ -130,10 +158,11 @@ mod tests {
 
     #[test]
     fn skip_pending_defers_colliding_suggestions() {
-        // Two moves to the same destination: without skip_pending one is
-        // rejected; with skip_pending a pending one is deferred entirely
-        // and does not cause its (non-pending) sibling to be rejected
-        // either, since its provisional destination may change.
+        // Two moves to the same destination: with skip_pending the pending
+        // one is deferred entirely and does not cause its (non-pending)
+        // sibling to be rejected either, since its provisional destination
+        // may change. Without skip_pending every suggestion in the
+        // collision set is rejected.
         let mut items = vec![
             move_suggestion("/a/one.jpg", "/d/unknown.jpg"),
             move_suggestion("/a/two.jpg", "/d/unknown.jpg"),
@@ -143,19 +172,77 @@ mod tests {
         assert!(rejected.is_empty());
         assert!(items.iter().all(|s| s.status == SuggestionStatus::Pending));
 
-        // Without skip_pending the pending suggestion still collides and is
-        // rejected like any other.
+        // Without skip_pending the pending suggestion collides like any
+        // other, and both members of the collision set are rejected.
         let mut items = vec![
             move_suggestion("/a/one.jpg", "/d/unknown.jpg"),
             move_suggestion("/a/two.jpg", "/d/unknown.jpg"),
         ];
         items[0].metadata_pending = true;
         let rejected = validate_batch(&mut items, false);
-        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected.len(), 2);
         assert!(items
             .iter()
             .filter(|s| s.status == SuggestionStatus::Rejected)
             .all(|s| s.rejection_reason.is_some()));
+    }
+
+    #[test]
+    fn rejects_every_suggestion_in_a_collision_set() {
+        // Three moves to one destination: every member is rejected and its
+        // reason names the two partners (never itself) by source sort key.
+        let mut items = vec![
+            move_suggestion("/a/one.jpg", "/d/unknown.jpg"),
+            move_suggestion("/b/two.jpg", "/d/unknown.jpg"),
+            move_suggestion("/c/three.jpg", "/d/unknown.jpg"),
+        ];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 3);
+        assert!(items.iter().all(|s| {
+            s.rejection_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("destination_collision:also=")
+        }));
+        let reason = items[0].rejection_reason.as_deref().unwrap();
+        assert!(reason.contains("/b/two.jpg"));
+        assert!(reason.contains("/c/three.jpg"));
+        assert!(!reason.contains("/a/one.jpg"));
+    }
+
+    // Compile-time gated: only the branch for the build target runs, so
+    // this is exercised only by a Windows test run.
+    #[cfg(windows)]
+    #[test]
+    fn rejects_case_folded_destination_collision() {
+        // On the Windows host platform, destinations differing only by case
+        // collide and every member of the set is rejected.
+        let mut items = vec![
+            move_suggestion("/a/one.jpg", "/d/Photo.jpg"),
+            move_suggestion("/a/two.jpg", "/d/photo.jpg"),
+        ];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 2);
+        assert!(items.iter().all(|s| s
+            .rejection_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("destination_collision")));
+    }
+
+    // Compile-time gated: only the branch for the build target runs, so
+    // this is exercised only by a Unix test run.
+    #[cfg(unix)]
+    #[test]
+    fn distinct_case_destinations_do_not_collide_on_unix() {
+        // The Unix host platform is case-sensitive: differing case is a
+        // distinct destination, so neither suggestion is rejected.
+        let mut items = vec![
+            move_suggestion("/a/one.jpg", "/d/Photo.jpg"),
+            move_suggestion("/a/two.jpg", "/d/photo.jpg"),
+        ];
+        let rejected = validate_batch(&mut items, false);
+        assert!(rejected.is_empty());
     }
 
     #[test]
