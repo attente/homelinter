@@ -1027,6 +1027,19 @@ impl App {
                     }
                 }
             },
+            KeyCode::Char('r') => match c.yes {
+                ConfirmAction::ProceedStale => {
+                    // Discard the pending run/export and regenerate the batch
+                    // under the current configuration with the same session
+                    // settings, so it is no longer stale.
+                    self.stale_action = None;
+                    if let Err(e) = self.start_scan().await {
+                        self.toast = Some(e);
+                        self.phase = Phase::Browse;
+                    }
+                }
+                _ => self.confirm = Some(c),
+            },
             KeyCode::Char('n') | KeyCode::Esc => {}
             _ => self.confirm = Some(c),
         }
@@ -1478,10 +1491,14 @@ impl App {
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
         f.render_widget(block, rect);
+        let keys = match c.yes {
+            ConfirmAction::ProceedStale => " y: proceed anyway    r: rescan    n/Esc: cancel",
+            _ => " y: yes    n/Esc: no",
+        };
         let text = Text::from(vec![
             Line::from(c.message.clone()),
             Line::from(""),
-            Line::from(" y: yes    n/Esc: no"),
+            Line::from(keys),
         ]);
         f.render_widget(Paragraph::new(text).alignment(Alignment::Center), inner);
     }
