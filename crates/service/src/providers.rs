@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine as _};
@@ -523,8 +523,31 @@ fn first_nonempty_pointer(value: &Value, paths: &[&str]) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// Shared JSON transport for provider calls: builds the HTTPS client,
-/// applies bearer auth and the homelinter user-agent, sends an optional
+/// Shared provider HTTP client: an HTTPS-or-HTTP rustls connector with a
+/// full in-memory request body.
+type ProviderClient = HyperClient<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    Full<Bytes>,
+>;
+
+/// The process-wide provider HTTP client. Reusing one client preserves
+/// keep-alive connections across requests and avoids rebuilding the rustls
+/// connector and root store on every call, which a local Ollama (many small
+/// requests) notices most.
+fn http_client() -> &'static ProviderClient {
+    static CLIENT: OnceLock<ProviderClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        HyperClient::builder(TokioExecutor::new()).build(connector)
+    })
+}
+
+/// Shared JSON transport for provider calls: applies bearer auth and the
+/// homelinter user-agent over the shared HTTP client, sends an optional
 /// JSON body, and parses a JSON response. Fails cleanly on an invalid
 /// endpoint, transport error, non-2xx status, unreadable body, or
 /// non-JSON response.
@@ -535,14 +558,7 @@ async fn request_json(
     user_agent: Option<&str>,
     body: Option<Value>,
 ) -> Result<Value, String> {
-    let client = {
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-        HyperClient::builder(TokioExecutor::new()).build(connector)
-    };
+    let client = http_client();
     let uri: hyper::Uri = endpoint
         .parse()
         .map_err(|e| format!("invalid provider endpoint: {e}"))?;
@@ -1075,19 +1091,30 @@ fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
     if max_dim == 0 {
         return Some(raw);
     }
+    // Probe the header for dimensions before decoding: a photo already
+    // within bounds is forwarded unchanged, so a full decode (tens of MB
+    // for a modern camera image) would be pure waste. Only decode when a
+    // downscale is actually needed. An unreadable header degrades to the
+    // original bytes, like an undecodable body does below.
+    let max = max_dim as u32;
+    match image::ImageReader::new(std::io::Cursor::new(raw.as_slice()))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+    {
+        Some((w, h)) if w <= max && h <= max => return Some(raw),
+        Some(_) => {}
+        None => return Some(raw),
+    }
     // Unsupported formats (such as HEIC) or truncated files degrade to
     // the original bytes, preserving the pre-resize behavior.
     let Ok(decoded) = image::load_from_memory(&raw) else {
         return Some(raw);
     };
-    if decoded.width() <= max_dim as u32 && decoded.height() <= max_dim as u32 {
-        return Some(raw);
-    }
-    let scaled = decoded.resize(
-        max_dim as u32,
-        max_dim as u32,
-        image::imageops::FilterType::Triangle,
-    );
+    // `thumbnail` uses a fast integer downsample (each source pixel feeds
+    // exactly one target pixel) instead of a convolution filter; the
+    // quality difference is irrelevant for vision-model input.
+    let scaled = decoded.thumbnail(max, max);
     let mut out = Vec::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
     // JPEG has no alpha channel; flatten to RGB so RGBA sources (PNG)
