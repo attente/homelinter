@@ -230,6 +230,8 @@ struct App {
     progress_phase: String,
     progress_scanned: u64,
     progress_elapsed_ms: u64,
+    metadata_completed: usize,
+    metadata_total: usize,
     filter: Filter,
     cursor: usize,
     list_offset: usize,
@@ -272,6 +274,8 @@ impl App {
             progress_phase: String::new(),
             progress_scanned: 0,
             progress_elapsed_ms: 0,
+            metadata_completed: 0,
+            metadata_total: 0,
             filter: Filter::default(),
             cursor: 0,
             list_offset: 0,
@@ -315,6 +319,8 @@ impl App {
         self.cursor = 0;
         self.list_offset = 0;
         self.filter = Filter::default();
+        self.metadata_completed = 0;
+        self.metadata_total = 0;
         self.client
             .start_scan(body)
             .await
@@ -610,6 +616,12 @@ impl App {
                     self.progress_elapsed_ms = v["elapsed_ms"].as_u64().unwrap_or(0);
                 }
             }
+            "metadata.progress" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    self.metadata_completed = v["completed"].as_u64().unwrap_or(0) as usize;
+                    self.metadata_total = v["total"].as_u64().unwrap_or(0) as usize;
+                }
+            }
             "suggestion.batch" => {
                 if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
                     let items = v["items"].as_array().cloned().unwrap_or_default();
@@ -660,6 +672,9 @@ impl App {
             self.config_hash = sess["config_hash"].as_str().map(str::to_string);
             self.batch_config_hash = sess["batch_config_hash"].as_str().map(str::to_string);
             self.failure_reason = sess["failure"]["reason"].as_str().map(str::to_string);
+            self.metadata_completed =
+                sess["metadata_progress"]["completed"].as_u64().unwrap_or(0) as usize;
+            self.metadata_total = sess["metadata_progress"]["total"].as_u64().unwrap_or(0) as usize;
         }
         match self.phase {
             Phase::Scan => {
@@ -1162,7 +1177,7 @@ impl App {
             _ => Color::Yellow,
         };
         let selected = self.rows.iter().filter(|r| r.selected).count();
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 " homelinter ",
                 Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -1176,7 +1191,17 @@ impl App {
                 self.filtered_len(),
                 selected
             )),
-        ])
+        ];
+        if self.metadata_total > 0 {
+            spans.push(Span::styled(
+                format!(
+                    "  metadata: {}/{}",
+                    self.metadata_completed, self.metadata_total
+                ),
+                Style::new().fg(Color::Yellow),
+            ));
+        }
+        Line::from(spans)
     }
 
     fn filter_line(&self) -> Line<'static> {
@@ -1221,6 +1246,12 @@ impl App {
             text.lines.push(Line::from(format!(
                 " phase: {}   scanned: {}   elapsed: {} ms",
                 self.progress_phase, self.progress_scanned, self.progress_elapsed_ms
+            )));
+        }
+        if self.metadata_total > 0 {
+            text.lines.push(Line::from(format!(
+                " metadata: {}/{} suggestions resolved",
+                self.metadata_completed, self.metadata_total
             )));
         }
         text.lines.push(Line::from(""));

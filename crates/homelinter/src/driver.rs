@@ -135,6 +135,50 @@ fn failure_message(sess: &Value) -> String {
     "session failed".to_string()
 }
 
+/// Wait for the current batch's provider metadata requests to finish,
+/// printing progress as `(completed/total)` suggestions. `total` is the
+/// number of suggestions that originally had provider requests; `completed`
+/// is how many have had all of theirs resolve. No-op when the batch has no
+/// provider-dependent suggestions.
+async fn wait_for_metadata(
+    client: &Client,
+    verbosity: i8,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last: Option<(usize, usize)> = None;
+    loop {
+        let sess = client
+            .session()
+            .await
+            .map_err(|e| format!("session poll failed: {e}"))?;
+        if sess["state"].as_str() == Some("failed") {
+            return Err(failure_message(&sess));
+        }
+        let progress = &sess["metadata_progress"];
+        let completed = progress["completed"].as_u64().unwrap_or(0) as usize;
+        let total = progress["total"].as_u64().unwrap_or(0) as usize;
+        if total == 0 || completed >= total {
+            if verbosity >= 0 && total > 0 {
+                output::note(&format!("metadata requests complete ({completed}/{total})"));
+            }
+            return Ok(sess);
+        }
+        if last != Some((completed, total)) {
+            if verbosity >= 0 {
+                output::note(&format!("resolving metadata requests: {completed}/{total}"));
+            }
+            last = Some((completed, total));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for provider metadata requests ({completed}/{total})"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Gracefully stop the in-process service and join its task.
 async fn shutdown_instance(inst: Instance) {
     let _ = inst.client.shutdown().await;
@@ -335,6 +379,10 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     if verbosity >= 0 {
         output::note("analysis complete; suggestions generated");
     }
+    // Provider metadata (geocoding, descriptions) resolves in the
+    // background; pending suggestions are not executable until it does.
+    // Show progress and wait so the CLI acts on complete metadata.
+    wait_for_metadata(&client, verbosity, Duration::from_secs(1800)).await?;
 
     let suggestions = client
         .suggestions(None)

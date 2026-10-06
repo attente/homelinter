@@ -75,6 +75,7 @@ const NAMED_EVENTS: SseEventName[] = [
   'scan.complete',
   'suggestion.batch',
   'batch.validated',
+  'metadata.progress',
   'execution.op',
   'execution.complete',
   'config.updated',

@@ -247,6 +247,10 @@ async fn health_and_session_start_idle() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["state"], "idle");
     assert!(v["config_hash"].is_string());
+    assert_eq!(
+        v["metadata_progress"],
+        json!({ "completed": 0, "total": 0 })
+    );
     // Config GET carries the merged effective config.
     let (status, v) = request(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(status, StatusCode::OK);

@@ -32,6 +32,7 @@ export interface Session {
   batch_config_hash: string | null;
   suggestions_total: number;
   selection_count: number;
+  metadata_progress?: MetadataProgress;
   failure?: ApiErrorBody['error'] | null;
   scan_defaults?: ScanDefaults;
   [key: string]: unknown;
@@ -123,6 +124,14 @@ export interface ScanProgress {
   elapsed_ms: number;
 }
 
+/** Progress of outstanding provider metadata requests: `completed`
+ * suggestions have had every request resolve, over `total` suggestions
+ * that originally had any. `total` is 0 when the batch has none. */
+export interface MetadataProgress {
+  completed: number;
+  total: number;
+}
+
 export interface ExportResult {
   platform: string;
   count: number;
@@ -168,6 +177,7 @@ export type SseEventName =
   | 'scan.complete'
   | 'suggestion.batch'
   | 'batch.validated'
+  | 'metadata.progress'
   | 'execution.op'
   | 'execution.complete'
   | 'config.updated'

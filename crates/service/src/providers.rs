@@ -187,6 +187,14 @@ pub struct ProviderScanCtx {
     /// Outstanding provider requests per analyzed unit. A unit's suggestion
     /// stays `metadata_pending` until this count reaches zero.
     pub pending: BTreeMap<usize, u32>,
+    /// Unit indices whose suggestion was marked `metadata_pending` when the
+    /// scan published its batch. Its length is the denominator of the
+    /// metadata-progress display (suggestions that originally had provider
+    /// requests). Units without a suggestion are excluded.
+    pub pending_units: std::collections::BTreeSet<usize>,
+    /// Number of `pending_units` whose provider requests have all resolved
+    /// (the numerator of the metadata-progress display).
+    pub pending_done: usize,
 }
 
 /// Latest provider-derived metadata for one analyzed unit.
@@ -1191,7 +1199,20 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             return false;
         }
         ctx.pending.remove(&job.unit.index);
+        // Count this unit toward the metadata-progress numerator only when
+        // its suggestion was one of those originally marked pending. Units
+        // that produced no suggestion are not part of the denominator.
+        if ctx.pending_units.remove(&job.unit.index) {
+            ctx.pending_done += 1;
+        }
     }
+
+    // Snapshot the progress for the client update published after the
+    // suggestion batch; taken before releasing the lock.
+    let (completed, meta_total) = match &sess.provider_ctx {
+        Some(ctx) => (ctx.pending_done, ctx.pending_units.len() + ctx.pending_done),
+        None => (0, 0),
+    };
 
     // Phase 2: the unit's last request resolved. Update its suggestion in
     // place by stable id.
@@ -1281,6 +1302,10 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     drop(sess);
     app.events
         .publish(ServerEvent::SuggestionBatch { items, total });
+    app.events.publish(ServerEvent::MetadataProgress {
+        completed,
+        total: meta_total,
+    });
     if !newly_rejected.is_empty() {
         let rejected: Vec<RejectedId> = newly_rejected
             .into_iter()
@@ -1762,6 +1787,8 @@ mod tests {
             home: home.clone(),
             meta: Default::default(),
             pending: BTreeMap::from([(0, 1)]),
+            pending_units: std::collections::BTreeSet::from([0]),
+            pending_done: 0,
         });
         sess.suggestions = vec![suggestion];
         sess.summary = Some(ScanSummary::default());
@@ -2335,6 +2362,7 @@ mod tests {
         {
             let mut sess = app.session.lock().await;
             sess.provider_ctx.as_mut().unwrap().pending.insert(0, 2);
+            assert_eq!(sess.metadata_progress(), (0, 1));
         }
 
         // The geocode success alone must not clear the pending flag.
@@ -2342,6 +2370,7 @@ mod tests {
         assert!(!resolved);
         let sess = app.session.lock().await;
         assert!(sess.suggestions[0].metadata_pending);
+        assert_eq!(sess.metadata_progress(), (0, 1));
         assert!(sess
             .executable_ids(&[sess.suggestions[0].id.clone()])
             .is_empty());
@@ -2353,6 +2382,7 @@ mod tests {
         assert!(resolved);
         let sess = app.session.lock().await;
         assert!(!sess.suggestions[0].metadata_pending);
+        assert_eq!(sess.metadata_progress(), (1, 1));
         let p = sess.suggestions[0].new_path.clone().unwrap_or_default();
         assert!(p.contains("paris"), "geocode overlay missing: {p}");
         assert_eq!(

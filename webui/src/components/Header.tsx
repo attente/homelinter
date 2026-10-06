@@ -1,4 +1,5 @@
 import { stateLabel } from '../lib/format';
+import type { MetadataProgress } from '../types';
 
 export interface HeaderCounts {
   suggestions: number;
@@ -10,6 +11,7 @@ interface HeaderProps {
   state: string;
   root: string | null;
   counts: HeaderCounts;
+  metadataProgress?: MetadataProgress | null;
   busy: boolean;
   scanDisabled?: boolean;
   onNewScan: () => void;
@@ -17,7 +19,7 @@ interface HeaderProps {
 }
 
 export function Header(props: HeaderProps) {
-  const { state, root, counts, busy, scanDisabled, onNewScan, onConfig } = props;
+  const { state, root, counts, metadataProgress, busy, scanDisabled, onNewScan, onConfig } = props;
   const badgeClass = state === 'ready' || state === 'done' ? 'state-ok' : state === 'failed' ? 'state-bad' : 'state-busy';
   return (
     <header className="header">
@@ -27,6 +29,11 @@ export function Header(props: HeaderProps) {
       <span className="counts">
         {counts.suggestions} suggestions, {counts.shown} shown, {counts.selected} selected
       </span>
+      {metadataProgress && metadataProgress.total > 0 && (
+        <span className="counts metadata-progress">
+          metadata: {metadataProgress.completed}/{metadataProgress.total}
+        </span>
+      )}
       <nav className="header-actions">
         <button
           type="button"

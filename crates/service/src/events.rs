@@ -28,6 +28,10 @@ pub enum ServerEvent {
         valid: bool,
         rejected: Vec<RejectedId>,
     },
+    MetadataProgress {
+        completed: usize,
+        total: usize,
+    },
     ExecutionOp {
         suggestion_id: String,
         operation: String,
@@ -57,6 +61,7 @@ impl ServerEvent {
             ServerEvent::ScanComplete { .. } => "scan.complete",
             ServerEvent::SuggestionBatch { .. } => "suggestion.batch",
             ServerEvent::BatchValidated { .. } => "batch.validated",
+            ServerEvent::MetadataProgress { .. } => "metadata.progress",
             ServerEvent::ExecutionOp { .. } => "execution.op",
             ServerEvent::ExecutionComplete { .. } => "execution.complete",
             ServerEvent::ConfigUpdated { .. } => "config.updated",
@@ -86,6 +91,9 @@ impl ServerEvent {
             }
             ServerEvent::BatchValidated { valid, rejected } => {
                 json!({ "valid": valid, "rejected": rejected })
+            }
+            ServerEvent::MetadataProgress { completed, total } => {
+                json!({ "completed": completed, "total": total })
             }
             ServerEvent::ExecutionOp {
                 suggestion_id,

@@ -445,6 +445,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
     let sess = app.session.lock().await;
     let suggestions_total = sess.suggestions.len();
     let selection_count = sess.suggestions.iter().filter(|s| s.selected).count();
+    let (metadata_completed, metadata_total) = sess.metadata_progress();
     let mut v = json!({
         "state": sess.state,
         "scan_root": sess.scan_root,
@@ -453,6 +454,10 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "batch_config_hash": sess.batch_config_hash,
         "suggestions_total": suggestions_total,
         "selection_count": selection_count,
+        "metadata_progress": {
+            "completed": metadata_completed,
+            "total": metadata_total,
+        },
         "scan_defaults": {
             "hidden": app.default_hidden,
             "target_paths": app.default_target_paths,
@@ -1050,6 +1055,13 @@ async fn events_sse(
             let items = sess.suggestions.clone();
             let total = items.len();
             v.push(Ok(sse_event(ServerEvent::SuggestionBatch { items, total })));
+        }
+        let (completed, total) = sess.metadata_progress();
+        if total > 0 {
+            v.push(Ok(sse_event(ServerEvent::MetadataProgress {
+                completed,
+                total,
+            })));
         }
         v
     };

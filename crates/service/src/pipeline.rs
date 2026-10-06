@@ -8,7 +8,7 @@
 //! completed work items, so a long extraction or hashing pass shows live
 //! movement in clients instead of a frozen phase line.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -275,6 +275,10 @@ pub async fn start_scan(
     for job in &provider_jobs {
         *pending.entry(job.unit.index).or_default() += 1;
     }
+    // Units whose suggestion was actually marked `metadata_pending`; the
+    // denominator of the client metadata-progress display. A unit that
+    // produced no suggestion is not part of it.
+    let mut pending_units: BTreeSet<usize> = BTreeSet::new();
     let unit_of: std::collections::BTreeMap<String, usize> = analysis
         .files
         .iter()
@@ -282,10 +286,14 @@ pub async fn start_scan(
         .map(|(i, f)| (Suggestion::id_for_target(&f.path), i))
         .collect();
     for s in suggestions.iter_mut() {
-        if unit_of.get(&s.id).is_some_and(|i| pending.contains_key(i)) {
-            s.metadata_pending = true;
+        if let Some(i) = unit_of.get(&s.id) {
+            if pending.contains_key(i) {
+                s.metadata_pending = true;
+                pending_units.insert(*i);
+            }
         }
     }
+    let pending_total = pending_units.len();
 
     // Full-batch validation before the batch is presented. Pending
     // suggestions are excluded (their destinations are provisional); every
@@ -340,6 +348,8 @@ pub async fn start_scan(
             home: home.clone(),
             meta: Default::default(),
             pending: pending.clone(),
+            pending_units: pending_units.clone(),
+            pending_done: 0,
         });
         sess.suggestions = suggestions;
         let mut summary = sess.summary_of_batch();
@@ -355,6 +365,10 @@ pub async fn start_scan(
 
         app.events
             .publish(ServerEvent::SuggestionBatch { items, total });
+        app.events.publish(ServerEvent::MetadataProgress {
+            completed: 0,
+            total: pending_total,
+        });
         app.events.publish(ServerEvent::BatchValidated {
             valid: rejected.is_empty(),
             rejected,

@@ -11,6 +11,7 @@ import { downloadText } from "./lib/download";
 import { elapsedLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
+  MetadataProgress,
   ScanProgress,
   Session,
   SseEvent,
@@ -24,6 +25,7 @@ interface AppState {
   session: Session | null;
   suggestions: Suggestion[];
   progress: ScanProgress | null;
+  metadataProgress: MetadataProgress | null;
   runLog: string[];
   report: ExecutionReport | null;
   runError: string | null;
@@ -42,6 +44,7 @@ export default function App() {
     session: null,
     suggestions: [],
     progress: null,
+    metadataProgress: null,
     runLog: [],
     report: null,
     runError: null,
@@ -110,6 +113,7 @@ export default function App() {
         showScanForm: false,
         suggestions: [],
         progress: null,
+        metadataProgress: null,
         report: null,
         runLog: [],
         runError: null,
@@ -191,6 +195,15 @@ export default function App() {
             suggestions: (d.items as Suggestion[]) ?? [],
           }));
           break;
+        case "metadata.progress":
+          setSt((prev) => ({
+            ...prev,
+            metadataProgress: {
+              completed: Number(d.completed ?? 0),
+              total: Number(d.total ?? 0),
+            },
+          }));
+          break;
         case "batch.validated": {
           const v = d as {
             valid: boolean;
@@ -253,6 +266,9 @@ export default function App() {
     }
     const cur = stRef.current;
     setSt((prev) => ({ ...prev, session }));
+    if (session.metadata_progress) {
+      setSt((prev) => ({ ...prev, metadataProgress: session.metadata_progress ?? null }));
+    }
     const state = session.state;
     if (state === "scanning" && cur.phase !== "scanning") {
       setSt((prev) => ({ ...prev, phase: "scanning", showScanForm: false }));
@@ -273,6 +289,7 @@ export default function App() {
         phase: "idle",
         showScanForm: true,
         progress: null,
+        metadataProgress: null,
       }));
     }
   }, [enterBrowse, fetchExecution, pushToast]);
@@ -545,6 +562,11 @@ export default function App() {
               {elapsedLabel(st.progress.elapsed_ms)}
             </span>
           )}
+          {st.metadataProgress && st.metadataProgress.total > 0 && (
+            <span className="progress-line">
+              metadata: {st.metadataProgress.completed}/{st.metadataProgress.total}
+            </span>
+          )}
           <div className="toolbar">
             <button
               type="button"
@@ -600,6 +622,7 @@ export default function App() {
         state={state}
         root={st.session?.scan_root ?? null}
         counts={counts}
+        metadataProgress={st.metadataProgress}
         busy={st.busy}
         scanDisabled={!canScan}
         onNewScan={() =>
