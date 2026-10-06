@@ -27,6 +27,8 @@ impl ToolSet {
             "pdfinfo",
             "pandoc",
             "mutool",
+            "ffmpeg",
+            "ffprobe",
         ] {
             if which(name) {
                 t.available.insert(name.to_string());

@@ -111,16 +111,22 @@ pub enum ProviderInput {
     /// A description (LLM) request. `text` carries extracted plain text
     /// when a document extractor produced it; when `vision` is set and the
     /// backend accepts image input (the ollama transport), the worker
-    /// loads the raw file bytes into `image` on a provider cache miss.
-    /// Otherwise the provider sees the unit path and kind.
+    /// loads a photo's bytes, or evenly spaced video frames, into
+    /// `images` on a provider cache miss. Otherwise the provider sees the
+    /// unit path and kind.
     Describe {
         text: Option<String>,
-        /// Whether this unit's kind supports vision (photo) and the backend
-        /// is image-capable. Gates the `image` payload and the cache key.
+        /// Whether this unit's kind supports vision (photo or video) and the
+        /// backend is image-capable. Gates the `images` payload and the cache
+        /// key.
         vision: bool,
-        /// Raw file bytes for a vision-capable description request, loaded
-        /// lazily by the worker. `None` degrades to the text-only prompt.
-        image: Option<Vec<u8>>,
+        /// The unit's asset kind, selecting direct photo decoding or video
+        /// frame extraction for a vision job.
+        kind: AssetKind,
+        /// Image bytes for a vision-capable description request (one
+        /// re-encoded photo, or several representative video frames), loaded
+        /// lazily by the worker. Empty degrades to the text-only prompt.
+        images: Vec<Vec<u8>>,
     },
     /// An author-inference (LLM) request for a document whose format uses
     /// `%a` and whose embedded metadata carried no author. `text` carries
@@ -310,13 +316,24 @@ async fn process_provider_job(
             // extraction runs off the async runtime, and only when a
             // provider call is actually needed), then call.
             let job = prepare_provider_job(app, job, tools).await;
-            let timeout = provider_timeout(app).await;
+            // A vision request costs roughly one inference per image, so the
+            // provider timeout scales with the number of frames sent; a
+            // photo or a text job stays at the configured value. The frame
+            // count is known only after preparation, which is why the scale
+            // is applied here rather than in the planner.
+            let timeout = provider_timeout_for_job(provider_timeout(app).await, &job.input);
             match tokio::time::timeout(timeout, invoke(&job)).await {
                 Ok(Ok(v)) => {
-                    // Geocode results already resolve the structured
-                    // locality; the value is cached as-is and rendered into
-                    // `%l`.
-                    cache_put(app, &job, &v).await;
+                    // A vision job that produced no pixels (a video whose
+                    // frame extraction failed) must not be cached under the
+                    // vision key, or installing `ffmpeg` later would still
+                    // reuse the text-only result.
+                    if !vision_without_pixels(&job.input) {
+                        // Geocode results already resolve the structured
+                        // locality; the value is cached as-is and rendered
+                        // into `%l`.
+                        cache_put(app, &job, &v).await;
+                    }
                     Some(v)
                 }
                 // Failure or timeout: not cached, the pending suggestion
@@ -341,21 +358,37 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
         ProviderInput::Describe {
             text,
             vision,
-            image,
+            kind,
+            images,
         } => {
             if text.is_none() {
                 *text = extract_document_text_for(app, unit_path.clone(), tools).await;
             }
-            if *vision && image.is_none() {
+            if *vision && images.is_empty() {
                 let path = unit_path.clone();
                 let max_dim = job
                     .settings
                     .max_image_dimension
                     .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION);
-                *image = tokio::task::spawn_blocking(move || prepare_image_bytes(&path, max_dim))
-                    .await
-                    .ok()
-                    .flatten();
+                let kind = *kind;
+                let tools = tools.clone();
+                let timeout = {
+                    let sess = app.session.lock().await;
+                    Duration::from_secs(sess.config.tool_timeout())
+                };
+                // Photos are decoded and downscaled directly into one image;
+                // videos get evenly spaced representative frames extracted
+                // with ffmpeg when present. Both degrade to the text-only
+                // prompt when the pixels cannot be produced.
+                *images = tokio::task::spawn_blocking(move || match kind {
+                    AssetKind::Video => {
+                        crate::video_frames::extract_video_frames(&path, max_dim, &tools, timeout)
+                    }
+                    _ => prepare_image_bytes(&path, max_dim).into_iter().collect(),
+                })
+                .await
+                .ok()
+                .unwrap_or_default();
             }
         }
         ProviderInput::Author { text } => {
@@ -415,6 +448,36 @@ async fn provider_concurrency(app: &App) -> usize {
 async fn provider_timeout(app: &App) -> Duration {
     let sess = app.session.lock().await;
     Duration::from_secs(sess.config.provider_timeout())
+}
+
+/// Scale the configured provider timeout by the number of images a vision
+/// request carries: each frame costs roughly one inference, so a four-frame
+/// video gets four times the budget. Text, geocode, author, and single-photo
+/// requests keep the configured value. The overflow guard is defensive
+/// (the planner never exceeds `MAX_VIDEO_FRAMES`).
+fn provider_timeout_for_job(base: Duration, input: &ProviderInput) -> Duration {
+    let frames = match input {
+        ProviderInput::Describe { images, .. } => images.len().max(1),
+        _ => 1,
+    } as u32;
+    base.checked_mul(frames).unwrap_or(base)
+}
+
+/// Whether a prepared vision description job actually produced pixels. When
+/// `ffmpeg` (or the decoder) failed, a video's `images` is empty and the
+/// model saw only the path. Caching that text-only result under the vision
+/// key would pin it even after the tool becomes available, so the caller
+/// skips the cache write; photos always carry at least one image (raw on
+/// decode failure) and are unaffected.
+fn vision_without_pixels(input: &ProviderInput) -> bool {
+    matches!(
+        input,
+        ProviderInput::Describe {
+            vision: true,
+            images,
+            ..
+        } if images.is_empty()
+    )
 }
 
 async fn cache_get(app: &App, job: &ProviderJob) -> Option<String> {
@@ -488,12 +551,14 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
             }
         }
         ProviderKind::Description => {
-            let (text, image) = match &job.input {
-                ProviderInput::Describe { text, image, .. } => (text.as_deref(), image.as_deref()),
+            let (text, images) = match &job.input {
+                ProviderInput::Describe { text, images, .. } => {
+                    (text.as_deref(), images.as_slice())
+                }
                 _ => return Err("mismatched provider input".to_string()),
             };
             let prompt = description_prompt(&job.unit.path, text, &job.settings);
-            let value = complete(&job.settings, &prompt, image).await?;
+            let value = complete(&job.settings, &prompt, images).await?;
             validate_metadata_completion(&value)?;
             Ok(value)
         }
@@ -503,7 +568,7 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
                 _ => return Err("mismatched provider input".to_string()),
             };
             let prompt = author_prompt(&job.unit.path, text);
-            let value = complete(&job.settings, &prompt, None).await?;
+            let value = complete(&job.settings, &prompt, &[]).await?;
             validate_metadata_completion(&value)?;
             Ok(value)
         }
@@ -515,11 +580,11 @@ async fn invoke(job: &ProviderJob) -> Result<String, String> {
 async fn complete(
     s: &ProviderSettings,
     prompt: &str,
-    image: Option<&[u8]>,
+    images: &[Vec<u8>],
 ) -> Result<String, String> {
     match s.backend.as_str() {
         "custom" => neutral_complete(s, prompt).await,
-        "ollama" => ollama_complete(s, prompt, image).await,
+        "ollama" => ollama_complete(s, prompt, images).await,
         "openrouter" => {
             if s.api_key.is_none() {
                 Err("openrouter description provider requires an API key".to_string())
@@ -996,12 +1061,15 @@ fn strip_reasoning(input: &str) -> String {
 async fn ollama_complete(
     s: &ProviderSettings,
     prompt: &str,
-    image: Option<&[u8]>,
+    images: &[Vec<u8>],
 ) -> Result<String, String> {
     let endpoint = format!("{}/api/chat", s.endpoint.trim_end_matches('/'));
     let mut message = json!({ "role": "user", "content": prompt });
-    if let Some(bytes) = image {
-        message["images"] = json!([general_purpose::STANDARD.encode(bytes)]);
+    if !images.is_empty() {
+        message["images"] = json!(images
+            .iter()
+            .map(|bytes| general_purpose::STANDARD.encode(bytes))
+            .collect::<Vec<_>>());
     }
     let budget = completion_token_budget(s.max_words.unwrap_or(DEFAULT_MAX_WORDS));
     // The budget leaves room for a reasoning model's hidden chain of thought
@@ -1124,10 +1192,20 @@ fn read_image_bytes(path: &Path) -> Option<Vec<u8>> {
 /// degrade to the original bytes, preserving today's behavior.
 fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
     let raw = read_image_bytes(path)?;
+    Some(prepare_image_bytes_from_raw(raw, max_dim))
+}
+
+/// Downscale already-loaded image bytes (a photo read from disk, or a video
+/// frame extracted by ffmpeg) to a JPEG within `max_dim` on the longest
+/// side, reusing the same header probe and fast integer downsampler as
+/// `prepare_image_bytes`. Returns the original bytes unchanged when no
+/// downscale is needed or the image cannot be decoded, so this is
+/// best-effort and never fails.
+pub(crate) fn prepare_image_bytes_from_raw(raw: Vec<u8>, max_dim: u64) -> Vec<u8> {
     if max_dim == 0 {
-        return Some(raw);
+        return raw;
     }
-    // Probe the header for dimensions before decoding: a photo already
+    // Probe the header for dimensions before decoding: an image already
     // within bounds is forwarded unchanged, so a full decode (tens of MB
     // for a modern camera image) would be pure waste. Only decode when a
     // downscale is actually needed. An unreadable header degrades to the
@@ -1138,14 +1216,14 @@ fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
         .ok()
         .and_then(|r| r.into_dimensions().ok())
     {
-        Some((w, h)) if w <= max && h <= max => return Some(raw),
+        Some((w, h)) if w <= max && h <= max => return raw,
         Some(_) => {}
-        None => return Some(raw),
+        None => return raw,
     }
     // Unsupported formats (such as HEIC) or truncated files degrade to
     // the original bytes, preserving the pre-resize behavior.
     let Ok(decoded) = image::load_from_memory(&raw) else {
-        return Some(raw);
+        return raw;
     };
     // `thumbnail` uses a fast integer downsample (each source pixel feeds
     // exactly one target pixel) instead of a convolution filter; the
@@ -1156,9 +1234,9 @@ fn prepare_image_bytes(path: &Path, max_dim: u64) -> Option<Vec<u8>> {
     // JPEG has no alpha channel; flatten to RGB so RGBA sources (PNG)
     // encode deterministically instead of erroring or guessing.
     if enc.encode_image(&scaled.to_rgb8()).is_err() {
-        return Some(raw);
+        return raw;
     }
-    Some(out)
+    out
 }
 
 /// One-line framing repeated at the head of every prompt that carries
@@ -1623,12 +1701,15 @@ pub async fn plan_provider_jobs(
         let wants_description = uses_subject || (f.kind == AssetKind::Document && uses_title);
         if wants_description && f.authoritative_title().is_none() {
             if let Some(desc) = description_settings(cfg, &f.kind) {
-                // Photos with an image-capable backend (ollama) get the raw
-                // bytes analyzed; other kinds stay text/filename-only. The vision
-                // bit joins the cache key so a cached text-only guess is never
-                // served for a vision job (and vice versa), and a photo's
-                // content hash binds the entry to the pixels, not just the path.
-                let vision = f.kind == AssetKind::Photo && desc.backend == "ollama";
+                // Photos and videos (via an extracted frame) with an
+                // image-capable backend (ollama) get pixels analyzed; other
+                // kinds stay text/filename-only. The vision bit joins the
+                // cache key so a cached text-only guess is never
+                // served for a vision job (and vice versa), and a photo's or
+                // video's content hash binds the entry to the pixels, not just
+                // the path.
+                let vision = matches!(f.kind, AssetKind::Photo | AssetKind::Video)
+                    && desc.backend == "ollama";
                 let mut parts: Vec<&[u8]> = vec![
                     b"describe",
                     if vision { b"vision" } else { b"text" },
@@ -1656,7 +1737,8 @@ pub async fn plan_provider_jobs(
                     input: ProviderInput::Describe {
                         text: None,
                         vision,
-                        image: None,
+                        kind: f.kind,
+                        images: Vec::new(),
                     },
                 });
             }
@@ -1977,7 +2059,8 @@ mod tests {
             input: ProviderInput::Describe {
                 text: None,
                 vision: false,
-                image: None,
+                kind: AssetKind::Photo,
+                images: Vec::new(),
             },
         };
         let sess = app.session.lock().await;
@@ -2138,7 +2221,8 @@ mod tests {
             input: ProviderInput::Describe {
                 text: Some("Vendor: ACME, March 2024".to_string()),
                 vision: false,
-                image: None,
+                kind: AssetKind::Document,
+                images: Vec::new(),
             },
         };
         assert_eq!(invoke(&job).await.unwrap(), "travel expenses".to_string());
@@ -2150,7 +2234,8 @@ mod tests {
             input: ProviderInput::Describe {
                 text: Some("Unrelated notes".to_string()),
                 vision: false,
-                image: None,
+                kind: AssetKind::Document,
+                images: Vec::new(),
             },
             ..job
         };
@@ -2167,15 +2252,20 @@ mod tests {
         let router = Router::new().route(
             "/api/chat",
             post(|Json(body): Json<Value>| async move {
-                let img = body["messages"][0]["images"]
+                let decoded: Vec<Vec<u8>> = body["messages"][0]["images"]
                     .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str());
-                let decoded =
-                    img.and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok());
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .filter_map(|v| {
+                                base64::engine::general_purpose::STANDARD.decode(v).ok()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let ok = body["model"].as_str() == Some("vl-model")
                     && body["messages"][0].get("content").is_some()
-                    && decoded.as_deref() == Some(&b"fake-image-bytes"[..]);
+                    && decoded == vec![b"frame-a".to_vec(), b"frame-b".to_vec()];
                 if ok {
                     Json(json!({ "message": { "content": "sunset beach" } }))
                 } else {
@@ -2206,9 +2296,13 @@ mod tests {
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
-        let out = ollama_complete(&settings, "describe this", Some(&b"fake-image-bytes"[..]))
-            .await
-            .unwrap();
+        let out = ollama_complete(
+            &settings,
+            "describe this",
+            &[b"frame-a".to_vec(), b"frame-b".to_vec()],
+        )
+        .await
+        .unwrap();
         assert_eq!(out, "sunset beach".to_string());
 
         // Without image bytes the request degrades to the text-only prompt:
@@ -2245,7 +2339,7 @@ mod tests {
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
-        let out2 = ollama_complete(&settings2, "describe this", None)
+        let out2 = ollama_complete(&settings2, "describe this", &[])
             .await
             .unwrap();
         assert_eq!(out2, "from filename".to_string());
@@ -2266,6 +2360,67 @@ mod tests {
             "Answer"
         );
         assert_eq!(strip_reasoning("<thinking>unterminated"), "");
+    }
+
+    #[test]
+    fn provider_timeout_scales_with_frames_only_for_vision() {
+        let base = Duration::from_secs(300);
+        // A four-frame video gets four times the single-request budget.
+        let video = ProviderInput::Describe {
+            text: None,
+            vision: true,
+            kind: AssetKind::Video,
+            images: vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+        };
+        assert_eq!(
+            provider_timeout_for_job(base, &video),
+            Duration::from_secs(1200)
+        );
+        // A single photo (or a text-only vision job with no frame) keeps
+        // the configured value.
+        let photo = ProviderInput::Describe {
+            text: None,
+            vision: true,
+            kind: AssetKind::Photo,
+            images: vec![Vec::new()],
+        };
+        assert_eq!(provider_timeout_for_job(base, &photo), base);
+        // Non-description jobs never scale.
+        assert_eq!(
+            provider_timeout_for_job(base, &ProviderInput::Author { text: None }),
+            base
+        );
+    }
+
+    #[test]
+    fn vision_result_without_pixels_bypasses_cache() {
+        // A video whose frame extraction produced nothing is a vision job
+        // with no images and must not be cached under the vision key.
+        let empty_video = ProviderInput::Describe {
+            text: None,
+            vision: true,
+            kind: AssetKind::Video,
+            images: Vec::new(),
+        };
+        assert!(vision_without_pixels(&empty_video));
+        // One frame, a photo, and text-only jobs are ordinary cache entries.
+        let one_frame = ProviderInput::Describe {
+            text: None,
+            vision: true,
+            kind: AssetKind::Video,
+            images: vec![Vec::new()],
+        };
+        assert!(!vision_without_pixels(&one_frame));
+        assert!(!vision_without_pixels(&ProviderInput::Author {
+            text: None
+        }));
+        let text_doc = ProviderInput::Describe {
+            text: None,
+            vision: false,
+            kind: AssetKind::Document,
+            images: Vec::new(),
+        };
+        assert!(!vision_without_pixels(&text_doc));
     }
 
     #[tokio::test]
@@ -2306,7 +2461,7 @@ mod tests {
             prompt: DEFAULT_DOCUMENT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
-        let out = ollama_complete(&settings, "read this document", None)
+        let out = ollama_complete(&settings, "read this document", &[])
             .await
             .unwrap();
         assert_eq!(out, "Consultation Intake Form".to_string());
@@ -2426,7 +2581,8 @@ mod tests {
         desc.input = ProviderInput::Describe {
             text: None,
             vision: false,
-            image: None,
+            kind: AssetKind::Photo,
+            images: Vec::new(),
         };
         desc.input_hash = sha256(&[&[2u8], b"desc"]);
         desc.settings.provider_id = "describe:none".into();
@@ -2481,8 +2637,14 @@ mod tests {
             names.push(ev.name().to_string());
         }
         // One row is updated in place; the whole batch is never re-broadcast.
-        assert!(names.contains(&"suggestion.updated".to_string()), "{names:?}");
-        assert!(names.contains(&"metadata.progress".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"suggestion.updated".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"metadata.progress".to_string()),
+            "{names:?}"
+        );
         assert!(
             !names.contains(&"suggestion.batch".to_string()),
             "unexpected full batch: {names:?}"
@@ -2882,6 +3044,76 @@ mod tests {
         assert_eq!(jobs[0].kind, ProviderKind::Description);
         // The document modality carries the title-first wording.
         assert_eq!(jobs[0].settings.prompt, DEFAULT_DOCUMENT_DESCRIPTION_PROMPT);
+    }
+
+    #[tokio::test]
+    async fn video_plans_a_vision_job_for_ollama() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description.video]
+            enabled = true
+            service = "ollama"
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("video-vision");
+        let video = file_at(&dir, "clip.mp4", AssetKind::Video, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![video],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Video,
+            FormatString::parse("Videos/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].kind, ProviderKind::Description);
+        // A video with an image-capable backend carries the vision bit and
+        // its kind, so the worker extracts a representative frame.
+        assert!(matches!(
+            jobs[0].input,
+            ProviderInput::Describe {
+                vision: true,
+                kind: AssetKind::Video,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn video_stays_text_only_on_a_text_backend() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description]
+            enabled = true
+            service = "openrouter"
+            api_key = "test-key"
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("video-text");
+        let video = file_at(&dir, "clip.mp4", AssetKind::Video, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![video],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Video,
+            FormatString::parse("Videos/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(
+            jobs[0].input,
+            ProviderInput::Describe { vision: false, .. }
+        ));
     }
 
     #[tokio::test]
