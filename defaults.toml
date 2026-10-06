@@ -99,5 +99,8 @@ enabled = true
 [limits]
 # Bounds on external calls; never infinite. Overruns degrade gracefully.
 provider_timeout_seconds = 300
+# Provider requests kept in flight at once; 1 = one at a time (safe for any
+# backend). Raise it only for a backend that supports parallel inference.
+provider_concurrency = 1
 tool_timeout_seconds = 30
 tool_stdout_max_bytes = 16777216

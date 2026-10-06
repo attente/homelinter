@@ -37,4 +37,28 @@ fn config_template_loads_and_validates() {
             "template is missing the [{section}] section; update it alongside any schema change"
         );
     }
+
+    // Optional keys are easy to overlook because a section-only check
+    // passes without them (this is how `provider_concurrency` and
+    // `max_video_frames` first shipped undocumented). Assert the keys that
+    // shape provider behavior appear, as an active assignment or a
+    // commented default. Extend this list when a new key is added.
+    for key in [
+        // [limits]: every key is optional, so none is forced by a default.
+        "provider_timeout_seconds",
+        "provider_concurrency",
+        "tool_timeout_seconds",
+        "tool_stdout_max_bytes",
+        // [description]: transport and vision-sizing knobs.
+        "max_words",
+        "max_image_dimension",
+        "max_video_frames",
+        "rate_limit_ms",
+        "prompt",
+    ] {
+        assert!(
+            text.contains(key),
+            "template is missing `{key}`; update it alongside any schema change"
+        );
+    }
 }
