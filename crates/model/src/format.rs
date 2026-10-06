@@ -748,4 +748,14 @@ mod tests {
         let p = fs.resolve(&v, home).unwrap().unwrap();
         assert_eq!(p, PathBuf::from("/home/alice/Photos/10.jpg"));
     }
+
+    #[test]
+    fn present_author_with_missing_subject_leaves_no_trailing_separator() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Documents/%a-%s.%e").unwrap();
+        let mut v = vals();
+        v.subject = None;
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Documents/artist.jpg"));
+    }
 }
