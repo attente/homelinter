@@ -848,6 +848,50 @@ async fn mapbox_reverse(
 /// scans instead of paying a cold-load on each first image request.
 const OLLAMA_KEEP_ALIVE: &str = "30m";
 
+/// Tokens reserved for a reasoning model's hidden chain of thought, which
+/// counts against the same completion budget as the answer. Observed
+/// reasoning spans vary widely (hundreds to over a thousand tokens),
+/// so the headroom is generous; the cap is a runaway guard, not a target.
+const REASONING_TOKEN_HEADROOM: u64 = 1024;
+
+/// Vendor completion limit for a description or author request: the
+/// keyword allowance plus headroom for a reasoning model's hidden chain of
+/// thought. `max_words` bounds only the keyword fallback; a document may
+/// return a full title that is used verbatim, so the token cap is a
+/// runaway guard, not the word budget, which the prompt wording enforces.
+fn completion_token_budget(max_words: u64) -> u64 {
+    max_words
+        .saturating_mul(4)
+        .saturating_add(REASONING_TOKEN_HEADROOM)
+}
+
+/// Normalize a completion before it becomes metadata: strip an inline
+/// chain-of-thought block and trim surrounding whitespace. Thinking models
+/// normally report reasoning in a separate channel (ollama's `thinking`,
+/// OpenRouter's `reasoning`), but some inline it in the answer as
+/// ` thinking...`; keep only the text after the last closing tag, or drop an
+/// unterminated block, so reasoning cannot pollute the value. A completion
+/// with no such tag is returned trimmed.
+fn strip_reasoning(input: &str) -> String {
+    let mut cut = 0;
+    let mut found = false;
+    for tag in ["</think>", "</thinking>", "</reasoning>"] {
+        if let Some(idx) = input.rfind(tag) {
+            cut = cut.max(idx + tag.len());
+            found = true;
+        }
+    }
+    if found {
+        return input[cut..].trim().to_string();
+    }
+    for tag in ["<think>", "<thinking>", "<reasoning>"] {
+        if let Some(idx) = input.find(tag) {
+            return input[..idx].trim().to_string();
+        }
+    }
+    input.trim().to_string()
+}
+
 async fn ollama_complete(
     s: &ProviderSettings,
     prompt: &str,
@@ -858,19 +902,37 @@ async fn ollama_complete(
     if let Some(bytes) = image {
         message["images"] = json!([general_purpose::STANDARD.encode(bytes)]);
     }
-    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": s.max_words.unwrap_or(DEFAULT_MAX_WORDS) * 4 }, "keep_alive": OLLAMA_KEEP_ALIVE });
+    let budget = completion_token_budget(s.max_words.unwrap_or(DEFAULT_MAX_WORDS));
+    // The budget leaves room for a reasoning model's hidden chain of thought
+    // (it counts against `num_predict` too), so a thinking model can reason
+    // and still emit an answer in `message.content`; non-thinking models
+    // simply stop early.
+    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": budget }, "keep_alive": OLLAMA_KEEP_ALIVE });
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
-    first_nonempty_pointer(&v, &["/message/content"])
-        .ok_or_else(|| "ollama response has no message content".into())
+    let raw = first_nonempty_pointer(&v, &["/message/content"])
+        .ok_or_else(|| "ollama response has no message content".to_string())?;
+    let cleaned = strip_reasoning(&raw);
+    if cleaned.is_empty() {
+        return Err("ollama response has no message content".into());
+    }
+    Ok(cleaned)
 }
 
 async fn openrouter_complete(s: &ProviderSettings, prompt: &str) -> Result<String, String> {
     let endpoint = format!("{}/chat/completions", s.endpoint.trim_end_matches('/'));
-    let max = s.max_words.unwrap_or(DEFAULT_MAX_WORDS);
-    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": prompt}], "max_tokens": max * 4});
+    let budget = completion_token_budget(s.max_words.unwrap_or(DEFAULT_MAX_WORDS));
+    // The budget leaves room for a reasoning model's hidden chain of thought,
+    // which counts against `max_tokens` too; OpenRouter keeps reasoning in a
+    // separate `reasoning` field, so `content` holds only the answer.
+    let body = json!({"model": s.model.clone().unwrap_or_default(), "messages": [{"role":"user", "content": prompt}], "max_tokens": budget});
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
-    first_nonempty_pointer(&v, &["/choices/0/message/content"])
-        .ok_or_else(|| "openrouter response has no completion content".into())
+    let raw = first_nonempty_pointer(&v, &["/choices/0/message/content"])
+        .ok_or_else(|| "openrouter response has no completion content".to_string())?;
+    let cleaned = strip_reasoning(&raw);
+    if cleaned.is_empty() {
+        return Err("openrouter response has no completion content".into());
+    }
+    Ok(cleaned)
 }
 
 /// POST `body` JSON to `endpoint` and parse the JSON response. Shared by
@@ -2038,6 +2100,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out2, "from filename".to_string());
+    }
+
+    #[test]
+    fn strip_reasoning_keeps_only_the_answer() {
+        assert_eq!(
+            strip_reasoning("Consultation Intake Form"),
+            "Consultation Intake Form"
+        );
+        assert_eq!(
+            strip_reasoning("<thinking>hidden reasoning</thinking>\n\nAnswer"),
+            "Answer"
+        );
+        assert_eq!(
+            strip_reasoning("hidden reasoning\n</thinking>Answer"),
+            "Answer"
+        );
+        assert_eq!(strip_reasoning("<thinking>unterminated"), "");
+    }
+
+    #[tokio::test]
+    async fn ollama_budgets_for_reasoning_and_strips_inline_reasoning() {
+        // A thinking model spends hidden reasoning tokens against
+        // `num_predict`, so the request leaves headroom for both the
+        // reasoning and the answer. The stub only answers when that
+        // headroom is present, and wraps the answer in an inline reasoning
+        // block to exercise the cleanup.
+        let router = Router::new().route(
+            "/api/chat",
+            post(|Json(body): Json<Value>| async move {
+                let ok = body["options"]["num_predict"].as_u64() == Some(1040);
+                if ok {
+                    Json(json!({ "message": { "content": "<thinking>reasoning</thinking>\n\nConsultation Intake Form", "thinking": "reasoning..." } }))
+                } else {
+                    Json(json!({ "message": { "content": "" } }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let settings = ProviderSettings {
+            provider_id: format!("describe:ollama:{port}"),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: "ollama".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            api_key: None,
+            language: None,
+            user_agent_contact: None,
+            model: Some("thinking-model".to_string()),
+            max_words: Some(4),
+            max_image_dimension: None,
+            prompt: DEFAULT_DOCUMENT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
+        };
+        let out = ollama_complete(&settings, "read this document", None)
+            .await
+            .unwrap();
+        assert_eq!(out, "Consultation Intake Form".to_string());
+    }
+
+    #[tokio::test]
+    async fn openrouter_budgets_for_reasoning() {
+        let router = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let ok = body["max_tokens"].as_u64() == Some(1040);
+                if ok {
+                    Json(json!({ "choices": [{ "message": { "content": "from model" } }] }))
+                } else {
+                    Json(json!({ "choices": [{ "message": { "content": "" } }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let settings = ProviderSettings {
+            provider_id: format!("describe:openrouter:{port}"),
+            settings_hash: [0u8; 32],
+            min_interval: Duration::ZERO,
+            backend: "openrouter".to_string(),
+            endpoint: format!("http://127.0.0.1:{port}"),
+            api_key: Some("test-key".to_string()),
+            language: None,
+            user_agent_contact: None,
+            model: Some("thinking-model".to_string()),
+            max_words: Some(4),
+            max_image_dimension: None,
+            prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
+            neighbourhood_cities: Vec::new(),
+        };
+        let out = openrouter_complete(&settings, "describe this")
+            .await
+            .unwrap();
+        assert_eq!(out, "from model".to_string());
     }
 
     #[tokio::test]
