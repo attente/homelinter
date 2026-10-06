@@ -222,28 +222,80 @@ impl FormatString {
     }
 }
 
-/// Resolve a `%e`-less run: when an extension placeholder resolves empty,
-/// an immediately preceding literal dot is dropped (`%n.%e` -> stem).
+/// A character that joins metadata fields in a filename. When a placeholder
+/// resolves to nothing, its adjacent join separators are elided so a missing
+/// value never leaves a leading, trailing, or doubled separator.
+fn is_join_separator(c: char) -> bool {
+    c == '-' || c == '_' || c.is_whitespace()
+}
+
+/// Remove trailing join separators from `out`, returning the rightmost one
+/// that was removed.
+fn strip_trailing_join_separators(out: &mut String) -> Option<char> {
+    let mut removed = None;
+    while out.chars().last().is_some_and(is_join_separator) {
+        let c = out.pop().expect("checked non-empty");
+        removed.get_or_insert(c);
+    }
+    removed
+}
+
+/// Resolve a placeholder run. A placeholder that resolves to nothing is
+/// omitted together with its adjacent join separators: a separator is kept
+/// only when it joined two present values. When an extension placeholder
+/// resolves empty, an immediately preceding literal dot is dropped so `%n.%e`
+/// degrades to the bare stem.
 fn render(segments: &[Segment], values: &PlaceholderValues, out: &mut String) {
-    for seg in segments {
+    let mut prev_was_literal = false;
+    let mut strip_leading = false;
+    for (i, seg) in segments.iter().enumerate() {
         match seg {
-            Segment::Literal(lit) => out.push_str(lit),
+            Segment::Literal(lit) => {
+                let lit = if strip_leading {
+                    lit.trim_start_matches(is_join_separator)
+                } else {
+                    lit.as_str()
+                };
+                strip_leading = false;
+                out.push_str(lit);
+                prev_was_literal = true;
+            }
             Segment::Placeholder(ph) => {
+                strip_leading = false;
                 let v = values.render(*ph);
                 if v.is_empty() {
-                    // Drop an immediately preceding literal dot so `%n.%e`
-                    // degrades to the bare stem. The dot lives at the end of
-                    // the previous literal when the previous segment is a
-                    // literal; we already pushed it, so remove it.
+                    // Drop a trailing join separator contributed by the
+                    // immediately preceding literal; a verbatim value such as
+                    // `%n` is never touched.
+                    let preceding = if prev_was_literal {
+                        strip_trailing_join_separators(out)
+                    } else {
+                        None
+                    };
+                    // A separator that follows the placeholder is dropped too;
+                    // when it sat between two separators, keep exactly one.
+                    let next_has_separator = segments
+                        .get(i + 1)
+                        .and_then(|s| match s {
+                            Segment::Literal(l) => l.chars().next(),
+                            _ => None,
+                        })
+                        .is_some_and(is_join_separator);
+                    if let (Some(sep), true) = (preceding, next_has_separator) {
+                        out.push(sep);
+                    }
                     if *ph == Placeholder::Extension && out.ends_with('.') {
                         out.pop();
                     }
+                    strip_leading = next_has_separator;
+                    prev_was_literal = false;
                     continue;
                 }
                 // A rendered segment can never contain separators after
                 // sanitization; assert for future-proofing in debug builds.
                 debug_assert!(!v.contains('/') && !v.contains('\\') && !v.is_empty());
                 out.push_str(&v);
+                prev_was_literal = false;
             }
         }
     }
@@ -332,7 +384,9 @@ pub struct PlaceholderValues {
 /// whitespace or separator punctuation becomes a single hyphen, and path
 /// separators, NUL, control characters, and platform-invalid characters
 /// become `_`. Underscores and dots are preserved, so a run of spaces,
-/// hyphens, and other separator punctuation collapses to one hyphen.
+/// hyphens, and other separator punctuation collapses to one hyphen. An
+/// empty result means the value carried no usable text; callers render such a
+/// placeholder as nothing rather than a literal placeholder word.
 pub fn sanitize_metadata_segment(input: &str) -> String {
     let mut out = String::new();
     let mut pending_hyphen = false;
@@ -364,13 +418,23 @@ pub fn sanitize_metadata_segment(input: &str) -> String {
     if pending_hyphen {
         out.push('-');
     }
-    // Trim leading and trailing whitespace, hyphens, and dots.
-    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == '-' || c == '.');
-    let mut s = trimmed.to_string();
-    if s.is_empty() || s == "." || s == ".." {
-        s = "unknown".to_string();
+    // Trim leading and trailing whitespace, hyphens, and dots. A value that
+    // normalizes to nothing, `.`, or `..` becomes the empty string.
+    out.trim_matches(|c: char| c.is_whitespace() || c == '-' || c == '.')
+        .to_string()
+}
+
+/// Normalize an optional metadata value to a path segment. Returns the empty
+/// string when no value is available (or it normalizes to nothing), and treats
+/// the literal answer `unknown` as no answer, so a missing value never appears
+/// in a filename.
+fn sanitize_metadata_value(value: Option<&str>) -> String {
+    let s = sanitize_metadata_segment(value.unwrap_or(""));
+    if s == "unknown" {
+        String::new()
+    } else {
+        s
     }
-    s
 }
 
 /// Windows-reserved device names and path-invalid characters. On other
@@ -408,15 +472,11 @@ impl PlaceholderValues {
             Placeholder::Hour => self.hour.clone().unwrap_or_default(),
             Placeholder::Minute => self.minute.clone().unwrap_or_default(),
             Placeholder::Second => self.second.clone().unwrap_or_default(),
-            Placeholder::Title => sanitize_metadata_segment(self.title.as_deref().unwrap_or("")),
-            Placeholder::Author => sanitize_metadata_segment(self.author.as_deref().unwrap_or("")),
-            Placeholder::Location => {
-                sanitize_metadata_segment(self.location.as_deref().unwrap_or(""))
-            }
-            Placeholder::Subject => {
-                sanitize_metadata_segment(self.subject.as_deref().unwrap_or(""))
-            }
-            Placeholder::Camera => sanitize_metadata_segment(self.camera.as_deref().unwrap_or("")),
+            Placeholder::Title => sanitize_metadata_value(self.title.as_deref()),
+            Placeholder::Author => sanitize_metadata_value(self.author.as_deref()),
+            Placeholder::Location => sanitize_metadata_value(self.location.as_deref()),
+            Placeholder::Subject => sanitize_metadata_value(self.subject.as_deref()),
+            Placeholder::Camera => sanitize_metadata_value(self.camera.as_deref()),
             Placeholder::RemoteHost => self
                 .remote_host
                 .as_deref()
@@ -610,9 +670,9 @@ mod tests {
             sanitize_metadata_segment("AT&T's (draft): v1.2"),
             "at-t-s-draft-v1.2"
         );
-        assert_eq!(sanitize_metadata_segment("!!!"), "unknown");
-        assert_eq!(sanitize_metadata_segment("..."), "unknown");
-        assert_eq!(sanitize_metadata_segment(".."), "unknown");
+        assert_eq!(sanitize_metadata_segment("!!!"), "");
+        assert_eq!(sanitize_metadata_segment("..."), "");
+        assert_eq!(sanitize_metadata_segment(".."), "");
         assert_eq!(sanitize_metadata_segment("naïve Café"), "naïve-café");
     }
 
@@ -652,5 +712,40 @@ mod tests {
         v.remote_owner = None;
         let p = fs.resolve(&v, home).unwrap().unwrap();
         assert_eq!(p, PathBuf::from("/home/alice/Projects/homelinter"));
+    }
+
+    #[test]
+    fn omits_missing_metadata_and_its_separator() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Documents/%a-%t.%e").unwrap();
+        let mut v = vals();
+        v.author = None;
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/home/alice/Documents/sunset-over-the-river.jpg")
+        );
+        // A provider that literally answers `unknown` is treated as no answer.
+        v.author = Some("unknown".into());
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/home/alice/Documents/sunset-over-the-river.jpg")
+        );
+    }
+
+    #[test]
+    fn keeps_one_separator_between_present_fields() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Photos/%H-%l-%s.%e").unwrap();
+        let mut v = vals();
+        v.location = None;
+        v.subject = Some("Beach".into());
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Photos/10-beach.jpg"));
+        // Two missing fields in a row collapse to a single separator.
+        v.subject = None;
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Photos/10.jpg"));
     }
 }

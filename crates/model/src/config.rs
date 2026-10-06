@@ -933,10 +933,10 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
 /// conditions under which an enabled provider will not work until another
 /// value is set, or a set value is ignored by the selected service. These
 /// are warnings, never errors: the configuration loads and scans proceed,
-/// and the affected placeholder resolves to its fallback (`unknown`) while
-/// the condition holds. Surfaced in `GET /config`, `PUT /config`, and the
-/// `config.updated` event so clients can guide the user without blocking
-/// field-at-a-time edits.
+/// and the affected placeholder falls back (omitted for `%l`, the filename
+/// stem for `%s`) while the condition holds. Surfaced in `GET /config`,
+/// `PUT /config`, and the `config.updated` event so clients can guide the
+/// user without blocking field-at-a-time edits.
 pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
     let mut warnings: Vec<(String, String)> = Vec::new();
 
@@ -955,7 +955,7 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
                     warnings.push((
                         "geocoder.api_key".into(),
                         format!(
-                            "api_key is required by the {:?} service; geocoding fails and %l resolves to unknown until it is set",
+                            "api_key is required by the {:?} service; geocoding fails and %l is omitted until it is set",
                             geo.geocoder_service()
                         )
                         .to_lowercase(),
@@ -978,7 +978,7 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
                 if endpoint_empty {
                     warnings.push((
                         "geocoder.endpoint".into(),
-                        "endpoint is required for the custom service; geocoding fails and %l resolves to unknown until it is set"
+                        "endpoint is required for the custom service; geocoding fails and %l is omitted until it is set"
                             .into(),
                     ));
                 }
@@ -997,7 +997,7 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
         if eff.model.as_deref().map(str::trim).unwrap_or("").is_empty() {
             warnings.push((
                 format!("{prefix}.model"),
-                "model is required when the description provider is enabled; %s resolves to unknown until it is set"
+                "model is required when the description provider is enabled; %s falls back to the filename stem until it is set"
                     .into(),
             ));
         }
@@ -1012,7 +1012,7 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
                 {
                     warnings.push((
                         format!("{prefix}.endpoint"),
-                        "endpoint is required for the custom backend; %s resolves to unknown until it is set"
+                        "endpoint is required for the custom backend; %s falls back to the filename stem until it is set"
                             .into(),
                     ));
                 }
@@ -1027,7 +1027,7 @@ pub fn config_warnings(raw: &RawConfig) -> Vec<(String, String)> {
                 {
                     warnings.push((
                         format!("{prefix}.api_key"),
-                        "api_key is required by the openrouter backend; %s resolves to unknown until it is set"
+                        "api_key is required by the openrouter backend; %s falls back to the filename stem until it is set"
                             .into(),
                     ));
                 }

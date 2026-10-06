@@ -1205,9 +1205,9 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             trial.embedded_author = m.author.clone().or(trial.embedded_author);
         }
         // A description provider failure should degrade to the authoritative
-        // embedded title or the stable source filename stem rather than the
-        // generic `unknown` placeholder. This keeps `%s` useful without
-        // pretending that the provider produced a description.
+        // embedded title or the stable source filename stem rather than
+        // leaving `%s` empty. This keeps `%s` useful without pretending that
+        // the provider produced a description.
         if job.kind == ProviderKind::Description && value.is_none() {
             trial.subject = f
                 .authoritative_title()
@@ -1680,7 +1680,7 @@ mod tests {
 
     /// A session primed like the end of a real scan: one file whose move
     /// suggestion resolves against `format`, ready for a late provider
-    /// request. `%l` resolves to `unknown` and `%s` to `unknown` until a
+    /// request. `%l` is omitted and `%s` uses the filename stem until a
     /// provider result overlays it.
     async fn primed_app_with_format(format: &str) -> (AppHandle, u64) {
         let dir = tmp_dir("app");

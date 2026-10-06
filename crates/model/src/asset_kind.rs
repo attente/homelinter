@@ -218,7 +218,7 @@ pub const DESCRIPTION_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"
 /// The content-description modality for an asset kind, if any. Kinds
 /// without a modality (repository, archive, data, executable, other)
 /// have no content source for `%s`, so no description provider is ever
-/// planned for them and `%s` resolves to `unknown`.
+/// planned for them and `%s` falls back to the filename stem.
 pub fn description_modality(kind: AssetKind) -> Option<&'static str> {
     match kind {
         AssetKind::Document => Some("text"),

@@ -306,6 +306,18 @@ fn coordinate_fallback(latitude: Option<f64>, longitude: Option<f64>) -> Option<
     Some(format!("{latitude:.6},{longitude:.6}"))
 }
 
+/// Treat a provider answer of `unknown` (or blank) as no answer, so the
+/// placeholder's normal fallback applies instead of a literal `unknown` in a
+/// filename.
+fn meaningful(value: &str) -> Option<&str> {
+    let v = value.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("unknown") {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     let (stem, ext) = split_name(&f.path);
     let (year, year2, month, day, hour, minute, second) = match f.extracted_date {
@@ -329,10 +341,11 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     // extension is re-appended by `%e`; an authoritative embedded title is
     // used verbatim.
     let clean = |s: &str| strip_trailing_document_extension(s).to_owned();
+    let subject = f.subject.as_deref().and_then(meaningful).map(clean);
     let title = f
         .authoritative_title()
         .map(str::to_owned)
-        .or_else(|| f.subject.as_deref().map(clean))
+        .or_else(|| subject.clone())
         .unwrap_or_else(|| clean(&stem));
     PlaceholderValues {
         year,
@@ -351,7 +364,7 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         subject: f
             .authoritative_title()
             .map(str::to_owned)
-            .or_else(|| f.subject.as_deref().map(clean))
+            .or(subject)
             .or_else(|| Some(clean(&stem))),
         camera: f.camera_model.clone(),
         remote_host: None,
@@ -674,5 +687,14 @@ mod tests {
             file_values(&f).title.as_deref(),
             Some("Signed Contract.pdf")
         );
+    }
+
+    #[test]
+    fn unknown_provider_answer_falls_back_to_the_stem() {
+        let mut f = analyzed("/tmp/Quarterly Report.pdf");
+        f.subject = Some("unknown".into());
+        // `unknown` is no answer, so `%t` and `%s` use the stem.
+        assert_eq!(file_values(&f).title.as_deref(), Some("Quarterly Report"));
+        assert_eq!(file_values(&f).subject.as_deref(), Some("Quarterly Report"));
     }
 }
