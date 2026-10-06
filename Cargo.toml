@@ -34,6 +34,7 @@ tower = "0.5"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 rustix = { version = "0.38", features = ["fs"] }
+unicode-normalization = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.dev]

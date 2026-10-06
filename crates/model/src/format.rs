@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use crate::asset_kind::AssetKind;
 use crate::error::ApiError;
+use unicode_normalization::char::is_combining_mark;
+use unicode_normalization::UnicodeNormalization;
 
 /// Supported placeholder characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -380,17 +382,23 @@ pub struct PlaceholderValues {
     pub asset_kind: AssetKind,
 }
 
-/// Lowercase (Unicode-aware) and normalize a metadata segment: every run of
-/// whitespace or separator punctuation becomes a single hyphen, and path
-/// separators, NUL, control characters, and platform-invalid characters
-/// become `_`. Underscores and dots are preserved, so a run of spaces,
-/// hyphens, and other separator punctuation collapses to one hyphen. An
-/// empty result means the value carried no usable text; callers render such a
-/// placeholder as nothing rather than a literal placeholder word.
+/// Lowercase (Unicode-aware) and normalize a metadata segment. Accented
+/// characters are decomposed (NFD) and their combining diacritical marks
+/// dropped, so they fall back to their basic ASCII equivalent (`café`
+/// becomes `cafe`). Every run of whitespace or separator punctuation becomes
+/// a single hyphen, and path separators, NUL, control characters, and
+/// platform-invalid characters become `_`. Underscores and dots are
+/// preserved, so a run of spaces, hyphens, and other separator punctuation
+/// collapses to one hyphen. An empty result means the value carried no
+/// usable text; callers render such a placeholder as nothing rather than a
+/// literal placeholder word.
 pub fn sanitize_metadata_segment(input: &str) -> String {
     let mut out = String::new();
     let mut pending_hyphen = false;
-    for c in input.chars() {
+    for c in input.nfd() {
+        if is_combining_mark(c) {
+            continue;
+        }
         if c.is_whitespace() {
             pending_hyphen = true;
             continue;
@@ -673,7 +681,12 @@ mod tests {
         assert_eq!(sanitize_metadata_segment("!!!"), "");
         assert_eq!(sanitize_metadata_segment("..."), "");
         assert_eq!(sanitize_metadata_segment(".."), "");
-        assert_eq!(sanitize_metadata_segment("naïve Café"), "naïve-café");
+        assert_eq!(sanitize_metadata_segment("naïve Café"), "naive-cafe");
+        assert_eq!(sanitize_metadata_segment("Crème Brûlée"), "creme-brulee");
+        assert_eq!(sanitize_metadata_segment("München"), "munchen");
+        assert_eq!(sanitize_metadata_segment("señor"), "senor");
+        // Decomposed input (base + combining mark) normalizes the same way.
+        assert_eq!(sanitize_metadata_segment("cafe\u{301}"), "cafe");
     }
 
     #[test]
