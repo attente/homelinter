@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use homelinter_analyze::{Analysis, AnalyzedFile};
-use homelinter_model::asset_kind::AssetKind;
+use homelinter_model::asset_kind::{strip_trailing_document_extension, AssetKind};
 use homelinter_model::format::{FormatString, PlaceholderValues};
 use homelinter_model::path;
 use homelinter_model::suggestion::{DependentOpType, DependentOperation, Provenance, Suggestion};
@@ -323,12 +323,17 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     // `%t` precedence: embedded title metadata, then a content-derived
     // title or description (the `%s` provider value, which for documents is
     // the recovered original title), then the filename stem. `%s` itself
-    // prefers the authoritative title first (see below).
+    // prefers the authoritative title first (see below). A recovered title
+    // or stem can carry a duplicated trailing document extension (the stem
+    // of `Name.docx.pdf` is `Name.docx`), which is stripped before the real
+    // extension is re-appended by `%e`; an authoritative embedded title is
+    // used verbatim.
+    let clean = |s: &str| strip_trailing_document_extension(s).to_owned();
     let title = f
         .authoritative_title()
         .map(str::to_owned)
-        .or_else(|| f.subject.clone())
-        .unwrap_or_else(|| stem.clone());
+        .or_else(|| f.subject.as_deref().map(clean))
+        .unwrap_or_else(|| clean(&stem));
     PlaceholderValues {
         year,
         year2,
@@ -346,8 +351,8 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         subject: f
             .authoritative_title()
             .map(str::to_owned)
-            .or_else(|| f.subject.clone())
-            .or_else(|| Some(stem.clone())),
+            .or_else(|| f.subject.as_deref().map(clean))
+            .or_else(|| Some(clean(&stem))),
         camera: f.camera_model.clone(),
         remote_host: None,
         remote_owner: None,
@@ -649,5 +654,25 @@ mod tests {
         // Embedded metadata still wins over the provider value.
         f.embedded_title = Some("  The Real Title ".into());
         assert_eq!(file_values(&f).title.as_deref(), Some("The Real Title"));
+    }
+
+    #[test]
+    fn strips_duplicated_document_extension_from_titles() {
+        // The stem of `Name.docx.pdf` is `Name.docx`.
+        let mut f = analyzed("/tmp/William Hua - Offboarding.docx.pdf");
+        assert_eq!(
+            file_values(&f).title.as_deref(),
+            Some("William Hua - Offboarding")
+        );
+        // A provider that echoes the filename is cleaned for both `%t` and `%s`.
+        f.subject = Some("Quarterly Report.pdf".into());
+        assert_eq!(file_values(&f).title.as_deref(), Some("Quarterly Report"));
+        assert_eq!(file_values(&f).subject.as_deref(), Some("Quarterly Report"));
+        // An authoritative embedded title is used verbatim.
+        f.embedded_title = Some("Signed Contract.pdf".into());
+        assert_eq!(
+            file_values(&f).title.as_deref(),
+            Some("Signed Contract.pdf")
+        );
     }
 }

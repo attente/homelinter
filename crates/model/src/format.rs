@@ -329,8 +329,10 @@ pub struct PlaceholderValues {
 }
 
 /// Lowercase (Unicode-aware) and normalize a metadata segment: every run of
-/// whitespace becomes a single hyphen, and path separators, NUL, control
-/// characters, and platform-invalid characters become `_`.
+/// whitespace or separator punctuation becomes a single hyphen, and path
+/// separators, NUL, control characters, and platform-invalid characters
+/// become `_`. Underscores and dots are preserved, so a run of spaces,
+/// hyphens, and other separator punctuation collapses to one hyphen.
 pub fn sanitize_metadata_segment(input: &str) -> String {
     let mut out = String::new();
     let mut pending_hyphen = false;
@@ -339,13 +341,21 @@ pub fn sanitize_metadata_segment(input: &str) -> String {
             pending_hyphen = true;
             continue;
         }
+        if c == '/' || c == '\\' || c == '\0' || c.is_control() || is_platform_invalid(c) {
+            if pending_hyphen {
+                out.push('-');
+                pending_hyphen = false;
+            }
+            out.push('_');
+            continue;
+        }
+        if is_separator_punctuation(c) {
+            pending_hyphen = true;
+            continue;
+        }
         if pending_hyphen {
             out.push('-');
             pending_hyphen = false;
-        }
-        if c == '/' || c == '\\' || c == '\0' || c.is_control() || is_platform_invalid(c) {
-            out.push('_');
-            continue;
         }
         for lc in c.to_lowercase() {
             out.push(lc);
@@ -374,6 +384,13 @@ fn is_platform_invalid(_c: char) -> bool {
     {
         false
     }
+}
+
+/// ASCII punctuation that separates words. Underscores and dots are
+/// preserved as filename characters; hyphens are separators so runs of them
+/// collapse with surrounding whitespace into a single hyphen.
+fn is_separator_punctuation(c: char) -> bool {
+    c.is_ascii_punctuation() && c != '_' && c != '.'
 }
 
 /// Characters that may never appear in a host file name.
@@ -581,6 +598,19 @@ mod tests {
             "sunset-over-the-river"
         );
         assert_eq!(sanitize_metadata_segment("a/b\\c"), "a_b_c");
+        assert_eq!(
+            sanitize_metadata_segment("Legal Consultation, Employee Intake"),
+            "legal-consultation-employee-intake"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("William Hua - Offboarding.docx"),
+            "william-hua-offboarding.docx"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("AT&T's (draft): v1.2"),
+            "at-t-s-draft-v1.2"
+        );
+        assert_eq!(sanitize_metadata_segment("!!!"), "unknown");
         assert_eq!(sanitize_metadata_segment("..."), "unknown");
         assert_eq!(sanitize_metadata_segment(".."), "unknown");
         assert_eq!(sanitize_metadata_segment("naïve Café"), "naïve-café");

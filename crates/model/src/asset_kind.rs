@@ -181,6 +181,34 @@ pub fn classify_path(p: &std::path::Path) -> AssetKind {
     }
 }
 
+/// Strip a trailing, duplicated document extension from a recovered title or
+/// filename stem. The stem of `Name.docx.pdf` is `Name.docx`, and a provider
+/// that echoes the path may return `Name.docx.pdf`; both should reduce to
+/// `Name` before the real extension is re-appended by `%e`. Repeated known
+/// document extensions are removed, but a hidden name (`.pdf`) or one that is
+/// entirely an extension is left unchanged.
+pub fn strip_trailing_document_extension(name: &str) -> &str {
+    let mut current = name;
+    loop {
+        let Some(dot) = current.rfind('.') else {
+            break;
+        };
+        if dot == 0 {
+            break;
+        }
+        let ext = &current[dot + 1..];
+        if ext.is_empty() || extension_kind(&ext.to_lowercase()) != AssetKind::Document {
+            break;
+        }
+        let trimmed = current[..dot].trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        current = trimmed;
+    }
+    current
+}
+
 /// Content-description modality names, in canonical order. These are
 /// the per-modality keys accepted under `[description]` overrides
 /// (e.g. `[description.text]`, `[description.image]`), one per content
@@ -249,6 +277,27 @@ mod tests {
         assert_eq!(classify_file_name("data.json"), AssetKind::Data);
         assert_eq!(classify_file_name("run.sh"), AssetKind::Executable);
         assert_eq!(classify_file_name("notes"), AssetKind::Other);
+    }
+
+    #[test]
+    fn strips_duplicated_document_extensions() {
+        assert_eq!(
+            strip_trailing_document_extension("William Hua - Offboarding.docx"),
+            "William Hua - Offboarding"
+        );
+        assert_eq!(
+            strip_trailing_document_extension("William Hua - Offboarding.docx.pdf"),
+            "William Hua - Offboarding"
+        );
+        // Non-document extensions and extension-free names are untouched.
+        assert_eq!(
+            strip_trailing_document_extension("IMG_0001.jpg"),
+            "IMG_0001.jpg"
+        );
+        assert_eq!(strip_trailing_document_extension("report"), "report");
+        // A hidden name or a bare extension is not stripped.
+        assert_eq!(strip_trailing_document_extension(".pdf"), ".pdf");
+        assert_eq!(strip_trailing_document_extension("pdf"), "pdf");
     }
 
     #[test]
