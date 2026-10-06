@@ -23,10 +23,13 @@ pub const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 104_857_600;
 pub const DEFAULT_MAX_WORDS: u64 = 4;
 /// Default description prompt template; `{words}` is substituted before the
 /// request, and the full source path plus any extracted document text are
-/// appended verbatim after it (description providers always receive the
-/// path, which carries the filename, so neither needs a placeholder). The
-/// wording asks for keywords/tags rather than a sentence, because the `%s`
-/// value is normalized into a lowercased, hyphenated path segment for a
+/// always included (description providers always receive the path, which
+/// carries the filename, so neither needs a placeholder). When extracted
+/// text exists it is delimited and placed before the prompt, with the
+/// rendered prompt placed last so a local model answers the question rather
+/// than the document; without text the prompt leads and the path follows.
+/// The wording asks for keywords/tags rather than a sentence, because the
+/// `%s` value is normalized into a lowercased, hyphenated path segment for a
 /// file stem or folder name.
 pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of this file in at most {words} keywords, for use as a file or folder name. Do not mention the file type, extension, medium, path, or folder names (for example photo, image, video, movie, or document). Reply with only the keywords separated by spaces.";
 /// Default description prompt for text documents (the `text` modality).
@@ -34,7 +37,8 @@ pub const DEFAULT_DESCRIPTION_PROMPT: &str = "Describe the subject matter of thi
 /// the full original title first and only fall back to keyword extraction
 /// when the content carries no title. `{words}` bounds the keyword fallback
 /// (a recovered title is used verbatim, however long). As with the generic
-/// prompt, the source path and extracted text are appended after it.
+/// prompt, extracted text is delimited and placed before the prompt, and the
+/// source path is always included.
 pub const DEFAULT_DOCUMENT_DESCRIPTION_PROMPT: &str = "Read this document and reply with its full original title if the document states one (for example a title, heading, or subject line), preserving the wording exactly. If the document states no title, reply with a short description of its subject matter in at most {words} keywords instead. Do not mention the file type, extension, medium, path, or folder names (for example document, PDF, or folder names). Reply with only the title or the keywords.";
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
@@ -817,13 +821,14 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             ));
         }
         // `{path}` and `{name}` are intentionally not placeholders: the
-        // full source path (which carries the filename) is always appended
-        // after the rendered template, so a custom prompt cannot omit it and
-        // only the word budget is template-driven.
+        // full source path (which carries the filename) and any extracted
+        // text are always included around the rendered template, so a custom
+        // prompt cannot omit them and only the word budget is
+        // template-driven.
         if let Some(bad) = crate::prompt::prompt_template_error(&eff.prompt, &["words"]) {
             fields.push((
                 format!("{prefix}.prompt"),
-                format!("unsupported placeholder {bad} in prompt template (supported: {{words}}; the path is always appended, so {{name}} and {{path}} are not placeholders; escape literal braces by doubling them)"),
+                format!("unsupported placeholder {bad} in prompt template (supported: {{words}}; the path and any content are always included, so {{name}} and {{path}} are not placeholders; escape literal braces by doubling them)"),
             ));
         }
     }

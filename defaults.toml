@@ -57,7 +57,8 @@ max_words = 4                   # maximum words in the generated description
 # Unset = built-in wording: documents recover the original title first and
 # fall back to at most max_words keywords, other modalities use keywords.
 # The full file path (carrying the filename) and any extracted document text
-# are always appended automatically.
+# are always included; with text the content comes first and the question
+# last so the model answers the question instead of the document.
 # prompt = "Describe the file in at most {words} words"
 # Longest side in px for photos sent to a vision backend; larger photos are
 # downscaled before the request. 0 = forward original bytes.
