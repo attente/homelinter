@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::RawConfig;
+use rayon::prelude::*;
 
 use crate::dateparse::DateParts;
 
@@ -58,12 +59,37 @@ pub struct EmbeddedMeta {
     pub page_count: Option<u64>,
 }
 
+/// One file handed to a batch extraction: its path and classified kind.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractTarget<'a> {
+    pub path: &'a Path,
+    pub kind: AssetKind,
+}
+
 /// A metadata extractor for embedded content, consulted in priority order
 /// before filename- and provider-derived metadata.
 pub trait MetadataExtractor: Send + Sync {
     fn name(&self) -> &'static str;
     fn extract(&self, _path: &Path, _kind: AssetKind, _ctx: &ExtractionContext) -> EmbeddedMeta {
         EmbeddedMeta::default()
+    }
+
+    /// Extract metadata for a batch of files, positionally aligned with
+    /// `files` (the result at index `i` belongs to `files[i]`). The default
+    /// implementation runs `extract` for every file in parallel, which is
+    /// safe because extractors are `Sync` and each file is independent.
+    /// Extractors that can amortize per-process startup (for example
+    /// `exiftool`, whose process launch dominates its work on a single
+    /// file) override this to process the batch in a few invocations.
+    fn extract_batch(
+        &self,
+        files: &[ExtractTarget<'_>],
+        ctx: &ExtractionContext,
+    ) -> Vec<EmbeddedMeta> {
+        files
+            .par_iter()
+            .map(|t| self.extract(t.path, t.kind, ctx))
+            .collect()
     }
 }
 

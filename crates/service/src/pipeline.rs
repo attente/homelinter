@@ -200,11 +200,16 @@ pub async fn start_scan(
         // frozen phase line left by the last phase-boundary event.
         let progress = {
             let app = app.clone();
-            let last = std::cell::Cell::new(start);
+            // The analysis passes report from worker threads, so the
+            // throttle state is a mutex; a lock is held only long enough to
+            // read and update the last-publish instant.
+            let last = std::sync::Mutex::new(start);
             move |phase: &'static str, scanned: u64| {
                 let now = Instant::now();
-                if now.duration_since(last.get()) >= std::time::Duration::from_secs(1) {
-                    last.set(now);
+                let mut last = last.lock().unwrap();
+                if now.duration_since(*last) >= std::time::Duration::from_secs(1) {
+                    *last = now;
+                    drop(last);
                     app.events.publish(phase_progress(phase, scanned, start));
                 }
             }

@@ -27,17 +27,21 @@ pub use dateparse::{parse_exif_datetime, parse_filename_date, DateParts};
 pub use doc_container::DocumentContainerExtractor;
 pub use doc_pdfinfo::PdfInfoExtractor;
 pub use exiftool::ExifToolExtractor;
-pub use extractor::{merge_meta, EmbeddedMeta, ExtractionContext, MetadataExtractor};
+pub use extractor::{
+    merge_meta, EmbeddedMeta, ExtractTarget, ExtractionContext, MetadataExtractor,
+};
 pub use repo::{RepoAnalyzer, RepoMeta};
 pub use tool_runner::run_capture;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use homelinter_model::asset_kind::{classify_path, AssetKind};
 use homelinter_model::hash;
 use homelinter_model::suggestion::Provenance;
 use homelinter_scan::{FileEntry, RepoEntry};
+use rayon::prelude::*;
 
 /// A file with its analysis results.
 #[derive(Debug, Clone)]
@@ -156,89 +160,114 @@ pub fn analyze(
     files: &[FileEntry],
     repos: &[RepoEntry],
     opts: &AnalyzeOptions,
-    cancel: &dyn Fn() -> bool,
-    progress: &dyn Fn(&'static str, u64),
+    cancel: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(&'static str, u64) + Sync),
 ) -> Analysis {
-    let mut analyzed: Vec<AnalyzedFile> = Vec::with_capacity(files.len());
-    let mut degraded = false;
-    for f in files {
-        // Cooperative cancellation: polled per file so a cancel lands
-        // between individual extractions instead of after the whole batch.
+    // Classify once, then hand every file to each extractor as one batch.
+    // Built-in extractors parallelize internally and `exiftool` overrides
+    // `extract_batch` to amortize process startup across many files, so the
+    // per-extractor pass is far cheaper than the old per-file loop while
+    // producing the identical first-value-wins merge.
+    let targets: Vec<ExtractTarget<'_>> = files
+        .iter()
+        .map(|f| ExtractTarget {
+            path: &f.path,
+            kind: classify_path(&f.path),
+        })
+        .collect();
+    let mut merged = vec![EmbeddedMeta::default(); files.len()];
+    for ex in &opts.extractors {
         if cancel() {
             break;
         }
-        let kind = classify_path(&f.path);
-        // Merge all configured extractors, first value wins per field.
-        let mut merged = EmbeddedMeta::default();
-        for ex in &opts.extractors {
-            let m = ex.extract(&f.path, kind, &opts.ctx);
-            merge_meta(&mut merged, &m);
+        let batch = ex.extract_batch(&targets, &opts.ctx);
+        for (acc, m) in merged.iter_mut().zip(batch.iter()) {
+            merge_meta(acc, m);
         }
-        let (date, source) = match merged.date_taken {
-            Some(d) => (Some(d), "embedded"),
-            None => filename_date(f),
-        };
-        let mut prov = Provenance {
-            size: f.size,
-            ..Default::default()
-        };
-        if let Ok(m) = f.modified.duration_since(std::time::UNIX_EPOCH) {
-            prov.mtime_ns = m.as_nanos() as i128;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let Ok(meta) = std::fs::metadata(&f.path) {
-                prov.dev = meta.dev();
-                prov.ino = meta.ino();
-                prov.identity_available = meta.dev() != 0 && meta.ino() != 0;
+    }
+
+    let mut degraded = false;
+    let analyzed: Vec<AnalyzedFile> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let meta = &merged[i];
+            let (date, source) = match meta.date_taken {
+                Some(d) => (Some(d), "embedded"),
+                None => filename_date(f),
+            };
+            let mut prov = Provenance {
+                size: f.size,
+                ..Default::default()
+            };
+            if let Ok(m) = f.modified.duration_since(std::time::UNIX_EPOCH) {
+                prov.mtime_ns = m.as_nanos() as i128;
             }
-            if !prov.identity_available {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(meta) = std::fs::metadata(&f.path) {
+                    prov.dev = meta.dev();
+                    prov.ino = meta.ino();
+                    prov.identity_available = meta.dev() != 0 && meta.ino() != 0;
+                }
+                if !prov.identity_available {
+                    degraded = true;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                prov.identity_available = false;
                 degraded = true;
             }
-        }
-        #[cfg(not(unix))]
-        {
-            prov.identity_available = false;
-            degraded = true;
-        }
-        analyzed.push(AnalyzedFile {
-            path: f.path.clone(),
-            kind,
-            size: f.size,
-            modified: f.modified,
-            created: f.created,
-            full_hash: None,
-            provenance: prov,
-            extracted_date: date,
-            date_source: source,
-            embedded_title: merged.title,
-            embedded_author: merged.author,
-            camera_model: merged.camera,
-            latitude: merged.latitude,
-            longitude: merged.longitude,
-            location: None,
-            subject: None,
-            bitrate_kbps: merged.bitrate_kbps,
-            duration_secs: merged.duration_secs,
-            page_count: merged.page_count,
-        });
-        // Progress: report extracted files so a long extraction batch shows
-        // movement in clients instead of a frozen phase line.
-        progress("metadata", analyzed.len() as u64);
-    }
+            AnalyzedFile {
+                path: f.path.clone(),
+                kind: targets[i].kind,
+                size: f.size,
+                modified: f.modified,
+                created: f.created,
+                full_hash: None,
+                provenance: prov,
+                extracted_date: date,
+                date_source: source,
+                embedded_title: meta.title.clone(),
+                embedded_author: meta.author.clone(),
+                camera_model: meta.camera.clone(),
+                latitude: meta.latitude,
+                longitude: meta.longitude,
+                location: None,
+                subject: None,
+                bitrate_kbps: meta.bitrate_kbps,
+                duration_secs: meta.duration_secs,
+                page_count: meta.page_count,
+            }
+        })
+        .collect();
+    let mut analyzed = analyzed;
+    // Progress: report extracted files so a long extraction batch shows
+    // movement in clients instead of a frozen phase line.
+    progress("metadata", analyzed.len() as u64);
 
     let groups = dedup_groups(&mut analyzed, opts.large_file_threshold, cancel, progress);
 
+    // Repositories are independent; the per-VCS adapters shell out to the
+    // VCS CLI, so running them in parallel hides their process latency.
     let repo_analyzer = RepoAnalyzer::new(&opts.toolset);
-    let mut repo_meta: Vec<(RepoEntry, RepoMeta)> = Vec::with_capacity(repos.len());
-    for (k, r) in repos.iter().enumerate() {
-        if cancel() {
-            break;
-        }
-        repo_meta.push((r.clone(), repo_analyzer.analyze(r)));
-        progress("repos", k as u64 + 1);
-    }
+    let repos_progress = AtomicU64::new(0);
+    let repo_meta: Vec<(RepoEntry, RepoMeta)> = repos
+        .par_iter()
+        .filter_map(|r| {
+            if cancel() {
+                return None;
+            }
+            let meta = repo_analyzer.analyze(r);
+            progress(
+                "repos",
+                repos_progress.fetch_add(1, Ordering::Relaxed) + 1,
+            );
+            Some((r.clone(), meta))
+        })
+        .collect();
 
     Analysis {
         files: analyzed,
@@ -269,47 +298,67 @@ fn filename_date(f: &FileEntry) -> (Option<DateParts>, &'static str) {
 fn dedup_groups(
     files: &mut [AnalyzedFile],
     threshold: u64,
-    cancel: &dyn Fn() -> bool,
-    progress: &dyn Fn(&'static str, u64),
+    cancel: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(&'static str, u64) + Sync),
 ) -> Vec<DupGroup> {
+    let hashed = AtomicU64::new(0);
+    // Pass 1: full-hash every file below the threshold and fast-hash the
+    // rest. Files are independent, so the pass runs in parallel; hashing
+    // large media trees in full is the second-largest scan cost after
+    // metadata extraction.
+    let pre: Vec<Option<([u8; 32], bool)>> = files
+        .par_iter_mut()
+        .map(|f| {
+            if cancel() {
+                return None;
+            }
+            let result = if f.size >= threshold && f.size > 0 {
+                hash::hash_file_fast(&f.path, f.size).ok().map(|h| (h, true))
+            } else {
+                match hash::hash_file_full(&f.path) {
+                    Ok(h) => {
+                        f.full_hash = Some(h);
+                        Some((h, false))
+                    }
+                    Err(_) => None,
+                }
+            };
+            progress("hashing", hashed.fetch_add(1, Ordering::Relaxed) + 1);
+            result
+        })
+        .collect();
+
     // Known full hashes, keyed to member indexes.
     let mut full: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
     // Large files awaiting confirmation, keyed to member indexes.
     let mut fast_pending: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
-
-    for (i, f) in files.iter_mut().enumerate() {
-        if cancel() {
-            // A cancelled scan discards the partial batch; stop hashing.
-            return Vec::new();
+    for (i, item) in pre.into_iter().enumerate() {
+        match item {
+            Some((h, true)) => fast_pending.entry(h).or_default().push(i),
+            Some((h, false)) => full.entry(h).or_default().push(i),
+            None => {}
         }
-        if f.size >= threshold && f.size > 0 {
-            let size = f.size;
-            if let Ok(h) = hash::hash_file_fast(&f.path, size) {
-                fast_pending.entry(h).or_default().push(i);
-            }
-        } else if let Ok(h) = hash::hash_file_full(&f.path) {
-            f.full_hash = Some(h);
-            full.entry(h).or_default().push(i);
-        }
-        // Progress: report hashed files so a long content-hashing pass
-        // (large files at or above the threshold) shows movement too.
-        progress("hashing", i as u64 + 1);
     }
 
-    // Confirm fast-path collisions with full-content hashes.
-    for (_, members) in fast_pending {
-        for (j, i) in members.iter().enumerate() {
-            if cancel() {
-                return Vec::new();
-            }
-            if let Ok(h) = hash::hash_file_full(&files[*i].path) {
-                files[*i].full_hash = Some(h);
-                full.entry(h).or_default().push(*i);
-            }
-            // Rare pass: continue the count past the first loop so the
-            // reported number never moves backwards.
-            progress("hashing", files.len() as u64 + j as u64 + 1);
-        }
+    // Confirm fast-path collisions with full-content hashes, in parallel.
+    let pending: Vec<([u8; 32], Vec<usize>)> = fast_pending.into_iter().collect();
+    let files_ref: &[AnalyzedFile] = files;
+    let confirmed: Vec<(usize, [u8; 32])> = pending
+        .par_iter()
+        .flat_map_iter(|(_, members)| {
+            members.iter().filter_map(|&i| {
+                if cancel() {
+                    return None;
+                }
+                let h = hash::hash_file_full(&files_ref[i].path).ok();
+                progress("hashing", hashed.fetch_add(1, Ordering::Relaxed) + 1);
+                h.map(|h| (i, h))
+            })
+        })
+        .collect();
+    for (i, h) in confirmed {
+        files[i].full_hash = Some(h);
+        full.entry(h).or_default().push(i);
     }
 
     let mut groups = Vec::new();
