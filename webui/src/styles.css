@@ -602,6 +602,12 @@ textarea:focus {
   font-size: 12px;
   overflow: auto;
   white-space: pre-wrap;
+  /* The document is a flex item with `overflow: auto`, so its automatic
+     minimum size would otherwise be 0 and its siblings could squash it to a
+     thin strip. Grow it into the free space instead, with a floor so it stays
+     usable on short viewports, and scroll the document internally. */
+  flex: 1 1 0;
+  min-height: 360px;
 }
 
 .config-editor {
