@@ -354,6 +354,22 @@ impl App {
         seen
     }
 
+    /// Apply one `suggestion.updated` event in place, keyed by stable id. A
+    /// provider resolution changes a single row, so the whole batch is never
+    /// re-fetched or re-rendered.
+    fn upsert_row(&mut self, item: &Value) {
+        let row = Row::from_json(item);
+        if let Some(existing) = self.rows.iter_mut().find(|r| r.id == row.id) {
+            *existing = row;
+        } else {
+            self.rows.push(row);
+        }
+        self.kinds = self.unique_kinds();
+        if self.cursor >= self.rows.len() {
+            self.cursor = self.rows.len().saturating_sub(1);
+        }
+    }
+
     /// The currently selected ids. When nothing is selected, selects the
     /// highlighted row first so single-item actions never silently no-op.
     async fn ensure_selection(&mut self) -> Result<Vec<String>, String> {
@@ -627,6 +643,21 @@ impl App {
                     let items = v["items"].as_array().cloned().unwrap_or_default();
                     self.rows = items.iter().map(Row::from_json).collect();
                     self.kinds = self.unique_kinds();
+                }
+            }
+            "suggestion.updated" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    self.upsert_row(&v["item"]);
+                }
+            }
+            "suggestion.removed" => {
+                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                    let id = str_field(&v, "id");
+                    self.rows.retain(|r| r.id != id);
+                    self.kinds = self.unique_kinds();
+                    if self.cursor >= self.rows.len() {
+                        self.cursor = self.rows.len().saturating_sub(1);
+                    }
                 }
             }
             "batch.validated" => {

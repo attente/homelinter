@@ -16,6 +16,7 @@ import type {
   Session,
   SseEvent,
   Suggestion,
+  SuggestionStatus,
 } from "./types";
 
 type Phase = "idle" | "scanning" | "browse" | "running" | "report";
@@ -195,6 +196,29 @@ export default function App() {
             suggestions: (d.items as Suggestion[]) ?? [],
           }));
           break;
+        case "suggestion.updated": {
+          const item = d.item as Suggestion | undefined;
+          if (item) {
+            setSt((prev) => {
+              const idx = prev.suggestions.findIndex((s) => s.id === item.id);
+              const next = [...prev.suggestions];
+              if (idx >= 0) next[idx] = item;
+              else next.push(item);
+              return { ...prev, suggestions: next };
+            });
+          }
+          break;
+        }
+        case "suggestion.removed": {
+          const id = String(d.id ?? "");
+          if (id) {
+            setSt((prev) => ({
+              ...prev,
+              suggestions: prev.suggestions.filter((s) => s.id !== id),
+            }));
+          }
+          break;
+        }
         case "metadata.progress":
           setSt((prev) => ({
             ...prev,
@@ -213,6 +237,21 @@ export default function App() {
             pushToast(
               `re-validation rejected ${v.rejected.length} suggestion(s)`,
             );
+          }
+          if (v.rejected.length > 0) {
+            const reasons = new Map(v.rejected.map((r) => [r.id, r.reason]));
+            setSt((prev) => ({
+              ...prev,
+              suggestions: prev.suggestions.map((s) =>
+                reasons.has(s.id)
+                  ? {
+                      ...s,
+                      status: "rejected" as SuggestionStatus,
+                      rejection_reason: reasons.get(s.id) ?? null,
+                    }
+                  : s,
+              ),
+            }));
           }
           break;
         }

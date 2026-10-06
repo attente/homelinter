@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine as _};
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::header::HeaderValue;
@@ -256,48 +257,73 @@ pub fn spawn(app: AppHandle) {
     tokio::spawn(run_provider_worker(app));
 }
 
-/// The background request loop. One request in flight at a time, paced per
-/// provider, cache-first, failure-tolerant, session-applying on success.
+/// The background request loop. Up to `provider_concurrency` requests run
+/// at once (default `1`), paced per provider, cache-first,
+/// failure-tolerant, session-applying on success.
 pub async fn run_provider_worker(app: AppHandle) {
     let queue = app.provider_queue.clone();
-    let mut last_start: BTreeMap<String, Instant> = BTreeMap::new();
+    let last_start: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
     // Tool availability for document-text defaults; detected once per
     // worker lifetime, exactly like the scan pipeline's ToolSet.
     let tools = ToolSet::detect();
     loop {
         let jobs = queue.drain_ready().await;
-        for job in jobs {
-            if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
-                // The scan that produced this job has been superseded.
-                continue;
-            }
-            pace(&job.settings, &mut last_start).await;
-            let value = match cache_get(&app, &job).await {
-                Some(v) => Some(v),
-                None => {
-                    // Cache miss: fetch the provider input first (document
-                    // text extraction runs off the async runtime, and only
-                    // when a provider call is actually needed), then call.
-                    let job = prepare_provider_job(&app, &job, &tools).await;
-                    let timeout = provider_timeout(&app).await;
-                    match tokio::time::timeout(timeout, invoke(&job)).await {
-                        Ok(Ok(v)) => {
-                            // Geocode results already resolve the structured
-                            // locality; the value is cached as-is and
-                            // rendered into `%l`.
-                            cache_put(&app, &job, &v).await;
-                            Some(v)
-                        }
-                        // Failure or timeout: not cached, the pending
-                        // suggestion stays published with its fallbacks,
-                        // retried on the next scan.
-                        Ok(Err(_)) | Err(_) => None,
-                    }
+        // Re-read per batch so a config change takes effect without a
+        // service restart. A batch never exceeds `concurrency` in flight.
+        let concurrency = provider_concurrency(&app).await;
+        let app = &app;
+        let tools = &tools;
+        let last_start = &last_start;
+        futures_util::stream::iter(jobs)
+            .for_each_concurrent(concurrency, |job| async move {
+                if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
+                    // The scan that produced this job has been superseded.
+                    return;
                 }
-            };
-            // Both outcomes resolve the unit's pending request: success
-            // overlays the value, failure publishes the fallback.
-            resolve_provider_job(&app, &job, value.as_deref()).await;
+                let value = process_provider_job(app, &job, tools, last_start).await;
+                // Both outcomes resolve the unit's pending request: success
+                // overlays the value, failure publishes the fallback.
+                resolve_provider_job(app, &job, value.as_deref()).await;
+            })
+            .await;
+    }
+}
+
+/// Run one provider job to completion: pace, cache-first fetch (extracting
+/// document text only on a miss), invoke under the configured timeout, and
+/// cache a success. Returns the resolved value, or `None` on a miss that
+/// failed or timed out (not cached, retried on the next scan).
+async fn process_provider_job(
+    app: &App,
+    job: &ProviderJob,
+    tools: &ToolSet,
+    last_start: &Mutex<BTreeMap<String, Instant>>,
+) -> Option<String> {
+    let wait = reserve_pace(&job.settings, last_start);
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+    match cache_get(app, job).await {
+        Some(v) => Some(v),
+        None => {
+            // Cache miss: fetch the provider input first (document text
+            // extraction runs off the async runtime, and only when a
+            // provider call is actually needed), then call.
+            let job = prepare_provider_job(app, job, tools).await;
+            let timeout = provider_timeout(app).await;
+            match tokio::time::timeout(timeout, invoke(&job)).await {
+                Ok(Ok(v)) => {
+                    // Geocode results already resolve the structured
+                    // locality; the value is cached as-is and rendered into
+                    // `%l`.
+                    cache_put(app, &job, &v).await;
+                    Some(v)
+                }
+                // Failure or timeout: not cached, the pending suggestion
+                // stays published with its fallbacks, retried on the next
+                // scan.
+                Ok(Err(_)) | Err(_) => None,
+            }
         }
     }
 }
@@ -361,19 +387,29 @@ async fn extract_document_text_for(app: &App, path: PathBuf, tools: &ToolSet) ->
     .flatten()
 }
 
-/// Sleep so consecutive requests to the same provider are at least
-/// `min_interval` apart, then record the start time.
-async fn pace(settings: &ProviderSettings, last: &mut BTreeMap<String, Instant>) {
+/// Reserve the next send slot for a provider and return how long to wait so
+/// concurrent requests to it stay at least `min_interval` apart. The slot
+/// is recorded before sleeping, so two tasks for the same provider cannot
+/// read the same previous time and both skip the interval. The lock is
+/// released before the caller sleeps.
+fn reserve_pace(settings: &ProviderSettings, last: &Mutex<BTreeMap<String, Instant>>) -> Duration {
     if settings.min_interval.is_zero() {
-        return;
+        return Duration::ZERO;
     }
-    if let Some(prev) = last.get(&settings.provider_id) {
-        let elapsed = prev.elapsed();
-        if elapsed < settings.min_interval {
-            tokio::time::sleep(settings.min_interval - elapsed).await;
-        }
-    }
-    last.insert(settings.provider_id.clone(), Instant::now());
+    let now = Instant::now();
+    let mut map = last.lock().unwrap();
+    let next = map
+        .get(&settings.provider_id)
+        .copied()
+        .unwrap_or(now)
+        .max(now);
+    map.insert(settings.provider_id.clone(), next + settings.min_interval);
+    next.saturating_duration_since(now)
+}
+
+async fn provider_concurrency(app: &App) -> usize {
+    let sess = app.session.lock().await;
+    sess.config.provider_concurrency()
 }
 
 async fn provider_timeout(app: &App) -> Duration {
@@ -1181,8 +1217,9 @@ fn author_prompt(path: &Path, text: Option<&str>) -> String {
 /// outstanding request resolves - update the unit's suggestion in place:
 /// `metadata_pending` flips to `false`, and on success the move is rebuilt
 /// with the collected provider values (selection, status, and rejection
-/// reason are preserved). Clients receive an updated `suggestion.batch`
-/// only when something changed.
+/// reason are preserved). Clients receive a `suggestion.updated` event for
+/// the changed suggestion (or `suggestion.removed` when its move now stays
+/// put), never the whole batch.
 ///
 /// Returns `false` when nothing was updated (stale epoch, scan not yet
 /// published, unit mismatch, pending requests remain, or no suggestion for
@@ -1235,7 +1272,7 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     }
 
     // Snapshot the progress for the client update published after the
-    // suggestion batch; taken before releasing the lock.
+    // suggestion delta; taken before releasing the lock.
     let (completed, meta_total) = match &sess.provider_ctx {
         Some(ctx) => (ctx.pending_done, ctx.pending_units.len() + ctx.pending_done),
         None => (0, 0),
@@ -1324,20 +1361,29 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
         summary.total_symlinks_indexed = prev.total_symlinks_indexed;
     }
     sess.summary = Some(summary);
-    let items = sess.suggestions.clone();
-    let total = items.len();
+    // Publish only the one suggestion this resolution changed, so a large
+    // batch costs O(N) work per scan instead of re-cloning and
+    // re-broadcasting the whole list on every resolution. Take the final
+    // state by id because the re-validation above may have rejected it too.
+    let updated = sess.suggestion_by_id(&id).cloned();
+    // Other suggestions newly rejected by the re-validation are already
+    // carried by `batch.validated` (id + reason), so skip the changed id to
+    // avoid reporting it twice.
+    let rejected: Vec<RejectedId> = newly_rejected
+        .into_iter()
+        .filter(|(rid, _)| *rid != id)
+        .map(|(id, reason)| RejectedId { id, reason })
+        .collect();
     drop(sess);
-    app.events
-        .publish(ServerEvent::SuggestionBatch { items, total });
+    match updated {
+        Some(item) => app.events.publish(ServerEvent::SuggestionUpdated { item }),
+        None => app.events.publish(ServerEvent::SuggestionRemoved { id }),
+    }
     app.events.publish(ServerEvent::MetadataProgress {
         completed,
         total: meta_total,
     });
-    if !newly_rejected.is_empty() {
-        let rejected: Vec<RejectedId> = newly_rejected
-            .into_iter()
-            .map(|(id, reason)| RejectedId { id, reason })
-            .collect();
+    if !rejected.is_empty() {
         app.events.publish(ServerEvent::BatchValidated {
             valid: false,
             rejected,
@@ -2321,8 +2367,8 @@ mod tests {
         assert!(err.contains("endpoint"), "{err}");
     }
 
-    #[tokio::test]
-    async fn pacing_respects_min_interval() {
+    #[test]
+    fn pacing_respects_min_interval() {
         let settings = ProviderSettings {
             provider_id: "geocode:nominatim".to_string(),
             settings_hash: [0u8; 32],
@@ -2338,22 +2384,22 @@ mod tests {
             prompt: String::new(),
             neighbourhood_cities: Vec::new(),
         };
-        let mut last = BTreeMap::new();
-        pace(&settings, &mut last).await;
-        let t0 = Instant::now();
-        pace(&settings, &mut last).await;
+        let last = Mutex::new(BTreeMap::new());
+        // The first request has no wait; the next reserves a full interval,
+        // even though no request has been sent yet (the slot is recorded
+        // before sleeping, so concurrent tasks cannot both skip it).
+        assert!(reserve_pace(&settings, &last).is_zero());
+        let wait = reserve_pace(&settings, &last);
         assert!(
-            t0.elapsed() >= Duration::from_millis(140),
-            "pacing fell short"
+            wait >= Duration::from_millis(140) && wait <= Duration::from_millis(160),
+            "unexpected pacing wait: {wait:?}"
         );
 
         // A different provider is never held back.
         let mut fast = settings.clone();
         fast.provider_id = "geocode:custom".into();
         fast.min_interval = Duration::ZERO;
-        let t1 = Instant::now();
-        pace(&fast, &mut last).await;
-        assert!(t1.elapsed() < Duration::from_millis(20));
+        assert!(reserve_pace(&fast, &last).is_zero());
     }
 
     #[tokio::test]
@@ -2415,6 +2461,31 @@ mod tests {
         assert_eq!(
             sess.executable_ids(&[sess.suggestions[0].id.clone()]),
             vec![sess.suggestions[0].id.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolution_publishes_delta_not_full_batch() {
+        let (app, epoch) = primed_app().await;
+        let port = stub_geocoder().await;
+        let geo = geocode_job(&app, port, epoch).await;
+        {
+            let mut sess = app.session.lock().await;
+            sess.provider_ctx.as_mut().unwrap().pending.insert(0, 1);
+        }
+        let mut rx = app.events.subscribe();
+        assert!(resolve_provider_job(&app, &geo, Some("paris")).await);
+
+        let mut names = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            names.push(ev.name().to_string());
+        }
+        // One row is updated in place; the whole batch is never re-broadcast.
+        assert!(names.contains(&"suggestion.updated".to_string()), "{names:?}");
+        assert!(names.contains(&"metadata.progress".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"suggestion.batch".to_string()),
+            "unexpected full batch: {names:?}"
         );
     }
 

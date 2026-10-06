@@ -45,6 +45,13 @@ pub const DEFAULT_DOCUMENT_DESCRIPTION_PROMPT: &str = "Read this document and re
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
+
+/// Concurrent in-flight provider requests. `1` keeps the historical
+/// one-at-a-time behavior (always safe); raise it to let a backend that
+/// supports parallel inference (for example a local Ollama with
+/// `OLLAMA_NUM_PARALLEL > 1`) work on several units at once. Per-provider
+/// rate limits are still enforced across concurrent requests.
+pub const DEFAULT_PROVIDER_CONCURRENCY: u64 = 1;
 pub const DEFAULT_TOOL_STDOUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Host platform identifier recorded in reports and audits.
@@ -431,6 +438,8 @@ pub struct LimitsConfig {
     #[serde(default)]
     pub provider_timeout_seconds: Option<u64>,
     #[serde(default)]
+    pub provider_concurrency: Option<u64>,
+    #[serde(default)]
     pub tool_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub tool_stdout_max_bytes: Option<u64>,
@@ -480,6 +489,15 @@ impl RawConfig {
         self.limits
             .provider_timeout_seconds
             .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    }
+
+    /// Concurrent in-flight provider requests, clamped to at least one so a
+    /// misconfigured zero can never stall the worker.
+    pub fn provider_concurrency(&self) -> usize {
+        self.limits
+            .provider_concurrency
+            .unwrap_or(DEFAULT_PROVIDER_CONCURRENCY)
+            .max(1) as usize
     }
 
     pub fn tool_timeout(&self) -> u64 {
@@ -903,6 +921,12 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
             "must be positive".into(),
         ));
     }
+    if raw.limits.provider_concurrency == Some(0) {
+        fields.push((
+            "limits.provider_concurrency".into(),
+            "must be positive".into(),
+        ));
+    }
     if raw.limits.tool_timeout_seconds == Some(0) {
         fields.push((
             "limits.tool_timeout_seconds".into(),
@@ -1301,6 +1325,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         "limits".into(),
         serde_json::json!({
             "provider_timeout_seconds": raw.provider_timeout(),
+            "provider_concurrency": raw.provider_concurrency(),
             "tool_timeout_seconds": raw.tool_timeout(),
             "tool_stdout_max_bytes": raw.tool_stdout_max_bytes(),
         }),
@@ -1361,9 +1386,18 @@ mod tests {
             DEFAULT_LARGE_FILE_THRESHOLD
         );
         assert_eq!(rc.provider_timeout(), DEFAULT_PROVIDER_TIMEOUT_SECONDS);
+        assert_eq!(rc.provider_concurrency(), DEFAULT_PROVIDER_CONCURRENCY as usize);
         assert_eq!(rc.description.base_effective().max_words, DEFAULT_MAX_WORDS);
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
+    }
+
+    #[test]
+    fn provider_concurrency_defaults_and_validates() {
+        let rc = parse("[limits]\nprovider_concurrency = 4\n").unwrap();
+        assert_eq!(rc.provider_concurrency(), 4);
+        // Zero can never stall the worker.
+        assert!(parse("[limits]\nprovider_concurrency = 0\n").is_err());
     }
 
     #[test]

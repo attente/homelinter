@@ -74,6 +74,8 @@ const NAMED_EVENTS: SseEventName[] = [
   'scan.progress',
   'scan.complete',
   'suggestion.batch',
+  'suggestion.updated',
+  'suggestion.removed',
   'batch.validated',
   'metadata.progress',
   'execution.op',

@@ -24,6 +24,12 @@ pub enum ServerEvent {
         items: Vec<Suggestion>,
         total: usize,
     },
+    SuggestionUpdated {
+        item: Suggestion,
+    },
+    SuggestionRemoved {
+        id: String,
+    },
     BatchValidated {
         valid: bool,
         rejected: Vec<RejectedId>,
@@ -60,6 +66,8 @@ impl ServerEvent {
             ServerEvent::ScanProgress { .. } => "scan.progress",
             ServerEvent::ScanComplete { .. } => "scan.complete",
             ServerEvent::SuggestionBatch { .. } => "suggestion.batch",
+            ServerEvent::SuggestionUpdated { .. } => "suggestion.updated",
+            ServerEvent::SuggestionRemoved { .. } => "suggestion.removed",
             ServerEvent::BatchValidated { .. } => "batch.validated",
             ServerEvent::MetadataProgress { .. } => "metadata.progress",
             ServerEvent::ExecutionOp { .. } => "execution.op",
@@ -88,6 +96,12 @@ impl ServerEvent {
                     .filter_map(|s| serde_json::to_value(s).ok())
                     .collect();
                 json!({ "items": items_v, "total": total })
+            }
+            ServerEvent::SuggestionUpdated { item } => {
+                json!({ "item": serde_json::to_value(item).unwrap_or(Value::Null) })
+            }
+            ServerEvent::SuggestionRemoved { id } => {
+                json!({ "id": id })
             }
             ServerEvent::BatchValidated { valid, rejected } => {
                 json!({ "valid": valid, "rejected": rejected })
