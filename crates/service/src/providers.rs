@@ -55,7 +55,8 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_VIDEO_FRAMES,
+    DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
@@ -161,6 +162,9 @@ pub struct ProviderSettings {
     /// Longest side in pixels for photos forwarded to a vision backend;
     /// `None`/`0` forwards the original bytes unchanged.
     pub max_image_dimension: Option<u64>,
+    /// Cap on representative frames sampled from a video for a vision
+    /// description; `None` uses `DEFAULT_MAX_VIDEO_FRAMES`.
+    pub max_video_frames: Option<u64>,
     /// Cities whose `%l` uses the finer neighbourhood name instead of the
     /// settlement name (geocode jobs only; empty everywhere else resolves
     /// at the city level).
@@ -370,6 +374,10 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
                     .settings
                     .max_image_dimension
                     .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION);
+                let max_frames = job
+                    .settings
+                    .max_video_frames
+                    .unwrap_or(DEFAULT_MAX_VIDEO_FRAMES) as usize;
                 let kind = *kind;
                 let tools = tools.clone();
                 let timeout = {
@@ -381,9 +389,9 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
                 // with ffmpeg when present. Both degrade to the text-only
                 // prompt when the pixels cannot be produced.
                 *images = tokio::task::spawn_blocking(move || match kind {
-                    AssetKind::Video => {
-                        crate::video_frames::extract_video_frames(&path, max_dim, &tools, timeout)
-                    }
+                    AssetKind::Video => crate::video_frames::extract_video_frames(
+                        &path, max_dim, max_frames, &tools, timeout,
+                    ),
                     _ => prepare_image_bytes(&path, max_dim).into_iter().collect(),
                 })
                 .await
@@ -454,7 +462,7 @@ async fn provider_timeout(app: &App) -> Duration {
 /// request carries: each frame costs roughly one inference, so a four-frame
 /// video gets four times the budget. Text, geocode, author, and single-photo
 /// requests keep the configured value. The overflow guard is defensive
-/// (the planner never exceeds `MAX_VIDEO_FRAMES`).
+/// (the frame count is bounded by `description.max_video_frames`).
 fn provider_timeout_for_job(base: Duration, input: &ProviderInput) -> Duration {
     let frames = match input {
         ProviderInput::Describe { images, .. } => images.len().max(1),
@@ -1540,6 +1548,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         max_words: None,
         prompt: String::new(),
         max_image_dimension: None,
+        max_video_frames: None,
         neighbourhood_cities: cfg.geocoder.neighbourhood_cities.clone(),
     })
 }
@@ -1579,6 +1588,9 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         // The downscale cap shapes the pixels the model sees, so a different
         // cap must not reuse descriptions produced from another resolution.
         eff.max_image_dimension.to_le_bytes().as_slice(),
+        // The frame cap shapes how much of a video the model sees, so a
+        // different cap must not reuse descriptions from another sampling.
+        eff.max_video_frames.to_le_bytes().as_slice(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -1594,6 +1606,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         prompt: eff.prompt,
         neighbourhood_cities: Vec::new(),
         max_image_dimension: Some(eff.max_image_dimension),
+        max_video_frames: Some(eff.max_video_frames),
     })
 }
 
@@ -2009,6 +2022,7 @@ mod tests {
                 model: None,
                 max_words: None,
                 max_image_dimension: None,
+                max_video_frames: None,
                 prompt: String::new(),
                 neighbourhood_cities: Vec::new(),
             },
@@ -2047,6 +2061,7 @@ mod tests {
                 model: Some("test-model".to_string()),
                 max_words: Some(8),
                 max_image_dimension: Some(1024),
+                max_video_frames: None,
                 prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
                 neighbourhood_cities: Vec::new(),
             },
@@ -2205,6 +2220,7 @@ mod tests {
             model: Some("contract-model".to_string()),
             max_words: Some(12),
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2293,6 +2309,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2336,6 +2353,7 @@ mod tests {
             model: Some("vl-model".to_string()),
             max_words: Some(8),
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2458,6 +2476,7 @@ mod tests {
             model: Some("thinking-model".to_string()),
             max_words: Some(4),
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: DEFAULT_DOCUMENT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2497,6 +2516,7 @@ mod tests {
             model: Some("thinking-model".to_string()),
             max_words: Some(4),
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2536,6 +2556,7 @@ mod tests {
             model: None,
             max_words: None,
             max_image_dimension: None,
+            max_video_frames: None,
             prompt: String::new(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2757,13 +2778,21 @@ mod tests {
 
             [description.image]
             rate_limit_ms = 2000
+
+            [description.video]
+            max_video_frames = 3
             "#,
         )
         .unwrap();
         let base = description_settings(&cfg2, &AssetKind::Document).unwrap();
         assert_eq!(base.min_interval, Duration::ZERO);
+        assert_eq!(base.max_video_frames, Some(DEFAULT_MAX_VIDEO_FRAMES));
         let photo = description_settings(&cfg2, &AssetKind::Photo).unwrap();
         assert_eq!(photo.min_interval, Duration::from_millis(2000));
+        // The per-modality video cap reaches the worker's settings, so the
+        // job samples at most that many frames.
+        let video = description_settings(&cfg2, &AssetKind::Video).unwrap();
+        assert_eq!(video.max_video_frames, Some(3));
     }
 
     #[test]
@@ -2783,6 +2812,7 @@ mod tests {
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
             max_image_dimension: None,
+            max_video_frames: None,
         };
         // With extracted text, the document is delimited and placed first
         // and the rendered question last: a trailing document block makes

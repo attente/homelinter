@@ -43,6 +43,11 @@ pub const DEFAULT_DOCUMENT_DESCRIPTION_PROMPT: &str = "Read this document and re
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
+/// Default cap on representative frames sampled from a video for the
+/// vision description provider. Frames are taken about one per second and
+/// evenly distributed across the clip; a longer video is thinned to this
+/// many frames.
+pub const DEFAULT_MAX_VIDEO_FRAMES: u64 = 8;
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 
@@ -247,6 +252,12 @@ pub struct DescriptionProvider {
     /// cap and forwards the original bytes.
     #[serde(default)]
     pub max_image_dimension: Option<u64>,
+    /// Cap on representative frames sampled from a video: about one frame
+    /// per second, evenly distributed across the clip, thinned to at most
+    /// this many. The value joins the settings hash so a different cap
+    /// re-describes. Must be positive.
+    #[serde(default)]
+    pub max_video_frames: Option<u64>,
     /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. Description backends have no
     /// built-in pacing; the value only ever adds delay, and requests remain
@@ -267,6 +278,7 @@ pub struct EffectiveDescription {
     pub api_key: Option<String>,
     pub max_words: u64,
     pub max_image_dimension: u64,
+    pub max_video_frames: u64,
     pub rate_limit_ms: u64,
     pub prompt: String,
 }
@@ -289,6 +301,10 @@ impl DescriptionProvider {
                 .max_image_dimension
                 .or(base.max_image_dimension)
                 .unwrap_or(DEFAULT_MAX_IMAGE_DIMENSION),
+            max_video_frames: self
+                .max_video_frames
+                .or(base.max_video_frames)
+                .unwrap_or(DEFAULT_MAX_VIDEO_FRAMES),
             rate_limit_ms: self.rate_limit_ms.or(base.rate_limit_ms).unwrap_or(0),
             prompt: self
                 .prompt
@@ -838,6 +854,12 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                 "max_words must be positive".into(),
             ));
         }
+        if eff.max_video_frames == 0 {
+            fields.push((
+                format!("{prefix}.max_video_frames"),
+                "max_video_frames must be positive".into(),
+            ));
+        }
         // `{path}` and `{name}` are intentionally not placeholders: the
         // full source path (which carries the filename) and any extracted
         // text are always included around the rendered template, so a custom
@@ -1270,6 +1292,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         JsonValue::from(base_eff.max_image_dimension),
     );
     desc.insert(
+        "max_video_frames".into(),
+        JsonValue::from(base_eff.max_video_frames),
+    );
+    desc.insert(
         "rate_limit_ms".into(),
         JsonValue::from(base_eff.rate_limit_ms),
     );
@@ -1285,6 +1311,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "max_words": eff.max_words,
                 "prompt": eff.prompt,
                 "max_image_dimension": eff.max_image_dimension,
+                "max_video_frames": eff.max_video_frames,
                 "rate_limit_ms": eff.rate_limit_ms,
             }),
         );
@@ -1418,6 +1445,29 @@ mod tests {
         assert!(err.is_err());
         let ok = parse("[description.image]\nenabled = true\nmodel = \"m\"\n");
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn max_video_frames_defaults_falls_back_and_must_be_positive() {
+        let rc = parse("").unwrap();
+        assert_eq!(
+            rc.description.base_effective().max_video_frames,
+            DEFAULT_MAX_VIDEO_FRAMES
+        );
+        // A per-modality override inherits the base entry's cap.
+        let rc = parse(
+            "[description]\nmax_video_frames = 3\n[description.video]\nenabled = true\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        assert_eq!(rc.description.base_effective().max_video_frames, 3);
+        assert_eq!(
+            rc.description
+                .effective_for_modality(Some("video"))
+                .max_video_frames,
+            3
+        );
+        // Zero would sample no frames, so it is a structural error.
+        assert!(parse("[description]\nmax_video_frames = 0\n").is_err());
     }
 
     #[test]

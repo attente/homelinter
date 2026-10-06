@@ -23,13 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use homelinter_analyze::run_capture;
 use homelinter_scan::ToolSet;
 
-/// How many evenly spaced frames are sampled from a video whose duration is
-/// known. Each frame costs one vision inference, so the count bounds both
-/// the image-token budget and the per-frame provider timeout (the worker
-/// multiplies the configured timeout by the number of frames actually
-/// sent). Without a duration only ffmpeg's single `thumbnail` frame is
-/// used.
-pub const MAX_VIDEO_FRAMES: usize = 4;
+/// Approximate spacing between sampled video frames, in seconds. Frames
+/// are distributed evenly, so a clip shorter than this yields one frame
+/// while a longer one is sampled about once per second.
+const FRAME_INTERVAL_SECS: f64 = 1.0;
 
 /// ffprobe prints a single floating-point duration; the cap only guards a
 /// runaway producer (the value is a few bytes).
@@ -38,13 +35,25 @@ const PROBE_MAX_BYTES: u64 = 64 * 1024;
 /// stray output; the cap exists to keep the shared runner's contract.
 const FRAME_MAX_BYTES: u64 = 1024 * 1024;
 
+/// Seek points (seconds) for representative frames: about one per second,
+/// evenly distributed across `duration`, thinned to at most `max_frames`.
+/// Always returns at least one point; `duration` must be positive.
+fn frame_seek_points(duration: f64, max_frames: usize) -> Vec<f64> {
+    let count = ((duration / FRAME_INTERVAL_SECS).ceil() as usize).clamp(1, max_frames.max(1));
+    (0..count)
+        .map(|i| duration * (i as f64 + 0.5) / count as f64)
+        .collect()
+}
+
 /// Extract representative frames from `path`, each downscaled to JPEG
 /// bytes. Returns an empty vector when ffmpeg is unavailable or extraction
 /// fails; the caller then degrades to the text-only prompt. `max_dim`
-/// follows `description.max_image_dimension` (0 disables the cap).
+/// follows `description.max_image_dimension` (0 disables the cap);
+/// `max_frames` caps the sample count (`description.max_video_frames`).
 pub fn extract_video_frames(
     path: &Path,
     max_dim: u64,
+    max_frames: usize,
     tools: &ToolSet,
     timeout: Duration,
 ) -> Vec<Vec<u8>> {
@@ -57,14 +66,15 @@ pub fn extract_video_frames(
     if std::fs::create_dir_all(&dir).is_err() {
         return Vec::new();
     }
-    // With a duration, sample the centre of each of `MAX_VIDEO_FRAMES`
-    // equal segments so a long video is represented throughout. Without
+    // With a duration, sample about one frame per second, evenly
+    // distributed across the clip and thinned to `max_frames`. Without
     // `ffprobe` or a usable duration, fall back to ffmpeg's `thumbnail`
     // filter, which picks one representative frame from a bounded window.
     let seeks: Vec<Option<f64>> = if tools.has("ffprobe") {
         match probe_duration(path, timeout) {
-            Some(d) if d > 0.0 => (0..MAX_VIDEO_FRAMES)
-                .map(|i| Some(d * (i as f64 + 0.5) / MAX_VIDEO_FRAMES as f64))
+            Some(d) if d > 0.0 => frame_seek_points(d, max_frames)
+                .into_iter()
+                .map(Some)
                 .collect(),
             _ => vec![None],
         }
@@ -169,7 +179,28 @@ mod tests {
     fn no_ffmpeg_degrades_to_no_frames() {
         let path = PathBuf::from("/tmp/homelinter-nope.mp4");
         let tools = ToolSet::default();
-        assert!(extract_video_frames(&path, 1024, &tools, Duration::from_secs(5)).is_empty());
+        assert!(extract_video_frames(&path, 1024, 8, &tools, Duration::from_secs(5)).is_empty());
+    }
+
+    #[test]
+    fn seek_points_are_one_per_second_and_evenly_capped() {
+        // Shorter than the interval: a single centred frame.
+        assert_eq!(frame_seek_points(0.5, 8), vec![0.25]);
+        // Two seconds: one frame per second, at the centre of each second.
+        assert_eq!(frame_seek_points(2.0, 8), vec![0.5, 1.5]);
+        // Fractional seconds round up to keep at least one frame per second.
+        assert_eq!(frame_seek_points(2.5, 8).len(), 3);
+        // Eight seconds at the cap: every second kept.
+        assert_eq!(frame_seek_points(8.0, 8).len(), 8);
+        // Longer than the cap: thinned to the cap, evenly distributed.
+        let long = frame_seek_points(60.0, 8);
+        assert_eq!(long.len(), 8);
+        assert!((long[0] - 3.75).abs() < 1e-9);
+        assert!((long[7] - 56.25).abs() < 1e-9);
+        // A cap of one still yields the clip's midpoint.
+        assert_eq!(frame_seek_points(3.0, 1), vec![1.5]);
+        // A zero cap is treated as one rather than producing no frames.
+        assert_eq!(frame_seek_points(3.0, 0).len(), 1);
     }
 
     #[test]
@@ -206,9 +237,9 @@ mod tests {
         let mut tools = ToolSet::default();
         tools.available.insert("ffmpeg".into());
         tools.available.insert("ffprobe".into());
-        let frames = extract_video_frames(&video, 100, &tools, Duration::from_secs(30));
-        // A 2-second clip with a known duration yields the full sample.
-        assert_eq!(frames.len(), MAX_VIDEO_FRAMES);
+        let frames = extract_video_frames(&video, 100, 8, &tools, Duration::from_secs(30));
+        // A 2-second clip with a known duration yields one frame per second.
+        assert_eq!(frames.len(), 2);
         for frame in &frames {
             let img = image::load_from_memory(frame).expect("decodable jpeg");
             assert!(
