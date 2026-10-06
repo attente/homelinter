@@ -94,6 +94,6 @@ enabled = true
 
 [limits]
 # Bounds on external calls; never infinite. Overruns degrade gracefully.
-provider_timeout_seconds = 120
+provider_timeout_seconds = 300
 tool_timeout_seconds = 30
 tool_stdout_max_bytes = 16777216

@@ -378,7 +378,7 @@ enabled = true
 # an absent value uses the implementation default, and the defaults are
 # never infinite. Overrunning a limit degrades to the normal failure
 # behavior (e.g. `%s` falls back to the filename stem) rather than stalling the scan.
-provider_timeout_seconds = 120
+provider_timeout_seconds = 300
 tool_timeout_seconds = 30
 tool_stdout_max_bytes = 16777216
 ```

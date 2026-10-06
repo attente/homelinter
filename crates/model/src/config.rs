@@ -43,7 +43,7 @@ pub const DEFAULT_DOCUMENT_DESCRIPTION_PROMPT: &str = "Read this document and re
 /// Default longest side (pixels) for photos forwarded to a vision
 /// backend; larger photos are downscaled before the request.
 pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
-pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 120;
+pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_TOOL_STDOUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
