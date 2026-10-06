@@ -405,6 +405,24 @@ impl Client {
         Ok(())
     }
 
+    /// GET /api/v1/cache: cached provider results for a viewer. `kind`
+    /// filters to one cache kind (e.g. `description`), `offset`/`limit`
+    /// page through the entries.
+    pub async fn cache_list(
+        &self,
+        kind: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value, ClientsError> {
+        let mut path = format!("/api/v1/cache?offset={offset}&limit={limit}");
+        if let Some(k) = kind {
+            path.push_str("&kind=");
+            path.push_str(k);
+        }
+        let (_, v) = self.json(Method::GET, &path, None).await?;
+        Ok(v)
+    }
+
     /// GET /api/v1/config
     pub async fn config(&self) -> Result<Value, ClientsError> {
         let (_, v) = self.json(Method::GET, "/api/v1/config", None).await?;

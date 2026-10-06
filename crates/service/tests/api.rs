@@ -529,6 +529,67 @@ async fn cache_clear_and_config_put() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cache_list_contract() {
+    use homelinter_service::cache::{cache_key, KIND_DESCRIPTION, KIND_GEOCODE};
+
+    let env = Env::new("cache-list");
+    let app = env.service();
+
+    {
+        let cache = app.cache.lock().await;
+        let geo = cache_key(KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], &[2u8; 32]);
+        cache
+            .put(&geo, KIND_GEOCODE, "nominatim:openstreetmap", &[2u8; 32], "Berlin")
+            .unwrap();
+        let desc = cache_key(
+            KIND_DESCRIPTION,
+            "description:ollama:mistral",
+            &[3u8; 32],
+            &[4u8; 32],
+        );
+        cache
+            .put(
+                &desc,
+                KIND_DESCRIPTION,
+                "description:ollama:mistral",
+                &[4u8; 32],
+                "a sunset over the sea",
+            )
+            .unwrap();
+    }
+
+    // Unfiltered listing reports both entries and per-kind counts.
+    let (status, v) = request(&app, "GET", "/api/v1/cache", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["total"], 2);
+    assert_eq!(v["offset"], 0);
+    let entries = v["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let geo_entry = entries
+        .iter()
+        .find(|e| e["kind"] == KIND_GEOCODE)
+        .expect("geocode entry");
+    assert_eq!(geo_entry["provider"], "nominatim:openstreetmap");
+    assert_eq!(geo_entry["value"], "Berlin");
+    assert_eq!(geo_entry["cache_key"].as_str().unwrap().len(), 64);
+    assert_eq!(geo_entry["input_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(v["kind_counts"].as_array().unwrap().len(), 2);
+
+    // A kind filter narrows both the entries and the reported total.
+    let (status, v) = request(&app, "GET", "/api/v1/cache?kind=description", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(v["entries"][0]["value"], "a sunset over the sea");
+
+    // A kind with no entries is an empty, well-formed response.
+    let (status, v) = request(&app, "GET", "/api/v1/cache?kind=author", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["total"], 0);
+    assert!(v["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn config_put_null_deletes_and_get_reports_defaults() {
     let env = Env::new("conf-null");
     let app = env.service();

@@ -8,8 +8,9 @@
 //!
 //! Screens: a scanning/progress screen while the batch is generated, a
 //! two-pane suggestion browser with client-side filtering and server-side
-//! selection, a live operation log during execution, and a
-//! report view when a run finishes. Confirmation and text-input dialogs are
+//! selection, a live operation log during execution, a
+//! report view when a run finishes, and a read-only configuration view with a
+//! metadata-cache viewer. Confirmation and text-input dialogs are
 //! modal overlays. A terminal of at least 80x24 is required.
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -125,6 +126,36 @@ fn str_field(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or("").to_string()
 }
 
+/// Cache kinds the viewer can filter on, in display order.
+const CACHE_KINDS: [&str; 4] = ["geocode", "description", "author", "filename_analysis"];
+
+/// Rows fetched per cache-viewer page.
+const CACHE_PAGE: usize = 200;
+
+/// One cached provider result rendered in the cache viewer.
+#[derive(Debug, Clone, Default)]
+struct CacheRow {
+    kind: String,
+    provider: String,
+    value: String,
+    created_at: String,
+    cache_key: String,
+    input_hash: String,
+}
+
+impl CacheRow {
+    fn from_json(v: &Value) -> CacheRow {
+        CacheRow {
+            kind: str_field(v, "kind"),
+            provider: str_field(v, "provider"),
+            value: str_field(v, "value"),
+            created_at: str_field(v, "created_at"),
+            cache_key: str_field(v, "cache_key"),
+            input_hash: str_field(v, "input_hash"),
+        }
+    }
+}
+
 /// Client-side filter. Affects navigation and bulk selection only; the
 /// service keeps the authoritative selection.
 #[derive(Debug, Clone, Default)]
@@ -141,6 +172,7 @@ enum Phase {
     Run,
     Report,
     Config,
+    Cache,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -210,6 +242,11 @@ struct App {
     quit: bool,
     config_doc: Option<Value>,
     config_scroll: u16,
+    cache_entries: Vec<CacheRow>,
+    cache_total: u64,
+    cache_kind: Option<String>,
+    cache_offset: usize,
+    cache_scroll: u16,
     config_hash: Option<String>,
     batch_config_hash: Option<String>,
     failure_reason: Option<String>,
@@ -247,6 +284,11 @@ impl App {
             quit: false,
             config_doc: None,
             config_scroll: 0,
+            cache_entries: Vec::new(),
+            cache_total: 0,
+            cache_kind: None,
+            cache_offset: 0,
+            cache_scroll: 0,
             config_hash: None,
             batch_config_hash: None,
             failure_reason: None,
@@ -670,6 +712,49 @@ impl App {
         }
     }
 
+    /// Fetch the current cache page and switch to the viewer, keeping the
+    /// kind filter and page the viewer already had.
+    async fn open_cache(&mut self) {
+        match self.load_cache().await {
+            Ok(()) => self.phase = Phase::Cache,
+            Err(e) => self.toast = Some(e),
+        }
+    }
+
+    async fn load_cache(&mut self) -> Result<(), String> {
+        let v = self
+            .client
+            .cache_list(self.cache_kind.as_deref(), self.cache_offset, CACHE_PAGE)
+            .await
+            .map_err(|e| format!("cannot read cache: {e}"))?;
+        self.cache_entries = v["entries"]
+            .as_array()
+            .map(|items| items.iter().map(CacheRow::from_json).collect())
+            .unwrap_or_default();
+        self.cache_total = v["total"].as_u64().unwrap_or(0);
+        self.cache_scroll = 0;
+        Ok(())
+    }
+
+    fn cycle_cache_kind(&mut self) {
+        self.cache_kind = match self.cache_kind.as_deref() {
+            None => Some(CACHE_KINDS[0].to_string()),
+            Some(_) => {
+                let idx = CACHE_KINDS
+                    .iter()
+                    .position(|k| Some(*k) == self.cache_kind.as_deref())
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                if idx >= CACHE_KINDS.len() {
+                    None
+                } else {
+                    Some(CACHE_KINDS[idx].to_string())
+                }
+            }
+        };
+        self.cache_offset = 0;
+    }
+
     async fn report_done(&mut self) {
         let _ = self.refresh_rows().await;
         self.run = RunView::default();
@@ -725,6 +810,7 @@ impl App {
             Phase::Config => match key.code {
                 KeyCode::Up => self.config_scroll = self.config_scroll.saturating_sub(1),
                 KeyCode::Down => self.config_scroll = self.config_scroll.saturating_add(1),
+                KeyCode::Char('v') | KeyCode::Char('l') => self.open_cache().await,
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
                     self.phase = Phase::Browse
                 }
@@ -732,6 +818,52 @@ impl App {
                     Ok(()) => self.toast = Some("cache cleared".to_string()),
                     Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
                 },
+                _ => {}
+            },
+            Phase::Cache => match key.code {
+                KeyCode::Up => self.cache_scroll = self.cache_scroll.saturating_sub(1),
+                KeyCode::Down => self.cache_scroll = self.cache_scroll.saturating_add(1),
+                KeyCode::PageDown | KeyCode::Char('n') => {
+                    let next = self.cache_offset + CACHE_PAGE;
+                    if (next as u64) < self.cache_total {
+                        self.cache_offset = next;
+                        if let Err(e) = self.load_cache().await {
+                            self.toast = Some(e);
+                        }
+                    }
+                }
+                KeyCode::PageUp | KeyCode::Char('p') => {
+                    self.cache_offset = self.cache_offset.saturating_sub(CACHE_PAGE);
+                    if let Err(e) = self.load_cache().await {
+                        self.toast = Some(e);
+                    }
+                }
+                KeyCode::Char('k') => {
+                    self.cycle_cache_kind();
+                    if let Err(e) = self.load_cache().await {
+                        self.toast = Some(e);
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if let Err(e) = self.load_cache().await {
+                        self.toast = Some(e);
+                    }
+                }
+                KeyCode::Char('C') => {
+                    match self.client.cache_clear().await {
+                        Ok(()) => {
+                            self.cache_offset = 0;
+                            self.toast = Some("cache cleared".to_string());
+                            if let Err(e) = self.load_cache().await {
+                                self.toast = Some(e);
+                            }
+                        }
+                        Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                    self.phase = Phase::Config
+                }
                 _ => {}
             },
         }
@@ -998,6 +1130,7 @@ impl App {
             Phase::Run => self.draw_run(f),
             Phase::Report => self.draw_report(f),
             Phase::Config => self.draw_config(f),
+            Phase::Cache => self.draw_cache(f),
         }
         if let Some(p) = &self.prompt {
             self.draw_prompt(f, p);
@@ -1248,12 +1381,67 @@ impl App {
             .collect();
         lines.push(Line::from(""));
         lines.push(Line::from(
-            "Up/Down scroll  C clear cache  Esc/q/c return to suggestions",
+            "Up/Down scroll  v view cache  C clear cache  Esc/q/c return to suggestions",
         ));
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(block("Configuration (read-only)"))
                 .scroll((self.config_scroll, 0)),
+            area,
+        );
+    }
+
+    fn draw_cache(&self, f: &mut Frame) {
+        let area = f.area();
+        let kind = self.cache_kind.as_deref().unwrap_or("all");
+        let shown_lo = if self.cache_entries.is_empty() {
+            0
+        } else {
+            self.cache_offset + 1
+        };
+        let shown_hi = self.cache_offset + self.cache_entries.len();
+        let title = format!(
+            "Metadata cache (read-only) - kind: {kind}  {shown_lo}-{shown_hi} of {}",
+            self.cache_total
+        );
+        let mut lines: Vec<Line> = Vec::new();
+        if self.cache_entries.is_empty() {
+            lines.push(Line::from("no cached entries"));
+        }
+        for r in &self.cache_entries {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", r.kind),
+                    Style::new().fg(Color::Cyan).bold(),
+                ),
+                Span::styled(
+                    format!("{} ", r.created_at),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(r.provider.clone(), Style::new().fg(Color::Yellow)),
+            ]));
+            lines.push(Line::from(format!("   value: {}", r.value)));
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(
+                        "key: {}  input: {}",
+                        &r.cache_key[..r.cache_key.len().min(16)],
+                        &r.input_hash[..r.input_hash.len().min(16)],
+                    ),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Up/Down scroll  n/p page  k kind  r reload  C clear cache  Esc/q/c return",
+        ));
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block(&title))
+                .scroll((self.cache_scroll, 0))
+                .wrap(Wrap { trim: false }),
             area,
         );
     }
@@ -1315,6 +1503,8 @@ impl App {
             Line::from(" x                   execute the selection (asks for confirmation)"),
             Line::from(" e                   export the selection to a shell script"),
             Line::from(" n                   scan another root (edit root, Tab toggles hidden)"),
+            Line::from(" g                   view the effective configuration (read-only)"),
+            Line::from(" v / l               view the metadata cache (from the config view)"),
             Line::from(" ?                   show this help"),
             Line::from(" q / Esc / Ctrl-C     quit"),
             Line::from(""),

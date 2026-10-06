@@ -13,7 +13,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
@@ -129,6 +129,16 @@ struct AuditQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct CacheQuery {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExportBody {
     #[serde(default)]
@@ -160,7 +170,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/api/v1/export", post(export_script))
         .route("/api/v1/config", get(config_get).put(config_put))
         .route("/api/v1/config/validate", post(config_validate))
-        .route("/api/v1/cache", delete(cache_clear))
+        .route("/api/v1/cache", get(cache_list).delete(cache_clear))
         .route("/api/v1/report/summary", get(report_summary))
         .route("/api/v1/audit", get(audit_get))
         .route("/api/v1/events", get(events_sse))
@@ -966,6 +976,32 @@ async fn config_validate(State(app): State<AppHandle>, Json(body): Json<Value>) 
 // ---------------------------------------------------------------------------
 // Cache, audit & reporting
 // ---------------------------------------------------------------------------
+
+async fn cache_list(State(app): State<AppHandle>, Query(q): Query<CacheQuery>) -> ApiResult {
+    let limit = q.limit.unwrap_or(100).min(1000);
+    let offset = q.offset.unwrap_or(0);
+    let cache = app.cache.lock().await;
+    let total = cache.count_kind(q.kind.as_deref()).unwrap_or(0);
+    let counts = cache
+        .counts_by_kind()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+        .collect::<Vec<Value>>();
+    let entries = cache.list(q.kind.as_deref(), offset, limit).map_err(|e| {
+        err(
+            ErrorCode::Internal,
+            format!("cannot read cache: {e}"),
+        )
+    })?;
+    ok(json!({
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "kind_counts": counts,
+        "entries": entries,
+    }))
+}
 
 async fn cache_clear(State(app): State<AppHandle>) -> StatusCode {
     let cache = app.cache.lock().await;

@@ -129,6 +129,25 @@ export interface ExportResult {
   text: string;
 }
 
+/** One cached provider result from `GET /cache`. */
+export interface CacheEntry {
+  cache_key: string;
+  kind: string;
+  provider: string;
+  input_hash: string;
+  value: string;
+  created_at: string;
+}
+
+/** Response body of `GET /cache`. */
+export interface CacheList {
+  total: number;
+  offset: number;
+  limit: number;
+  kind_counts: { kind: string; count: number }[];
+  entries: CacheEntry[];
+}
+
 
 export interface ExecuteRequest {
   ids?: string[];

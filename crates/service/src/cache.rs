@@ -29,6 +29,18 @@ pub struct Cache {
     path: PathBuf,
 }
 
+/// One cached result as shown by a cache viewer. The key and input hash are
+/// hex-encoded for display; the value is the stored provider result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CacheEntry {
+    pub cache_key: String,
+    pub kind: String,
+    pub provider: String,
+    pub input_hash: String,
+    pub value: String,
+    pub created_at: String,
+}
+
 /// Canonical request tuple used to build a cache key:
 /// `(kind, provider_id, provider_settings_hash, input_hash)`.
 pub fn cache_key(
@@ -202,6 +214,72 @@ impl Cache {
         self.conn
             .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
     }
+
+    /// The number of entries of one kind, or of every kind when `kind` is
+    /// `None`.
+    pub fn count_kind(&self, kind: Option<&str>) -> rusqlite::Result<u64> {
+        match kind {
+            Some(k) => self.conn.query_row(
+                "SELECT COUNT(*) FROM entries WHERE kind = ?1",
+                params![k],
+                |r| r.get(0),
+            ),
+            None => self.entry_count(),
+        }
+    }
+
+    /// Per-kind entry counts, sorted by kind name, for viewer summaries.
+    pub fn counts_by_kind(&self) -> rusqlite::Result<Vec<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, COUNT(*) FROM entries GROUP BY kind ORDER BY kind")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// List entries newest first, optionally filtered by kind. `offset` and
+    /// `limit` page through large caches; the viewer reads only what it
+    /// displays.
+    pub fn list(
+        &self,
+        kind: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<CacheEntry>> {
+        let row_to_entry = |r: &rusqlite::Row| -> rusqlite::Result<CacheEntry> {
+            let key: Vec<u8> = r.get(0)?;
+            let input: Vec<u8> = r.get(3)?;
+            Ok(CacheEntry {
+                cache_key: hex::encode(key),
+                kind: r.get(1)?,
+                provider: r.get(2)?,
+                input_hash: hex::encode(input),
+                value: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        };
+        let sql = match kind {
+            Some(_) => {
+                "SELECT cache_key, kind, provider, input_hash, value, created_at
+                 FROM entries WHERE kind = ?1
+                 ORDER BY created_at DESC, cache_key LIMIT ?2 OFFSET ?3"
+            }
+            None => {
+                "SELECT cache_key, kind, provider, input_hash, value, created_at
+                 FROM entries
+                 ORDER BY created_at DESC, cache_key LIMIT ?1 OFFSET ?2"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = match kind {
+            Some(k) => stmt.query_map(
+                params![k, limit as i64, offset as i64],
+                row_to_entry,
+            )?,
+            None => stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?,
+        };
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +339,51 @@ mod tests {
         assert!(c.get(&key, "nominatim:other").unwrap().is_none());
         assert_eq!(c.clear().unwrap(), 1);
         assert!(c.get(&key, "nominatim:openstreetmap").unwrap().is_none());
+        drop(c);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_filters_pages_and_reports_counts() {
+        let dir = tmp();
+        let c = Cache::open_dir(&dir);
+        let geo = cache_key(KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], &[1u8; 32]);
+        let desc = cache_key(KIND_DESCRIPTION, "description:ollama:mistral", &[2u8; 32], &[2u8; 32]);
+        c.put(&geo, KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], "Berlin")
+            .unwrap();
+        c.put(
+            &desc,
+            KIND_DESCRIPTION,
+            "description:ollama:mistral",
+            &[2u8; 32],
+            "a coastline",
+        )
+        .unwrap();
+
+        assert_eq!(c.entry_count().unwrap(), 2);
+        assert_eq!(c.count_kind(Some(KIND_GEOCODE)).unwrap(), 1);
+        assert_eq!(c.count_kind(Some(KIND_AUTHOR)).unwrap(), 0);
+
+        let counts = c.counts_by_kind().unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                (KIND_DESCRIPTION.to_string(), 1),
+                (KIND_GEOCODE.to_string(), 1),
+            ]
+        );
+
+        let all = c.list(None, 0, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].cache_key.len(), 64);
+
+        let only_geo = c.list(Some(KIND_GEOCODE), 0, 10).unwrap();
+        assert_eq!(only_geo.len(), 1);
+        assert_eq!(only_geo[0].kind, KIND_GEOCODE);
+        assert_eq!(only_geo[0].value, "Berlin");
+
+        // Paging beyond the end yields an empty slice, not an error.
+        assert!(c.list(None, 5, 10).unwrap().is_empty());
         drop(c);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -664,6 +664,62 @@ textarea:focus {
   margin-bottom: 8px;
 }
 
+/* Cache viewer (config view) */
+
+.cache-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cache-view h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.cache-view label {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.cache-scroll {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.cache-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.cache-table th,
+.cache-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.cache-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg2);
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.cache-value {
+  word-break: break-word;
+}
+
+.cache-mono {
+  font-family: monospace;
+  color: var(--dim);
+}
+
 /* Toasts */
 
 .toasts {

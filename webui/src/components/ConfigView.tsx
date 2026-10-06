@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, resolveApiError } from "../api";
+import type { CacheList } from "../types";
 
 type Json = Record<string, unknown>;
 
@@ -13,15 +14,20 @@ interface ConfigViewProps {
   pushToast: (msg: string) => void;
 }
 
-/// Live mirror of the service's effective configuration. There are no
-/// reload or edit actions: the document is refetched whenever the service's
+/// Live mirror of the service's effective configuration. The document has no
+/// reload or edit actions of its own: it is refetched whenever the service's
 /// config hash changes, so what is shown matches the service regardless of
 /// which client changed it (the scan setup page persists changes to the
-/// service as they are made; the config file can be edited directly).
+/// service as they are made; the config file can be edited directly). The
+/// only actions here are inspecting and clearing the metadata cache.
 export function ConfigView(props: ConfigViewProps) {
   const { configHash, onClose, pushToast } = props;
   const [doc, setDoc] = useState<Json | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [showCache, setShowCache] = useState(false);
+  const [cache, setCache] = useState<CacheList | null>(null);
+  const [cacheKind, setCacheKind] = useState("");
+  const [cacheLoading, setCacheLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -47,11 +53,31 @@ export function ConfigView(props: ConfigViewProps) {
       void load();
   }, [configHash, load]);
 
+  const loadCache = useCallback(async () => {
+    setCacheLoading(true);
+    try {
+      const list = await api.cacheList({
+        kind: cacheKind || undefined,
+        limit: 200,
+      });
+      setCache(list);
+    } catch (e: unknown) {
+      pushToast(`cannot load cache: ${resolveApiError(e)}`);
+    } finally {
+      setCacheLoading(false);
+    }
+  }, [cacheKind, pushToast]);
+
+  useEffect(() => {
+    if (showCache) void loadCache();
+  }, [showCache, loadCache]);
+
   const onClearCache = async () => {
     setConfirmClear(false);
     try {
       await api.cacheClear();
       pushToast("metadata cache cleared");
+      if (showCache) await loadCache();
     } catch (e: unknown) {
       pushToast(`cache clear failed: ${resolveApiError(e)}`);
     }
@@ -73,6 +99,9 @@ export function ConfigView(props: ConfigViewProps) {
       <div className="toolbar">
         <h2>Configuration</h2>
         <div className="grow" />
+        <button type="button" onClick={() => setShowCache((v) => !v)}>
+          {showCache ? "hide cache" : "view cache"}
+        </button>
         <button type="button" onClick={() => setConfirmClear(true)}>
           clear cache
         </button>
@@ -106,6 +135,69 @@ export function ConfigView(props: ConfigViewProps) {
         visible in the document above. API keys are write-only and never shown:
         they are set in the config file or on the scan setup page.
       </p>
+      {showCache && (
+        <section className="cache-view">
+          <div className="toolbar-row">
+            <h3>Metadata cache</h3>
+            <div className="grow" />
+            <label>
+              kind{" "}
+              <select
+                value={cacheKind}
+                onChange={(e) => setCacheKind(e.target.value)}
+              >
+                <option value="">all</option>
+                {(cache?.kind_counts ?? []).map(({ kind, count }) => (
+                  <option key={kind} value={kind}>
+                    {kind} ({count})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => void loadCache()}
+              disabled={cacheLoading}
+            >
+              refresh
+            </button>
+          </div>
+          <p className="note">
+            {cache === null || cacheLoading
+              ? "loading..."
+              : `${cache.entries.length} of ${cache.total} entries (newest first, up to 200 shown)`}
+          </p>
+          {cache !== null && cache.entries.length > 0 && (
+            <div className="cache-scroll">
+              <table className="cache-table">
+                <thead>
+                  <tr>
+                    <th>created</th>
+                    <th>kind</th>
+                    <th>provider</th>
+                    <th>value</th>
+                    <th>input hash</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cache.entries.map((e) => (
+                    <tr key={e.cache_key}>
+                      <td>{e.created_at}</td>
+                      <td>{e.kind}</td>
+                      <td>{e.provider}</td>
+                      <td className="cache-value">{e.value}</td>
+                      <td className="cache-mono">{e.input_hash.slice(0, 16)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {cache !== null && !cacheLoading && cache.entries.length === 0 && (
+            <p className="empty">no cached entries</p>
+          )}
+        </section>
+      )}
       {confirmClear && (
         <div
           className="modal-backdrop"

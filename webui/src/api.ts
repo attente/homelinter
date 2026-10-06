@@ -3,6 +3,7 @@
 // service (Option A distribution) and over the Vite dev proxy.
 
 import type {
+  CacheList,
   ExecutionReport,
   ExecuteRequest,
   ExportResult,
@@ -209,6 +210,20 @@ export const api = {
 
   async cacheClear(): Promise<void> {
     await request<void>("/cache", { method: "DELETE" });
+  },
+
+  /** List cached provider results; `kind` and paging are optional. */
+  async cacheList(params?: {
+    kind?: string;
+    offset?: number;
+    limit?: number;
+  }): Promise<CacheList> {
+    const q = new URLSearchParams();
+    if (params?.kind) q.set("kind", params.kind);
+    if (params?.offset !== undefined) q.set("offset", String(params.offset));
+    if (params?.limit !== undefined) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return request<CacheList>(`/cache${qs ? `?${qs}` : ""}`);
   },
 };
 
