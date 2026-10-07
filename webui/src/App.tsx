@@ -8,7 +8,7 @@ import { ScanForm, ScanFormValues } from "./components/ScanForm";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
-import { Filter, matchesFilter } from "./lib/filter";
+import { ALL_FILTER, Filter, matchesFilter } from "./lib/filter";
 import { elapsedLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
@@ -26,6 +26,12 @@ interface AppState {
   phase: Phase;
   session: Session | null;
   suggestions: Suggestion[];
+  /** Server total for the active filter; the loaded window may be smaller. */
+  suggestionsTotal: number;
+  /** Complete set of asset kinds for the current batch; the loaded page need
+   *  not contain every kind, so this comes from the report summary. */
+  kinds: string[];
+  filter: Filter;
   progress: ScanProgress | null;
   metadataProgress: MetadataProgress | null;
   runLog: string[];
@@ -39,6 +45,8 @@ interface AppState {
 }
 
 const POLL_MS = 2000;
+/** Suggestions fetched per `GET /suggestions` request while browsing. */
+const PAGE_SIZE = 500;
 
 /** Map the SPA's filter view onto the service's selection-filter body;
  *  `all` becomes an omitted (unconstrained) field. */
@@ -55,6 +63,9 @@ export default function App() {
     phase: "idle",
     session: null,
     suggestions: [],
+    suggestionsTotal: 0,
+    kinds: [],
+    filter: ALL_FILTER,
     progress: null,
     metadataProgress: null,
     runLog: [],
@@ -143,22 +154,109 @@ export default function App() {
     }));
   }, []);
 
-  const refreshSuggestions = useCallback(async (): Promise<Suggestion[]> => {
-    dropPendingSuggestionEvents();
-    const list = await api.suggestions();
-    setSt((prev) => ({ ...prev, suggestions: list.items }));
-    return list.items;
-  }, [dropPendingSuggestionEvents]);
+  const loadTokenRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+
+  const pageParams = useCallback(
+    (filter: Filter, offset: number) => ({
+      type: filter.type === "all" ? undefined : filter.type,
+      kind: filter.kind === "all" ? undefined : filter.kind,
+      status: filter.status === "all" ? undefined : filter.status,
+      offset,
+      limit: PAGE_SIZE,
+    }),
+    [],
+  );
+
+  /** Replace the loaded window with the first page for `filter`, and pick up
+   *  the complete set of asset kinds from the report summary (a single page
+   *  need not contain every kind). */
+  const resetSuggestions = useCallback(
+    async (filter: Filter) => {
+      const token = ++loadTokenRef.current;
+      loadingMoreRef.current = false;
+      dropPendingSuggestionEvents();
+      const [list, summary] = await Promise.all([
+        api.suggestions(pageParams(filter, 0)),
+        api.summary().catch(() => null),
+      ]);
+      if (loadTokenRef.current !== token) return;
+      setSt((prev) => ({
+        ...prev,
+        suggestions: list.items,
+        suggestionsTotal: list.total,
+        kinds: summary
+          ? Object.keys(summary.suggestions_by_kind).sort()
+          : prev.kinds,
+      }));
+    },
+    [dropPendingSuggestionEvents, pageParams],
+  );
+
+  /** Append the next page. Bounded by the server total and skipped when a
+   *  filter change has already advanced the load generation. */
+  const loadMore = useCallback(async () => {
+    const cur = stRef.current;
+    if (loadingMoreRef.current) return;
+    if (cur.suggestions.length >= cur.suggestionsTotal) return;
+    const token = loadTokenRef.current;
+    loadingMoreRef.current = true;
+    try {
+      const list = await api.suggestions(
+        pageParams(cur.filter, cur.suggestions.length),
+      );
+      if (loadTokenRef.current !== token) return;
+      setSt((prev) => {
+        const seen = new Set(prev.suggestions.map((s) => s.id));
+        const added = list.items.filter((s) => !seen.has(s.id));
+        return {
+          ...prev,
+          suggestions: [...prev.suggestions, ...added],
+          suggestionsTotal: list.total,
+        };
+      });
+    } catch (e: unknown) {
+      pushToast(`cannot load more suggestions: ${resolveApiError(e)}`);
+    } finally {
+      loadingMoreRef.current = false;
+    }
+  }, [pageParams, pushToast]);
+
+  const applyFilter = useCallback(
+    (filter: Filter) => {
+      setSt((prev) => ({
+        ...prev,
+        filter,
+        suggestions: [],
+        suggestionsTotal: 0,
+      }));
+      void resetSuggestions(filter).catch((e: unknown) => {
+        pushToast(`cannot filter suggestions: ${resolveApiError(e)}`);
+      });
+    },
+    [pushToast, resetSuggestions],
+  );
+
+  /** Refresh the session-count fields after a selection mutation; the 2s
+   *  poll is the backstop. */
+  const refreshSession = useCallback(async () => {
+    try {
+      const session = await api.session();
+      setSt((prev) => ({ ...prev, session }));
+    } catch {
+      // The poll will catch up.
+    }
+  }, []);
 
   const enterBrowse = useCallback(async () => {
     try {
-      await refreshSuggestions();
+      await resetSuggestions(stRef.current.filter);
       setSt((prev) => ({ ...prev, phase: "browse", showScanForm: false }));
     } catch (e: unknown) {
       pushToast(`cannot load suggestions: ${resolveApiError(e)}`);
       setSt((prev) => ({ ...prev, phase: "idle" }));
     }
-  }, [pushToast, refreshSuggestions]);
+  }, [pushToast, resetSuggestions]);
 
   const startScan = useCallback(
     async (values: ScanFormValues) => {
@@ -228,7 +326,9 @@ export default function App() {
             // "idle" in the recovery sense; never yank the user off it.
             if (
               !cur.showScanForm &&
-              (cur.phase === "scanning" || cur.phase === "idle")
+              (cur.phase === "scanning" ||
+                cur.phase === "idle" ||
+                cur.phase === "browse")
             ) {
               await enterBrowse();
             }
@@ -254,13 +354,16 @@ export default function App() {
             await enterBrowse();
           }
           break;
-        case "suggestion.batch":
+        case "suggestion.batch": {
+          // The event carries only the batch total; rows are fetched a page
+          // at a time via `GET /suggestions` (see DESIGN.md "Events (SSE)").
           dropPendingSuggestionEvents();
           setSt((prev) => ({
             ...prev,
-            suggestions: (d.items as Suggestion[]) ?? [],
+            suggestionsTotal: Number(d.total ?? 0),
           }));
           break;
+        }
         case "suggestion.updated": {
           const item = d.item as Suggestion | undefined;
           if (item) {
@@ -373,7 +476,9 @@ export default function App() {
     } else if (
       (state === "ready" || state === "done") &&
       !cur.showScanForm &&
-      (cur.phase === "scanning" || cur.phase === "idle")
+      (cur.phase === "scanning" ||
+        cur.phase === "idle" ||
+        (cur.phase === "browse" && cur.suggestions.length === 0))
     ) {
       await enterBrowse();
     } else if (state === "done" && cur.phase === "running" && !cur.report) {
@@ -400,11 +505,10 @@ export default function App() {
         if (cancelled) return;
         setSt((prev) => ({ ...prev, session }));
         if (session.state === "ready" || session.state === "done") {
-          const list = await api.suggestions();
+          await resetSuggestions(ALL_FILTER);
           if (cancelled) return;
           setSt((prev) => ({
             ...prev,
-            suggestions: list.items,
             phase: "browse",
             showScanForm: false,
           }));
@@ -427,7 +531,7 @@ export default function App() {
       clearInterval(timer);
       sse.stop();
     };
-  }, [handleSse, poll]);
+  }, [handleSse, poll, resetSuggestions]);
 
   const toggle = useCallback(
     async (id: string, select: boolean) => {
@@ -445,10 +549,11 @@ export default function App() {
         }
       } catch (e: unknown) {
         pushToast(`selection update failed: ${resolveApiError(e)}`);
-        await refreshSuggestions();
+        await resetSuggestions(stRef.current.filter);
       }
+      void refreshSession();
     },
-    [pushToast, refreshSuggestions],
+    [pushToast, refreshSession, resetSuggestions],
   );
 
   const selectAll = useCallback(
@@ -466,11 +571,12 @@ export default function App() {
           await api.selectionAddFilter(toApiFilter(filter));
         } catch (e: unknown) {
           pushToast(`selection update failed: ${resolveApiError(e)}`);
-          await refreshSuggestions();
+          await resetSuggestions(stRef.current.filter);
         }
+        void refreshSession();
       })();
     },
-    [pushToast, refreshSuggestions],
+    [pushToast, refreshSession, resetSuggestions],
   );
 
   const clearSelection = useCallback(() => {
@@ -485,10 +591,11 @@ export default function App() {
         await api.selectionPut([]);
       } catch (e: unknown) {
         pushToast(`selection update failed: ${resolveApiError(e)}`);
-        await refreshSuggestions();
+        await resetSuggestions(stRef.current.filter);
       }
+      void refreshSession();
     })();
-  }, [pushToast, refreshSuggestions]);
+  }, [pushToast, refreshSession, resetSuggestions]);
 
   const startRun = useCallback(
     async (ids: string[]) => {
@@ -528,22 +635,37 @@ export default function App() {
       count > 0
     );
   }, []);
-  const configDirty = batchIsStale(st.session, st.suggestions.length);
+  const configDirty = batchIsStale(st.session, st.suggestionsTotal);
+
+  const readSelection = useCallback(async (): Promise<string[] | null> => {
+    try {
+      return (await api.selection()).ids;
+    } catch (e: unknown) {
+      pushToast(`cannot read selection: ${resolveApiError(e)}`);
+      return null;
+    }
+  }, [pushToast]);
+
+  const batchSize = useCallback(
+    () =>
+      stRef.current.session?.suggestions_total ??
+      stRef.current.suggestionsTotal,
+    [],
+  );
 
   const run = useCallback(async () => {
-    const ids = stRef.current.suggestions
-      .filter((s) => s.selected)
-      .map((s) => s.id);
+    const ids = await readSelection();
+    if (ids === null) return;
     if (ids.length === 0) {
       pushToast("no suggestions selected");
       return;
     }
-    if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
+    if (batchIsStale(stRef.current.session, batchSize())) {
       setSt((prev) => ({ ...prev, pendingAction: "run" }));
       return;
     }
     await startRun(ids);
-  }, [batchIsStale, pushToast, startRun]);
+  }, [batchIsStale, batchSize, pushToast, readSelection, startRun]);
 
   const cancel = useCallback(async () => {
     try {
@@ -572,19 +694,18 @@ export default function App() {
   );
 
   const exportPlan = useCallback(async () => {
-    const ids = stRef.current.suggestions
-      .filter((s) => s.selected)
-      .map((s) => s.id);
+    const ids = await readSelection();
+    if (ids === null) return;
     if (ids.length === 0) {
       pushToast("no suggestions selected");
       return;
     }
-    if (batchIsStale(stRef.current.session, stRef.current.suggestions.length)) {
+    if (batchIsStale(stRef.current.session, batchSize())) {
       setSt((prev) => ({ ...prev, pendingAction: "export" }));
       return;
     }
     await doExport(ids);
-  }, [batchIsStale, doExport, pushToast]);
+  }, [batchIsStale, batchSize, doExport, pushToast, readSelection]);
 
   const dismissPending = useCallback(() => {
     setSt((prev) => ({ ...prev, pendingAction: null }));
@@ -604,26 +725,24 @@ export default function App() {
     const action = stRef.current.pendingAction;
     if (!action) return;
     setSt((prev) => ({ ...prev, pendingAction: null }));
-    const ids = stRef.current.suggestions
-      .filter((s) => s.selected)
-      .map((s) => s.id);
+    const ids = await readSelection();
+    if (ids === null) return;
     if (action === "run") {
       await startRun(ids);
     } else {
       await doExport(ids);
     }
-  }, [doExport, startRun]);
+  }, [doExport, readSelection, startRun]);
 
   const doneFromReport = useCallback(async () => {
     try {
-      await refreshSuggestions();
+      await resetSuggestions(stRef.current.filter);
       setSt((prev) => ({ ...prev, phase: "browse", report: null, runLog: [] }));
     } catch (e: unknown) {
       pushToast(`cannot refresh: ${resolveApiError(e)}`);
     }
-  }, [pushToast, refreshSuggestions]);
+  }, [pushToast, resetSuggestions]);
 
-  const selectedCount = st.suggestions.filter((s) => s.selected).length;
   const state = st.session?.state ?? "unknown";
   // Mirror the backend's state guards so controls are disabled when the
   // service would reject the request (see "Session Model" in DESIGN.md):
@@ -636,9 +755,9 @@ export default function App() {
   const canAct = state === "ready" || state === "done";
   const canCancel = inProgress(state);
   const counts = {
-    suggestions: st.suggestions.length,
-    shown: st.suggestions.length,
-    selected: selectedCount,
+    suggestions: st.session?.suggestions_total ?? st.suggestionsTotal,
+    shown: st.suggestionsTotal,
+    selected: st.session?.selection_count ?? 0,
   };
 
   let body;
@@ -659,10 +778,10 @@ export default function App() {
         defaultHidden={defaults?.hidden ?? false}
         defaultTargetPaths={defaults?.target_paths}
         configHash={st.session?.config_hash ?? null}
-        hasSuggestions={st.suggestions.length > 0}
+        hasSuggestions={st.suggestionsTotal > 0}
         startDisabled={!canScan}
         onStart={startScan}
-        onResume={() => patch({ showScanForm: false, phase: "browse" })}
+        onResume={() => void enterBrowse()}
       />
     );
   } else if (st.phase === "scanning") {
@@ -718,8 +837,13 @@ export default function App() {
         )}
         <Browse
           suggestions={st.suggestions}
+          total={st.suggestionsTotal}
+          kinds={st.kinds}
+          filter={st.filter}
           actionsDisabled={!canAct}
           root={st.session?.scan_root ?? null}
+          onFilterChange={applyFilter}
+          onLoadMore={() => void loadMore()}
           onToggle={toggle}
           onSelectAll={selectAll}
           onClearSelection={clearSelection}

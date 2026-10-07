@@ -6,8 +6,6 @@ import {
   STATUS_CYCLE,
   TYPE_CYCLE,
   cycleNext,
-  matchesFilter,
-  uniqueKinds,
 } from '../lib/filter';
 import { rowText } from '../lib/format';
 import type { Suggestion } from '../types';
@@ -22,8 +20,15 @@ type TabId = 'preview' | 'location' | 'metadata';
 
 interface BrowseProps {
   suggestions: Suggestion[];
+  /** Server total for the active filter; may exceed the loaded window. */
+  total: number;
+  /** Complete set of asset kinds for the batch (from the report summary). */
+  kinds: string[];
+  filter: Filter;
   actionsDisabled?: boolean;
   root?: string | null;
+  onFilterChange: (filter: Filter) => void;
+  onLoadMore: () => void;
   onToggle: (id: string, select: boolean) => void;
   onSelectAll: (filter: Filter) => void;
   onClearSelection: () => void;
@@ -259,31 +264,37 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, actionsDisabled, root, onToggle, onSelectAll, onClearSelection, onRun, onExport } = props;
-  const [filter, setFilter] = useState<Filter>(ALL_FILTER);
+  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
 
-  const kinds = useMemo(() => uniqueKinds(suggestions), [suggestions]);
   const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
-  const filtered = useMemo(
-    () => suggestions.filter((s) => matchesFilter(s, filter)),
-    [suggestions, filter],
-  );
   const openSuggestion = useMemo(
     () => suggestions.find((s) => s.id === openId) ?? null,
     [suggestions, openId],
   );
 
-  // Only the rows in and around the viewport are mounted, so a 160k-
-  // suggestion batch never becomes a 160k-row DOM tree.
+  // The list is windowed with only the rows in and around the viewport
+  // mounted, and the rows themselves are fetched a page at a time from the
+  // service, so a batch of hundreds of thousands of suggestions never becomes
+  // a full DOM tree or a single multi-megabyte payload.
   const virtualizer = useVirtualizer({
-    count: filtered.length,
+    count: suggestions.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
-    getItemKey: (index) => filtered[index].id,
+    getItemKey: (index) => suggestions[index].id,
     overscan: 12,
   });
+
+  // Fetch the next server page before the user reaches the end of the
+  // loaded window.
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < ROW_HEIGHT * 12) {
+      onLoadMore();
+    }
+  };
 
   return (
     <main className="browse">
@@ -292,25 +303,25 @@ export function Browse(props: BrowseProps) {
           <button
             type="button"
             className="filter-btn"
-            onClick={() => setFilter((f) => ({ ...f, type: cycleNext(TYPE_CYCLE, f.type) }))}
+            onClick={() => onFilterChange({ ...filter, type: cycleNext(TYPE_CYCLE, filter.type) })}
           >
             t:{filter.type}
           </button>
           <button
             type="button"
             className="filter-btn"
-            onClick={() => setFilter((f) => ({ ...f, kind: cycleNext(kindCycle, f.kind) }))}
+            onClick={() => onFilterChange({ ...filter, kind: cycleNext(kindCycle, filter.kind) })}
           >
             k:{filter.kind}
           </button>
           <button
             type="button"
             className="filter-btn"
-            onClick={() => setFilter((f) => ({ ...f, status: cycleNext(STATUS_CYCLE, f.status) }))}
+            onClick={() => onFilterChange({ ...filter, status: cycleNext(STATUS_CYCLE, filter.status) })}
           >
             u:{filter.status}
           </button>
-          <button type="button" className="filter-btn" onClick={() => setFilter(ALL_FILTER)}>
+          <button type="button" className="filter-btn" onClick={() => onFilterChange(ALL_FILTER)}>
             clear
           </button>
         </div>
@@ -321,6 +332,10 @@ export function Browse(props: BrowseProps) {
           <button type="button" onClick={() => onClearSelection()}>
             select none
           </button>
+          <span className="sep" />
+          <span className="list-count">
+            {suggestions.length}/{total}
+          </span>
           <span className="sep" />
           <button
             type="button"
@@ -341,8 +356,8 @@ export function Browse(props: BrowseProps) {
         </div>
       </div>
       <div className="browse-panes">
-        <section className="list-pane" ref={scrollRef}>
-          {filtered.length === 0 ? (
+        <section className="list-pane" ref={scrollRef} onScroll={handleScroll}>
+          {suggestions.length === 0 ? (
             <ul className="suggest-list">
               <li className="empty">no suggestions match this filter</li>
             </ul>
@@ -352,7 +367,7 @@ export function Browse(props: BrowseProps) {
               style={{ height: virtualizer.getTotalSize() }}
             >
               {virtualizer.getVirtualItems().map((v) => {
-                const s = filtered[v.index];
+                const s = suggestions[v.index];
                 return (
                   <li
                     key={s.id}

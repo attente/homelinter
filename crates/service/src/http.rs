@@ -1052,9 +1052,8 @@ async fn events_sse(
         let sess = app.session.lock().await;
         let mut v = vec![Ok(sse_event(ServerEvent::State(sess.state)))];
         if !sess.suggestions.is_empty() {
-            let items = sess.suggestions.clone();
-            let total = items.len();
-            v.push(Ok(sse_event(ServerEvent::SuggestionBatch { items, total })));
+            let total = sess.suggestions.len();
+            v.push(Ok(sse_event(ServerEvent::SuggestionBatch { total })));
         }
         let (completed, total) = sess.metadata_progress();
         if total > 0 {

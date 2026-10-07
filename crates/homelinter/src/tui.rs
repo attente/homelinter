@@ -639,10 +639,10 @@ impl App {
                 }
             }
             "suggestion.batch" => {
-                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                    let items = v["items"].as_array().cloned().unwrap_or_default();
-                    self.rows = items.iter().map(Row::from_json).collect();
-                    self.kinds = self.unique_kinds();
+                // The event carries only the batch total; fetch the rows
+                // over REST (see "Service API > Events").
+                if let Err(e) = self.refresh_rows().await {
+                    self.toast = Some(e);
                 }
             }
             "suggestion.updated" => {

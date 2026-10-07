@@ -21,7 +21,6 @@ pub enum ServerEvent {
         summary: ScanSummary,
     },
     SuggestionBatch {
-        items: Vec<Suggestion>,
         total: usize,
     },
     SuggestionUpdated {
@@ -90,12 +89,8 @@ impl ServerEvent {
             ServerEvent::ScanComplete { summary } => {
                 json!({ "summary": serde_json::to_value(summary).unwrap_or(Value::Null) })
             }
-            ServerEvent::SuggestionBatch { items, total } => {
-                let items_v: Vec<Value> = items
-                    .iter()
-                    .filter_map(|s| serde_json::to_value(s).ok())
-                    .collect();
-                json!({ "items": items_v, "total": total })
+            ServerEvent::SuggestionBatch { total } => {
+                json!({ "total": total })
             }
             ServerEvent::SuggestionUpdated { item } => {
                 json!({ "item": serde_json::to_value(item).unwrap_or(Value::Null) })

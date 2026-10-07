@@ -98,6 +98,8 @@ export const api = {
     kind?: string;
     status?: string;
     selected?: boolean;
+    offset?: number;
+    limit?: number;
   }): Promise<SuggestionList> {
     const q = new URLSearchParams();
     if (params?.type) q.set("type", params.type);
@@ -105,6 +107,8 @@ export const api = {
     if (params?.status) q.set("status", params.status);
     if (params?.selected !== undefined)
       q.set("selected", String(params.selected));
+    if (params?.offset !== undefined) q.set("offset", String(params.offset));
+    if (params?.limit !== undefined) q.set("limit", String(params.limit));
     const qs = q.toString();
     return request<SuggestionList>(`/suggestions${qs ? `?${qs}` : ""}`);
   },

@@ -365,12 +365,10 @@ pub async fn start_scan(
         sess.report = None;
         sess.report_batch = None;
         sess.failure = None;
-        let items = sess.suggestions.clone();
-        let total = items.len();
+        let total = sess.suggestions.len();
         drop(sess);
 
-        app.events
-            .publish(ServerEvent::SuggestionBatch { items, total });
+        app.events.publish(ServerEvent::SuggestionBatch { total });
         app.events.publish(ServerEvent::MetadataProgress {
             completed: 0,
             total: pending_total,
