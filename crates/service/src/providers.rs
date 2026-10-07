@@ -1526,14 +1526,26 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
     }
     let language = cfg.geocoder.language.clone();
     let api_key = cfg.geocoder.api_key.clone();
+    // The neighbourhood-city exceptions shape the resolved value, so a
+    // different list must not reuse cached locations from another list.
+    // Matching ignores order, surrounding whitespace, and case, so hash a
+    // canonical form (trimmed, lowercased, deduplicated, sorted); otherwise
+    // a cosmetic reorder or recasing in the config would needlessly miss.
+    let mut neighbourhoods: Vec<String> = cfg
+        .geocoder
+        .neighbourhood_cities
+        .iter()
+        .map(|c| c.trim().to_lowercase())
+        .filter(|c| !c.is_empty())
+        .collect();
+    neighbourhoods.sort();
+    neighbourhoods.dedup();
     let settings_hash = sha256(&[
         backend.as_bytes(),
         endpoint.as_bytes(),
         language.as_deref().unwrap_or("").as_bytes(),
         cfg.geocoder.api_key.as_deref().unwrap_or("").as_bytes(),
-        // The neighbourhood-city exceptions shape the resolved value, so a
-        // different list must not reuse cached locations from another list.
-        cfg.geocoder.neighbourhood_cities.join("\n").as_bytes(),
+        neighbourhoods.join("\n").as_bytes(),
     ]);
     Some(ProviderSettings {
         provider_id,
@@ -2749,6 +2761,33 @@ mod tests {
             geocoder_settings(&above).unwrap().min_interval,
             Duration::from_millis(2500)
         );
+    }
+
+    #[test]
+    fn geocoder_settings_hash_canonicalizes_neighbourhood_cities() {
+        let cfg = |list: &str| -> RawConfig {
+            toml::from_str(&format!(
+                "[geocoder]\nenabled = true\nneighbourhood_cities = {list}\n"
+            ))
+            .unwrap()
+        };
+        let a = geocoder_settings(&cfg(r#"["Toronto", "Shibuya"]"#)).unwrap();
+        let b = geocoder_settings(&cfg(r#"["  shibuya ", "TORONTO", "toronto"]"#)).unwrap();
+        // Order, case, surrounding whitespace, and duplicates cannot change
+        // the resolved locality, so they must not change the settings hash.
+        assert_eq!(a.settings_hash, b.settings_hash);
+        // The configured list itself is preserved for matching.
+        assert_eq!(
+            b.neighbourhood_cities,
+            vec![
+                "  shibuya ".to_string(),
+                "TORONTO".to_string(),
+                "toronto".to_string()
+            ]
+        );
+        // A genuinely different set still changes the key.
+        let c = geocoder_settings(&cfg(r#"["Toronto", "Ikebukuro"]"#)).unwrap();
+        assert_ne!(a.settings_hash, c.settings_hash);
     }
 
     #[test]
