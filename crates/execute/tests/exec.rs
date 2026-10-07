@@ -111,7 +111,7 @@ fn delete_verifies_hash_then_removes() {
     write(&b, b"same-content");
 
     let mut s = Suggestion::new_delete(
-        AssetKind::Data,
+        AssetKind::Document,
         &b,
         "duplicate".into(),
         Default::default(),
@@ -139,7 +139,7 @@ fn delete_refuses_when_content_changed() {
     write(&b, b"same-content");
 
     let mut s = Suggestion::new_delete(
-        AssetKind::Data,
+        AssetKind::Document,
         &b,
         "duplicate".into(),
         Default::default(),

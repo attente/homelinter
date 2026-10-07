@@ -20,10 +20,12 @@ photo      = "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 video      = "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 audio      = "Audio/%a-%t.%e"
 repository = "Projects/%o/%n"
-archive    = "Archives/%f"
-data       = "Data/%f"
-executable = "bin/%f"
-other      = "Other/%f"
+# Archives keep their original filename (which carries version/source
+# identity) under a year/month nest dated from the file's modification
+# time. Installer packages (dmg, deb, rpm, apk, msi, exe, bin) classify as
+# archives too. Data, source, script, and unknown files are unmanaged and
+# are never moved or deduplicated.
+archive    = "Archives/%Y/%m/%f"
 
 [geocoder]
 # Reverse geocoding for GPS-tagged photos (%l). Disabled by default.

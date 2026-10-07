@@ -175,19 +175,29 @@ pub fn analyze(
     cancel: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(&'static str, u64) + Sync),
 ) -> Analysis {
-    // Classify once, then hand every file to each extractor as one batch.
-    // Built-in extractors parallelize internally and `exiftool` overrides
-    // `extract_batch` to amortize process startup across many files, so the
-    // per-extractor pass is far cheaper than the old per-file loop while
-    // producing the identical first-value-wins merge.
-    let targets: Vec<ExtractTarget<'_>> = files
+    // Classify once, then hand every managed file to each extractor as one
+    // batch. Built-in extractors parallelize internally and `exiftool`
+    // overrides `extract_batch` to amortize process startup across many
+    // files, so the per-extractor pass is far cheaper than the old per-file
+    // loop while producing the identical first-value-wins merge.
+    //
+    // Files that classify to no kind (unmanaged) are filtered out here: they
+    // are never extracted, hashed, or suggested, so homelinter cannot move
+    // or deduplicate data, source, or unknown files that live where their
+    // software expects them.
+    let classified: Vec<(usize, AssetKind)> = files
         .iter()
-        .map(|f| ExtractTarget {
-            path: &f.path,
-            kind: classify_path(&f.path),
+        .enumerate()
+        .filter_map(|(i, f)| classify_path(&f.path).map(|k| (i, k)))
+        .collect();
+    let targets: Vec<ExtractTarget<'_>> = classified
+        .iter()
+        .map(|&(i, kind)| ExtractTarget {
+            path: &files[i].path,
+            kind,
         })
         .collect();
-    let mut merged = vec![EmbeddedMeta::default(); files.len()];
+    let mut merged = vec![EmbeddedMeta::default(); classified.len()];
     for ex in &opts.extractors {
         if cancel() {
             break;
@@ -199,11 +209,12 @@ pub fn analyze(
     }
 
     let mut degraded = false;
-    let analyzed: Vec<AnalyzedFile> = files
+    let analyzed: Vec<AnalyzedFile> = classified
         .iter()
         .enumerate()
-        .map(|(i, f)| {
-            let meta = &merged[i];
+        .map(|(ci, &(fi, kind))| {
+            let f = &files[fi];
+            let meta = &merged[ci];
             let (date, source) = match meta.date_taken {
                 Some(d) => (Some(d), "embedded"),
                 None => filename_date(f),
@@ -234,7 +245,7 @@ pub fn analyze(
             }
             AnalyzedFile {
                 path: f.path.clone(),
-                kind: targets[i].kind,
+                kind,
                 size: f.size,
                 modified: f.modified,
                 created: f.created,

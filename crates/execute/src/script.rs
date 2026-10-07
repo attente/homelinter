@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn delete_without_hash_refused() {
         let s = Suggestion::new_delete(
-            AssetKind::Data,
+            AssetKind::Document,
             std::path::Path::new("/x/y.bin"),
             "dup".into(),
             Default::default(),

@@ -8,38 +8,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 
-/// homelinter's file categories. Every discovered unit is classified into
-/// exactly one kind; classification drives destination format strings and
-/// reporting.
+/// homelinter's file categories. homelinter only operates on files it can
+/// name from content metadata (document, photo, video, audio) or relocate
+/// safely as an atomic unit (repository, archive); every other file is
+/// unmanaged: it is never extracted, hashed, or suggested, and never moved
+/// or deduplicated.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum AssetKind {
+    #[default]
     Document,
     Photo,
     Video,
     Audio,
     Repository,
     Archive,
-    Data,
-    Executable,
-    #[default]
-    Other,
 }
 
 impl AssetKind {
     /// Every kind in canonical order.
-    pub const ALL: [AssetKind; 9] = [
+    pub const ALL: [AssetKind; 6] = [
         AssetKind::Document,
         AssetKind::Photo,
         AssetKind::Video,
         AssetKind::Audio,
         AssetKind::Repository,
         AssetKind::Archive,
-        AssetKind::Data,
-        AssetKind::Executable,
-        AssetKind::Other,
     ];
 
     /// Kinds whose contents may be described by a content provider.
@@ -59,16 +55,15 @@ impl AssetKind {
             AssetKind::Audio => "audio",
             AssetKind::Repository => "repository",
             AssetKind::Archive => "archive",
-            AssetKind::Data => "data",
-            AssetKind::Executable => "executable",
-            AssetKind::Other => "other",
         }
     }
 
     /// The opinionated default destination format string for the kind.
     /// Media and document kinds name the target from metadata; `%e` keeps
-    /// the original extension. Archive/data/executable/other preserve the
-    /// original filename via `%f`.
+    /// the original extension. Archives preserve the original filename via
+    /// `%f` (the name carries version/source identity) under a year/month
+    /// nest dated from the file's modification time, which is always
+    /// available; repositories keep their own name under the remote owner.
     pub fn default_format(self) -> &'static str {
         match self {
             AssetKind::Document => "Documents/%a-%t.%e",
@@ -76,10 +71,7 @@ impl AssetKind {
             AssetKind::Video => "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
             AssetKind::Audio => "Audio/%a-%t.%e",
             AssetKind::Repository => "Projects/%o/%n",
-            AssetKind::Archive => "Archives/%f",
-            AssetKind::Data => "Data/%f",
-            AssetKind::Executable => "bin/%f",
-            AssetKind::Other => "Other/%f",
+            AssetKind::Archive => "Archives/%Y/%m/%f",
         }
     }
 }
@@ -95,7 +87,7 @@ impl FromStr for AssetKind {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_name(s).ok_or_else(|| {
-            ApiError::validation(format!("unknown asset kind '{s}'; expected one of: document, photo, video, audio, repository, archive, data, executable, other"))
+            ApiError::validation(format!("unknown asset kind '{s}'; expected one of: document, photo, video, audio, repository, archive"))
         })
     }
 }
@@ -109,75 +101,80 @@ impl AssetKind {
             "audio" => Some(AssetKind::Audio),
             "repository" => Some(AssetKind::Repository),
             "archive" => Some(AssetKind::Archive),
-            "data" => Some(AssetKind::Data),
-            "executable" => Some(AssetKind::Executable),
-            "other" => Some(AssetKind::Other),
             _ => None,
         }
     }
 }
 
-/// Extension-to-kind mapping. The final extension wins over earlier ones so
-/// `archive.tar.gz` classifies as an archive by `gz` handling below.
-fn extension_kind(ext: &str) -> AssetKind {
+/// Extension-to-kind mapping. `None` means the file is unmanaged: it is
+/// never extracted, hashed, moved, or deduplicated, because the tool has no
+/// way to name it from content and no way to relocate it safely (data and
+/// source files usually live where their software expects them).
+/// The final extension wins over earlier ones so `archive.tar.gz`
+/// classifies as an archive by `gz` handling below.
+fn extension_kind(ext: &str) -> Option<AssetKind> {
     match ext {
         // Document
         "pdf" | "doc" | "docx" | "odt" | "txt" | "md" | "markdown" | "rtf" | "epub" | "tex"
-        | "pages" | "key" | "ppt" | "pptx" | "xls" | "xlsx" => AssetKind::Document,
+        | "pages" | "key" | "ppt" | "pptx" | "xls" | "xlsx" => Some(AssetKind::Document),
         // Photo
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "tif" | "tiff" | "heic"
-        | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" => AssetKind::Photo,
+        | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" => Some(AssetKind::Photo),
         // Video
         "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg" | "3gp"
-        | "ts" => AssetKind::Video,
+        | "ts" => Some(AssetKind::Video),
         // Audio
         "mp3" | "flac" | "ogg" | "m4a" | "wav" | "aac" | "opus" | "wma" | "aiff" | "alac" => {
-            AssetKind::Audio
+            Some(AssetKind::Audio)
         }
-        // Archive (two-part forms handled by the caller via is_archive_name)
+        // Archive (two-part forms handled by the caller via is_archive_name).
+        // Installer packages (dmg, deb, rpm, apk, msi, exe, bin) are treated
+        // as archives: they are immutable distributable units that deduplicate
+        // safely and keep their original name under a fixed folder. Source
+        // and script extensions (py, rs, go, ...) are unmanaged instead.
         "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "tgz" | "tbz2" | "txz"
-        | "iso" => AssetKind::Archive,
-        // Data
-        "json" | "xml" | "csv" | "yaml" | "yml" | "toml" | "sql" | "db" | "sqlite" | "parquet"
-        | "ndjson" | "tsv" | "ini" | "conf" | "cfg" => AssetKind::Data,
-        // Executable (source and binary forms)
-        "exe" | "app" | "sh" | "py" | "rb" | "js" | "wasm" | "pl" | "php" | "rs" | "go" | "c"
-        | "h" | "cpp" | "bin" | "msi" | "dmg" | "deb" | "rpm" | "apk" => AssetKind::Executable,
-        _ => AssetKind::Other,
+        | "iso" | "dmg" | "deb" | "rpm" | "apk" | "msi" | "exe" | "bin" => {
+            Some(AssetKind::Archive)
+        }
+        _ => None,
     }
 }
 
 /// Compound-archive names resolved before the simple extension mapping so
 /// `tar.gz` and friends classify as archives rather than documents by `gz`.
-pub fn classify_file_name(name: &str) -> AssetKind {
+/// `None` means the file is unmanaged: never extracted, hashed, or
+/// suggested.
+pub fn classify_file_name(name: &str) -> Option<AssetKind> {
     let lower = name.to_lowercase();
     for two in [
         "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tar.lz", "tar.lz4", "tar.z", "tar.lzo",
     ] {
         if lower.ends_with(two) {
-            return AssetKind::Archive;
+            return Some(AssetKind::Archive);
         }
     }
+    // Known lockfiles and other location-bound data are unmanaged: software
+    // reads them at a fixed path, so moving or deduplicating them is unsafe.
     if lower == "cargo.lock"
         || lower == "package-lock.json"
         || lower == "pnpm-lock.yaml"
         || lower == "yarn.lock"
     {
-        return AssetKind::Data;
+        return None;
     }
     let dot = lower.rfind('.');
     match dot {
         Some(i) if i + 1 < lower.len() => extension_kind(&lower[i + 1..]),
-        _ => AssetKind::Other,
+        _ => None,
     }
 }
 
 /// Classification for a full path: use the file name only (the parent
-/// directories never influence the kind).
-pub fn classify_path(p: &std::path::Path) -> AssetKind {
+/// directories never influence the kind). `None` means unmanaged.
+pub fn classify_path(p: &std::path::Path) -> Option<AssetKind> {
     match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => classify_file_name(name),
-        None => AssetKind::Other,
+        None => None,
     }
 }
 
@@ -197,7 +194,7 @@ pub fn strip_trailing_document_extension(name: &str) -> &str {
             break;
         }
         let ext = &current[dot + 1..];
-        if ext.is_empty() || extension_kind(&ext.to_lowercase()) != AssetKind::Document {
+        if ext.is_empty() || extension_kind(&ext.to_lowercase()) != Some(AssetKind::Document) {
             break;
         }
         let trimmed = current[..dot].trim_end();
@@ -216,7 +213,7 @@ pub fn strip_trailing_document_extension(name: &str) -> &str {
 pub const DESCRIPTION_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"];
 
 /// The content-description modality for an asset kind, if any. Kinds
-/// without a modality (repository, archive, data, executable, other)
+/// without a modality (repository and archive, plus every unmanaged file)
 /// have no content source for `%s`, so no description provider is ever
 /// planned for them and `%s` falls back to the filename stem.
 pub fn description_modality(kind: AssetKind) -> Option<&'static str> {
@@ -269,14 +266,24 @@ mod tests {
 
     #[test]
     fn classifies_extensions() {
-        assert_eq!(classify_file_name("a.pdf"), AssetKind::Document);
-        assert_eq!(classify_file_name("IMG_0001.JPG"), AssetKind::Photo);
-        assert_eq!(classify_file_name("clip.mov"), AssetKind::Video);
-        assert_eq!(classify_file_name("song.FLAC"), AssetKind::Audio);
-        assert_eq!(classify_file_name("bundle.tar.gz"), AssetKind::Archive);
-        assert_eq!(classify_file_name("data.json"), AssetKind::Data);
-        assert_eq!(classify_file_name("run.sh"), AssetKind::Executable);
-        assert_eq!(classify_file_name("notes"), AssetKind::Other);
+        assert_eq!(classify_file_name("a.pdf"), Some(AssetKind::Document));
+        assert_eq!(classify_file_name("IMG_0001.JPG"), Some(AssetKind::Photo));
+        assert_eq!(classify_file_name("clip.mov"), Some(AssetKind::Video));
+        assert_eq!(classify_file_name("song.FLAC"), Some(AssetKind::Audio));
+        assert_eq!(classify_file_name("bundle.tar.gz"), Some(AssetKind::Archive));
+        assert_eq!(classify_file_name("app.dmg"), Some(AssetKind::Archive));
+        assert_eq!(classify_file_name("pkg.deb"), Some(AssetKind::Archive));
+        assert_eq!(classify_file_name("tool.exe"), Some(AssetKind::Archive));
+        // Data, source, script, and unknown files are unmanaged: no kind,
+        // so they are never moved, hashed, or deduplicated.
+        assert_eq!(classify_file_name("data.json"), None);
+        assert_eq!(classify_file_name("config.toml"), None);
+        assert_eq!(classify_file_name("app.db"), None);
+        assert_eq!(classify_file_name("run.sh"), None);
+        assert_eq!(classify_file_name("main.rs"), None);
+        assert_eq!(classify_file_name("notes"), None);
+        assert_eq!(classify_file_name("cargo.lock"), None);
+        assert_eq!(classify_file_name("package-lock.json"), None);
     }
 
     #[test]

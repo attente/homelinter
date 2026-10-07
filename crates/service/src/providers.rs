@@ -1670,8 +1670,8 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
 
 /// The description provider for one asset kind: the per-modality override
 /// for its content modality (e.g. `[description.image]` for a photo).
-/// Kinds without a content modality (repository, archive, data,
-/// executable, other) have no content source for `%s` - the LLM would only
+/// Kinds without a content modality (repository and archive) have no
+/// content source for `%s` - the LLM would only
 /// guess from the filename - so no provider is planned and `%s` falls back
 /// to an existing embedded title or the filename stem. Documents also use
 /// this provider for `%a` author inference, and to recover a title for

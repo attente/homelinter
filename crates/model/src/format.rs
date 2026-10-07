@@ -520,7 +520,7 @@ pub fn validate_target_paths(
         let parsed = AssetKind::from_name(kind);
         let kind_err = match parsed {
             Some(_) => None,
-            None => Some("unknown asset kind; expected one of: document, photo, video, audio, repository, archive, data, executable, other".to_string()),
+            None => Some("unknown asset kind; expected one of: document, photo, video, audio, repository, archive".to_string()),
         };
         if let Some(reason) = kind_err {
             fields.push((format!("target_paths.{kind}"), reason));

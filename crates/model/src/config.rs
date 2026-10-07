@@ -392,9 +392,9 @@ pub fn default_description_prompt(modality: &str) -> &'static str {
 pub struct DescriptionConfig {
     /// Base provider fields; the base entry is the default provider for
     /// every content kind that lacks an explicit per-modality override.
-    /// Kinds without a content modality (repository, archive, data,
-    /// executable, other) never use it - they have no content source for
-    /// `%s` - except location summaries, which always use the text
+    /// Kinds without a content modality (repository and archive) never use
+    /// it - they have no content source for `%s` - except location
+    /// summaries, which always use the text
     /// provider (`[description.text]`, else the base).
     #[serde(default, flatten)]
     pub base: DescriptionProvider,

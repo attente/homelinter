@@ -9,20 +9,18 @@ export interface ScanFormValues {
   targetPaths: Record<string, string>;
 }
 
-// The nine asset kinds with their built-in default destination format
+// The six asset kinds with their built-in default destination format
 // strings (DESIGN.md "Destination Path Format Strings > Defaults"); the
 // defaults double as input placeholders. Empty input = use the configured
-// (or built-in) default for that kind.
+// (or built-in) default for that kind. There are no data, executable, or
+// other kinds: those files are unmanaged and never moved or deduplicated.
 const KINDS: Array<[string, string]> = [
   ["document", "Documents/%a-%t.%e"],
   ["photo", "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
   ["video", "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
   ["audio", "Audio/%a-%t.%e"],
   ["repository", "Projects/%o/%n"],
-  ["archive", "Archives/%f"],
-  ["data", "Data/%f"],
-  ["executable", "bin/%f"],
-  ["other", "Other/%f"],
+  ["archive", "Archives/%Y/%m/%f"],
 ];
 
 const GEOCODER_SERVICES = ["nominatim", "photon", "google", "mapbox", "custom"];

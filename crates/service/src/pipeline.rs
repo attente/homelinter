@@ -262,7 +262,9 @@ pub async fn start_scan(
         Err(e) => return fail(app.clone(), format!("suggestion task panicked: {e}")).await,
     };
 
-    let total_files = analysis.files.len() as u64;
+    // Total files scanned comes from discovery, not analysis, which keeps
+    // only managed files (unmanaged files are never extracted or hashed).
+    let total_files = scan.files.len() as u64;
     let total_symlinks = scan.symlinks.entries.len() as u64;
 
     // Plan provider work before batch validation: suggestions whose unit
