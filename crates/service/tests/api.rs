@@ -635,7 +635,8 @@ async fn config_put_null_deletes_and_get_reports_defaults() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["geocoder"]["language"], serde_json::Value::Null);
+    // Deleting the key restores the built-in default language, `en`.
+    assert_eq!(v["geocoder"]["language"], "en");
     assert!(v["target_paths"].get("photo").is_none());
     assert_eq!(
         v["target_path_defaults"]["photo"],

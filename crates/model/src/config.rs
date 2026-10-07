@@ -54,6 +54,10 @@ pub const DEFAULT_MAX_VIDEO_FRAMES: u64 = 8;
 /// positive; lower it for a small-context model, raise it to fit larger
 /// inputs.
 pub const DEFAULT_MAX_CONTEXT: u64 = 32768;
+/// Default geocoder language (ISO 639-1). Unset resolves to this code so
+/// reverse-geocoded locality names read in English regardless of the
+/// provider's own locale.
+pub const DEFAULT_GEOCODER_LANGUAGE: &str = "en";
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 
@@ -197,6 +201,8 @@ pub struct GeocoderConfig {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// ISO 639-1 code passed to the provider to shape resolved locality
+    /// names. Unset falls back to [`DEFAULT_GEOCODER_LANGUAGE`].
     #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
@@ -1311,7 +1317,11 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 GeocoderService::Custom => "custom",
             },
             "endpoint": raw.geocoder.endpoint.as_deref().unwrap_or(raw.geocoder_service().default_endpoint()),
-            "language": raw.geocoder.language,
+            "language": raw
+                .geocoder
+                .language
+                .as_deref()
+                .unwrap_or(DEFAULT_GEOCODER_LANGUAGE),
             "user_agent_contact": raw.geocoder.user_agent_contact,
             "neighbourhood_cities": raw.geocoder.neighbourhood_cities,
             "rate_limit_ms": raw.geocoder.rate_limit_ms.unwrap_or(0),

@@ -55,8 +55,8 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_MAX_CONTEXT, DEFAULT_MAX_IMAGE_DIMENSION,
-    DEFAULT_MAX_VIDEO_FRAMES, DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_GEOCODER_LANGUAGE, DEFAULT_MAX_CONTEXT,
+    DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_VIDEO_FRAMES, DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
@@ -1564,7 +1564,11 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         provider_id.push(':');
         provider_id.push_str(&endpoint);
     }
-    let language = cfg.geocoder.language.clone();
+    let language = cfg
+        .geocoder
+        .language
+        .clone()
+        .unwrap_or_else(|| DEFAULT_GEOCODER_LANGUAGE.to_string());
     let api_key = cfg.geocoder.api_key.clone();
     // The neighbourhood-city exceptions shape the resolved value, so a
     // different list must not reuse cached locations from another list.
@@ -1583,7 +1587,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
     let settings_hash = sha256(&[
         backend.as_bytes(),
         endpoint.as_bytes(),
-        language.as_deref().unwrap_or("").as_bytes(),
+        language.as_bytes(),
         cfg.geocoder.api_key.as_deref().unwrap_or("").as_bytes(),
         neighbourhoods.join("\n").as_bytes(),
     ]);
@@ -1594,7 +1598,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         backend: backend.to_string(),
         endpoint,
         api_key,
-        language,
+        language: Some(language),
         user_agent_contact: cfg.geocoder.user_agent_contact.clone(),
         model: None,
         max_words: None,

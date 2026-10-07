@@ -30,11 +30,12 @@ other      = "Other/%f"
 enabled = false
 service = "nominatim"       # nominatim | photon | google | mapbox | custom
 endpoint = "https://nominatim.openstreetmap.org"
-# api_key, language, and user_agent_contact are unset by default.
-# api_key is required by google/mapbox and optional for custom; language is
-# an ISO 639-1 code; user_agent_contact is recommended for public services.
+# api_key and user_agent_contact are unset by default; language defaults to
+# "en". api_key is required by google/mapbox and optional for custom;
+# language is an ISO 639-1 code passed to the provider; user_agent_contact
+# is recommended for public services.
 # api_key = ""
-# language = "en"
+language = "en"
 # user_agent_contact = ""
 # %l renders the city from the provider's structured address; add a city
 # name here to use the finer neighbourhood level there instead (matched
