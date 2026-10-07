@@ -47,12 +47,9 @@ impl MetadataExtractor for BuiltinExifExtractor {
         };
 
         let field = |tag| exif.get_field(tag, In::PRIMARY);
-        let exif_field = |tag| exif.get_field(tag, In(2));
         let mut meta = EmbeddedMeta::default();
 
-        let date = field(Tag::DateTimeOriginal)
-            .or_else(|| exif_field(Tag::DateTimeOriginal))
-            .or_else(|| field(Tag::DateTime));
+        let date = field(Tag::DateTimeOriginal).or_else(|| field(Tag::DateTime));
         meta.date_taken = date.and_then(|f| parse_exif_datetime(&value_text(&f.value)));
 
         meta.title = field(Tag::ImageDescription).and_then(|f| ascii_text(&f.value));
@@ -61,18 +58,14 @@ impl MetadataExtractor for BuiltinExifExtractor {
             .and_then(|f| ascii_text(&f.value))
             .or_else(|| field(Tag::Make).and_then(|f| ascii_text(&f.value)));
 
-        let lat = exif
-            .get_field(Tag::GPSLatitude, In(4))
-            .and_then(|f| rational_dms(&f.value));
-        let lon = exif
-            .get_field(Tag::GPSLongitude, In(4))
-            .and_then(|f| rational_dms(&f.value));
-        let lat_ref = exif
-            .get_field(Tag::GPSLatitudeRef, In(4))
-            .and_then(|f| ascii_text(&f.value));
-        let lon_ref = exif
-            .get_field(Tag::GPSLongitudeRef, In(4))
-            .and_then(|f| ascii_text(&f.value));
+        // `kamadak-exif` parses the Exif and GPS sub-IFDs with the parent's
+        // `ifd_num`, so their fields are reported under `In::PRIMARY` (not a
+        // sub-IFD number). Reading GPS with `In(4)` never matched and silently
+        // dropped every coordinate.
+        let lat = field(Tag::GPSLatitude).and_then(|f| rational_dms(&f.value));
+        let lon = field(Tag::GPSLongitude).and_then(|f| rational_dms(&f.value));
+        let lat_ref = field(Tag::GPSLatitudeRef).and_then(|f| ascii_text(&f.value));
+        let lon_ref = field(Tag::GPSLongitudeRef).and_then(|f| ascii_text(&f.value));
         meta.latitude = signed_coordinate(lat, lat_ref.as_deref(), 'S', 'N');
         meta.longitude = signed_coordinate(lon, lon_ref.as_deref(), 'W', 'E');
         meta

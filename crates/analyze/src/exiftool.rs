@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use homelinter_model::asset_kind::AssetKind;
 use rayon::prelude::*;
@@ -16,7 +17,7 @@ use serde_json::Value;
 
 use crate::dateparse::parse_exif_datetime;
 use crate::extractor::{EmbeddedMeta, ExtractTarget, ExtractionContext, MetadataExtractor};
-use crate::tool_runner::run_capture;
+use crate::tool_runner::run_capture_lenient;
 
 /// Number of paths handed to one exiftool invocation. Process startup
 /// dominates the cost of reading a single file, so batching many files per
@@ -24,6 +25,18 @@ use crate::tool_runner::run_capture;
 /// The chunk stays small enough that its `-json` output is far below the
 /// configured stdout cap.
 const BATCH_SIZE: usize = 128;
+
+/// Additional wall-clock budget granted per file beyond the first. The
+/// configured `tool_timeout` is the budget for a single-file invocation
+/// (startup plus one file); a 128-file batch is one invocation doing 128
+/// files of work, so it gets a proportional allowance on top. The total
+/// stays bounded because `BATCH_SIZE` is fixed.
+const PER_FILE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Smallest batch a failed chunk is retried at. A chunk that fails is
+/// halved and retried down to this size so one unreadable file (or a
+/// transient timeout) cannot discard metadata for the whole 128-file chunk.
+const MIN_RETRY_BATCH: usize = 8;
 
 /// The exiftool shell-out only runs for containers exiftool understands;
 /// text, archives, and other kinds are never handed to it.
@@ -102,14 +115,10 @@ impl MetadataExtractor for ExifToolExtractor {
             .par_chunks(BATCH_SIZE)
             .flat_map_iter(|chunk| {
                 let paths: Vec<&str> = chunk.iter().map(|(_, p)| *p).collect();
-                let by_path = run_batch(&paths, ctx);
-                chunk.iter().map(move |(i, p)| {
-                    let meta = by_path
-                        .as_ref()
-                        .and_then(|m| m.get(*p))
-                        .cloned();
-                    (*i, meta)
-                })
+                let by_path = extract_chunk(&paths, ctx);
+                chunk
+                    .iter()
+                    .map(move |(i, p)| ((*i), by_path.get(*p).cloned()))
             })
             .collect();
         for (i, meta) in parsed {
@@ -121,12 +130,15 @@ impl MetadataExtractor for ExifToolExtractor {
     }
 }
 
-/// The fixed, small exiftool tag list. `-n` requests raw numeric values and
-/// `-json` requests a structured array keyed by the input path.
+/// The fixed, small exiftool tag list. `-n` requests raw numeric values,
+/// `-json` requests a structured array keyed by the input path, and `-m`
+/// ignores minor per-file errors so a single odd container does not make the
+/// whole batch exit non-zero.
 fn tag_args() -> Vec<&'static str> {
     vec![
         "-n",
         "-json",
+        "-m",
         "-DateTimeOriginal",
         "-CreateDate",
         "-TrackCreateDate",
@@ -146,16 +158,42 @@ fn tag_args() -> Vec<&'static str> {
     ]
 }
 
+/// Wall-clock budget for one batched invocation over `files` paths: the
+/// configured `tool_timeout` plus a per-file allowance for every file beyond
+/// the first.
+fn batch_timeout(ctx: &ExtractionContext, files: usize) -> Duration {
+    let extra = PER_FILE_TIMEOUT.saturating_mul(files.saturating_sub(1) as u32);
+    ctx.tool_timeout.saturating_add(extra)
+}
+
+/// Extract metadata for one chunk, retrying a failed chunk at half size
+/// down to `MIN_RETRY_BATCH` so a single unreadable file or a transient
+/// timeout cannot discard metadata for every sibling in the chunk.
+fn extract_chunk(paths: &[&str], ctx: &ExtractionContext) -> HashMap<String, EmbeddedMeta> {
+    if let Some(by_path) = run_batch(paths, ctx) {
+        return by_path;
+    }
+    if paths.len() <= MIN_RETRY_BATCH {
+        return HashMap::new();
+    }
+    let mid = paths.len() / 2;
+    let mut merged = extract_chunk(&paths[..mid], ctx);
+    merged.extend(extract_chunk(&paths[mid..], ctx));
+    merged
+}
+
 /// Run exiftool once over `paths` and map each returned row back to the
-/// input path string it names (`SourceFile`). Every failure degrades to
-/// `None`, which callers treat as "no metadata".
+/// input path string it names (`SourceFile`). A nonzero exit still yields
+/// whatever rows exiftool emitted; only a timeout, output overflow, or a
+/// truncated/unparseable payload degrades to `None`, which callers treat as
+/// "retry smaller".
 fn run_batch(paths: &[&str], ctx: &ExtractionContext) -> Option<HashMap<String, EmbeddedMeta>> {
     let mut args = tag_args();
     args.extend_from_slice(paths);
-    let bytes = run_capture(
+    let bytes = run_capture_lenient(
         "exiftool",
         &args,
-        ctx.tool_timeout,
+        batch_timeout(ctx, paths.len()),
         ctx.tool_stdout_max_bytes,
     )?;
     let root: Value = serde_json::from_slice(&bytes).ok()?;
@@ -234,5 +272,22 @@ mod tests {
             signed_coordinate(Some(lon), Some(""), 'W', 'E'),
             true
         ));
+    }
+
+    #[test]
+    fn batch_timeout_scales_with_file_count() {
+        let ctx = ExtractionContext {
+            tool_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        assert_eq!(batch_timeout(&ctx, 0), Duration::from_secs(30));
+        assert_eq!(batch_timeout(&ctx, 1), Duration::from_secs(30));
+        // One extra 250 ms allowance per file beyond the first.
+        assert_eq!(batch_timeout(&ctx, 5), Duration::from_millis(31_000));
+        // Bounded by BATCH_SIZE, never an unbounded multiplication.
+        assert_eq!(
+            batch_timeout(&ctx, BATCH_SIZE),
+            Duration::from_millis(30_000 + 250 * (BATCH_SIZE as u64 - 1))
+        );
     }
 }
