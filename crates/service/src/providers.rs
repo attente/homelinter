@@ -1679,17 +1679,11 @@ pub async fn plan_provider_jobs(
             if let (Some(g), Some(lat), Some(lon)) = (&geo, f.latitude, f.longitude) {
                 let lat_bytes = lat.to_le_bytes();
                 let lon_bytes = lon.to_le_bytes();
-                let lang = g.language.as_deref().unwrap_or("");
-                // Locality resolution is deterministic from the geocoder
-                // response; language is the only input that joins the key
-                // (the settings hash already covers the neighbourhood-city
-                // exceptions).
-                let mut input: Vec<u8> = Vec::new();
-                input.extend_from_slice(b"geocode");
-                input.extend_from_slice(&lat_bytes);
-                input.extend_from_slice(&lon_bytes);
-                input.extend_from_slice(lang.as_bytes());
-                let input_hash = sha256(&[input.as_slice()]);
+                // A location is a property of the coordinate, not the file:
+                // the content part of the key is only the latitude and
+                // longitude. The language that shapes the resolved name is
+                // already part of the provider settings hash.
+                let input_hash = sha256(&[b"geocode", &lat_bytes, &lon_bytes]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Geocode,
                     settings: g.clone(),
@@ -1716,28 +1710,24 @@ pub async fn plan_provider_jobs(
             if let Some(desc) = description_settings(cfg, &f.kind) {
                 // Photos and videos (via an extracted frame) with an
                 // image-capable backend (ollama) get pixels analyzed; other
-                // kinds stay text/filename-only. The vision bit joins the
-                // cache key so a cached text-only guess is never
-                // served for a vision job (and vice versa), and a photo's or
-                // video's content hash binds the entry to the pixels, not just
-                // the path.
+                // kinds stay text/filename-only.
                 let vision = matches!(f.kind, AssetKind::Photo | AssetKind::Video)
                     && desc.backend == "ollama";
-                let mut parts: Vec<&[u8]> = vec![
+                // A description is a property of the content, not the name:
+                // the path is only a hint in the prompt, so the cache key is
+                // the content identity (the full hash when deduplication
+                // computed one, else the large-file fast-path fingerprint).
+                // Identical content at different paths therefore shares one
+                // entry. The vision/text bit keeps a cached text-only guess
+                // from ever being served for a vision job (and vice versa).
+                let content = f.content_hash().unwrap_or_else(|| {
+                    sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()])
+                });
+                let input_hash = sha256(&[
                     b"describe",
                     if vision { b"vision" } else { b"text" },
-                    f.path.as_os_str().as_encoded_bytes(),
-                ];
-                let mut hash_owned: Vec<u8> = Vec::new();
-                if vision {
-                    if let Some(h) = f.full_hash {
-                        hash_owned.extend_from_slice(&h);
-                    }
-                }
-                if vision {
-                    parts.push(hash_owned.as_slice());
-                }
-                let input_hash = sha256(&parts);
+                    &content,
+                ]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Description,
                     settings: desc,
@@ -1770,7 +1760,13 @@ pub async fn plan_provider_jobs(
                 .is_empty()
         {
             if let Some(desc) = description_settings(cfg, &f.kind) {
-                let input_hash = sha256(&[b"author", f.path.as_os_str().as_encoded_bytes()]);
+                // The author answer is a property of the content, not the
+                // name, so the key follows the same content identity as the
+                // description (the path is only a hint in the request).
+                let content = f.content_hash().unwrap_or_else(|| {
+                    sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()])
+                });
+                let input_hash = sha256(&[b"author", &content]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Author,
                     settings: desc,
@@ -1906,6 +1902,7 @@ mod tests {
             modified: SystemTime::now(),
             created: None,
             full_hash: None,
+            fast_hash: None,
             provenance,
             extracted_date: None,
             date_source: "",
@@ -2902,6 +2899,7 @@ mod tests {
             modified: SystemTime::now(),
             created: None,
             full_hash: None,
+            fast_hash: None,
             provenance: Default::default(),
             extracted_date: None,
             date_source: "",
@@ -2992,6 +2990,124 @@ mod tests {
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
         assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn description_key_is_content_keyed_not_path_keyed() {
+        let cfg: RawConfig = toml::from_str("[description]\nenabled = true\n").unwrap();
+        let dir = tmp_dir("content-key");
+        let mut a = file_at(&dir, "a.pdf", AssetKind::Document, None, None);
+        let mut b = file_at(&dir, "b.pdf", AssetKind::Document, None, None);
+        let mut c = file_at(&dir, "c.pdf", AssetKind::Document, None, None);
+        a.full_hash = Some([7u8; 32]);
+        // Same content identity via the large-file fast-path fallback.
+        b.fast_hash = Some([7u8; 32]);
+        c.full_hash = Some([8u8; 32]);
+        let analysis = Arc::new(Analysis {
+            files: vec![a, b, c],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 3);
+        let key = |j: &ProviderJob| {
+            cache_key(
+                j.kind.kind_tag(),
+                &j.settings.provider_id,
+                &j.settings.settings_hash,
+                &j.input_hash,
+            )
+        };
+        // Identical content at different paths shares one cache key.
+        assert_eq!(key(&jobs[0]), key(&jobs[1]));
+        // Different content yields a different key.
+        assert_ne!(key(&jobs[0]), key(&jobs[2]));
+    }
+
+    #[tokio::test]
+    async fn author_key_is_content_keyed_not_path_keyed() {
+        let cfg: RawConfig = toml::from_str("[description]\nenabled = true\n").unwrap();
+        let dir = tmp_dir("author-key");
+        let mut a = file_at(&dir, "a.pdf", AssetKind::Document, None, None);
+        let mut b = file_at(&dir, "b.pdf", AssetKind::Document, None, None);
+        a.full_hash = Some([4u8; 32]);
+        b.full_hash = Some([4u8; 32]);
+        let analysis = Arc::new(Analysis {
+            files: vec![a, b],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%a/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|j| j.kind == ProviderKind::Author));
+        // Identical content at different paths shares one author key.
+        assert_eq!(jobs[0].input_hash, jobs[1].input_hash);
+    }
+
+    #[tokio::test]
+    async fn geocode_key_is_coordinate_keyed() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+            language = "en"
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("coord-key");
+        let a = file_at(&dir, "a.jpg", AssetKind::Photo, Some(48.8566), Some(2.3522));
+        let b = file_at(&dir, "b.jpg", AssetKind::Photo, Some(48.8566), Some(2.3522));
+        let c = file_at(&dir, "c.jpg", AssetKind::Photo, Some(35.0), Some(139.0));
+        let analysis = Arc::new(Analysis {
+            files: vec![a, b, c],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%l/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 3);
+        // The same coordinate is the same content key regardless of path.
+        assert_eq!(jobs[0].input_hash, jobs[1].input_hash);
+        assert_ne!(jobs[0].input_hash, jobs[2].input_hash);
+
+        // Language no longer enters the content hash, but still changes the
+        // overall key through the provider settings hash because the
+        // provider resolves names in the requested language.
+        let fr: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+            language = "fr"
+            "#,
+        )
+        .unwrap();
+        let fr_jobs = plan_provider_jobs(&fr, &analysis, &formats, 1).await;
+        assert_eq!(fr_jobs[0].input_hash, jobs[0].input_hash);
+        assert_ne!(
+            fr_jobs[0].settings.settings_hash,
+            jobs[0].settings.settings_hash
+        );
     }
 
     #[tokio::test]

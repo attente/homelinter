@@ -55,6 +55,11 @@ pub struct AnalyzedFile {
     /// large-file threshold and for every large-file fast-path collision
     /// that needed confirmation. `None` for large files that never collided.
     pub full_hash: Option<[u8; 32]>,
+    /// Large-file fast-path SHA-256 (first 1 MiB + last 1 MiB + size) when
+    /// the file was at or above the large-file threshold. A content
+    /// fingerprint used as the provider cache identity when no full hash
+    /// was needed for deduplication; it never establishes a duplicate group.
+    pub fast_hash: Option<[u8; 32]>,
     pub provenance: Provenance,
     /// Date extracted from the filename (or embedded metadata), before the
     /// modification-time fallback.
@@ -97,6 +102,13 @@ impl AnalyzedFile {
             .as_deref()
             .map(str::trim)
             .filter(|title| !title.is_empty())
+    }
+
+    /// Content identity for provider cache keys: the full-content hash when
+    /// deduplication computed one, otherwise the large-file fast-path
+    /// fingerprint. `None` only when the file could not be read at all.
+    pub fn content_hash(&self) -> Option<[u8; 32]> {
+        self.full_hash.or(self.fast_hash)
     }
 }
 
@@ -227,6 +239,7 @@ pub fn analyze(
                 modified: f.modified,
                 created: f.created,
                 full_hash: None,
+                fast_hash: None,
                 provenance: prov,
                 extracted_date: date,
                 date_source: source,
@@ -313,7 +326,13 @@ fn dedup_groups(
                 return None;
             }
             let result = if f.size >= threshold && f.size > 0 {
-                hash::hash_file_fast(&f.path, f.size).ok().map(|h| (h, true))
+                match hash::hash_file_fast(&f.path, f.size) {
+                    Ok(h) => {
+                        f.fast_hash = Some(h);
+                        Some((h, true))
+                    }
+                    Err(_) => None,
+                }
             } else {
                 match hash::hash_file_full(&f.path) {
                     Ok(h) => {

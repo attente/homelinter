@@ -625,6 +625,7 @@ mod tests {
             modified: std::time::SystemTime::now(),
             created: None,
             full_hash: None,
+            fast_hash: None,
             provenance: Provenance::default(),
             extracted_date: None,
             date_source: "",

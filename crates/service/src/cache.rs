@@ -14,7 +14,10 @@ use rusqlite::{params, Connection, OpenFlags};
 
 use homelinter_model::config::app_data_dir;
 
-pub const SCHEMA_VERSION: &str = "1";
+/// Bumped whenever the key construction or value contract changes in a way
+/// that makes existing entries unreachable or unsafe to serve, so the cache
+/// is rebuilt rather than left with orphaned rows.
+pub const SCHEMA_VERSION: &str = "2";
 
 /// Cache kinds accepted by the schema. Scaffold code stores nothing in
 /// `entries` until providers are wired; the table is created and the
