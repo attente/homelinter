@@ -7,8 +7,6 @@
 //! accepted, and a filename-derived date never overrides a higher-priority
 //! source (that ordering is enforced by the suggestion builder).
 
-use std::time::SystemTime;
-
 /// Parse a full calendar date from a tag-style string (ID3 `TDRC`,
 /// Vorbis `DATE`, bulk XML `dc:date`). Only strings that name a month and
 /// a day are accepted: a year-only value carries no month/day and is left
@@ -67,23 +65,6 @@ pub struct DateParts {
 }
 
 impl DateParts {
-    /// Convert to a `SystemTime` for fallback comparisons.
-    pub fn to_system_time(&self) -> Option<SystemTime> {
-        use chrono::TimeZone;
-        let local = chrono::Local;
-        local
-            .with_ymd_and_hms(
-                self.year,
-                self.month,
-                self.day,
-                self.hour,
-                self.minute,
-                self.second,
-            )
-            .single()
-            .map(|dt| dt.into())
-    }
-
     pub fn valid_year(y: i32) -> bool {
         (1970..=2100).contains(&y)
     }

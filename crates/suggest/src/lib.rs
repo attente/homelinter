@@ -238,14 +238,33 @@ fn build_move_suggestion(
         collect_dependents(&f.path, &canonical, &new_path, links, by_canon)
     };
     let mut metadata = BTreeMap::new();
+    // Always report where the rendered date comes from, including the
+    // filesystem modification-time fallback, so the metadata tab can answer
+    // "what does this time mean?" for every managed file. EXIF dates are a
+    // zone-less wall clock; `date_offset` records the zone when the file
+    // carries one, but the filename always keeps the wall clock verbatim.
+    let date_source = if f.date_source.is_empty() {
+        "filesystem"
+    } else {
+        f.date_source
+    };
+    metadata.insert(
+        "date_source".into(),
+        serde_json::Value::String(date_source.into()),
+    );
     if let Some(dp) = &f.extracted_date {
         metadata.insert(
             "extracted_date".into(),
-            serde_json::Value::String(format!("{:04}-{:02}-{:02}", dp.year, dp.month, dp.day)),
+            serde_json::Value::String(format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                dp.year, dp.month, dp.day, dp.hour, dp.minute, dp.second
+            )),
         );
+    }
+    if let Some(offset) = &f.date_offset {
         metadata.insert(
-            "date_source".into(),
-            serde_json::Value::String(f.date_source.into()),
+            "date_offset".into(),
+            serde_json::Value::String(offset.clone()),
         );
     }
     if f.size > 0 {
@@ -629,6 +648,7 @@ mod tests {
             provenance: Provenance::default(),
             extracted_date: None,
             date_source: "",
+            date_offset: None,
             embedded_title: None,
             embedded_author: None,
             camera_model: None,
@@ -697,5 +717,54 @@ mod tests {
         // `unknown` is no answer, so `%t` and `%s` use the stem.
         assert_eq!(file_values(&f).title.as_deref(), Some("Quarterly Report"));
         assert_eq!(file_values(&f).subject.as_deref(), Some("Quarterly Report"));
+    }
+
+    #[test]
+    fn metadata_reports_date_and_zone_provenance() {
+        let fmt = FormatString::parse("Archives/%Y/%f").unwrap();
+        let home = Path::new("/home/user");
+        let symlinks = SymlinkIndex::default();
+
+        // No embedded or filename date: the suggestion falls back to the
+        // filesystem modification time, and the metadata says so rather
+        // than leaving the rendered date unexplained.
+        let filesystem = analyzed("/tmp/archive.zip");
+        let s = rebuild_move_suggestion(&filesystem, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.metadata.get("date_source").and_then(|v| v.as_str()),
+            Some("filesystem")
+        );
+        assert!(!s.metadata.contains_key("extracted_date"));
+
+        // An embedded date keeps the camera's zone-less wall clock verbatim
+        // and reports the recorded offset alongside it.
+        let mut embedded = analyzed("/tmp/IMG_0001.jpg");
+        embedded.extracted_date = Some(homelinter_analyze::DateParts {
+            year: 2024,
+            month: 3,
+            day: 15,
+            hour: 15,
+            minute: 30,
+            second: 45,
+        });
+        embedded.date_source = "embedded";
+        embedded.date_offset = Some("+09:00".into());
+        let s = rebuild_move_suggestion(&embedded, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.metadata.get("date_source").and_then(|v| v.as_str()),
+            Some("embedded")
+        );
+        assert_eq!(
+            s.metadata.get("extracted_date").and_then(|v| v.as_str()),
+            Some("2024-03-15 15:30:45")
+        );
+        assert_eq!(
+            s.metadata.get("date_offset").and_then(|v| v.as_str()),
+            Some("+09:00")
+        );
     }
 }

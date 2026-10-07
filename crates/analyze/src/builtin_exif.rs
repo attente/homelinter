@@ -51,6 +51,10 @@ impl MetadataExtractor for BuiltinExifExtractor {
 
         let date = field(Tag::DateTimeOriginal).or_else(|| field(Tag::DateTime));
         meta.date_taken = date.and_then(|f| parse_exif_datetime(&value_text(&f.value)));
+        meta.date_offset = field(Tag::OffsetTimeOriginal)
+            .or_else(|| field(Tag::OffsetTimeDigitized))
+            .or_else(|| field(Tag::OffsetTime))
+            .and_then(|f| ascii_text(&f.value));
 
         meta.title = field(Tag::ImageDescription).and_then(|f| ascii_text(&f.value));
         meta.author = field(Tag::Artist).and_then(|f| ascii_text(&f.value));

@@ -53,6 +53,7 @@ function previewKind(path: string): 'image' | 'video' | 'audio' | 'pdf' | 'text'
 const META_LABELS: Record<string, string> = {
   extracted_date: 'Date taken',
   date_source: 'Date source',
+  date_offset: 'UTC offset',
   size: 'Size (bytes)',
   bitrate_kbps: 'Bitrate (kbps)',
   duration_secs: 'Duration (s)',

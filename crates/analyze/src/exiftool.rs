@@ -143,6 +143,9 @@ fn tag_args() -> Vec<&'static str> {
         "-CreateDate",
         "-TrackCreateDate",
         "-MediaCreateDate",
+        "-OffsetTimeOriginal",
+        "-OffsetTimeDigitized",
+        "-OffsetTime",
         "-GPSLatitude",
         "-GPSLatitudeRef",
         "-GPSLongitude",
@@ -225,6 +228,11 @@ fn parse_row(row: &serde_json::Map<String, Value>) -> EmbeddedMeta {
         .or_else(|| s("TrackCreateDate"))
         .or_else(|| s("MediaCreateDate"));
     meta.date_taken = date.as_deref().and_then(parse_exif_datetime);
+    meta.date_offset = s("OffsetTimeOriginal")
+        .or_else(|| s("OffsetTimeDigitized"))
+        .or_else(|| s("OffsetTime"))
+        .map(|o| o.trim().to_string())
+        .filter(|o| !o.is_empty());
     meta.title = s("XPTitle")
         .or_else(|| s("Title"))
         .or_else(|| s("ImageDescription"))
@@ -272,6 +280,31 @@ mod tests {
             signed_coordinate(Some(lon), Some(""), 'W', 'E'),
             true
         ));
+    }
+
+    #[test]
+    fn parse_row_reads_capture_offset() {
+        // `OffsetTimeOriginal` is the capture-time offset and wins over the
+        // generic `OffsetTime` when both are present.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "DateTimeOriginal": "2024:03:15 15:30:45",
+                "OffsetTimeOriginal": "+09:00",
+                "OffsetTime": "+08:00"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&row);
+        assert_eq!(
+            meta.date_taken.map(|d| (d.year, d.month, d.day, d.hour)),
+            Some((2024, 3, 15, 15))
+        );
+        assert_eq!(meta.date_offset.as_deref(), Some("+09:00"));
+
+        // A blank offset is no offset.
+        let row: serde_json::Map<String, Value> =
+            serde_json::from_str(r#"{ "OffsetTime": "  " }"#).unwrap();
+        assert_eq!(parse_row(&row).date_offset, None);
     }
 
     #[test]

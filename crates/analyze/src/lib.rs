@@ -64,8 +64,15 @@ pub struct AnalyzedFile {
     /// Date extracted from the filename (or embedded metadata), before the
     /// modification-time fallback.
     pub extracted_date: Option<DateParts>,
-    /// Where the extracted date came from ("filename", or absent).
+    /// Where the extracted date came from: "embedded" (photo/video
+    /// metadata), "filename", or empty when neither exists and the
+    /// suggestion falls back to the filesystem modification time.
     pub date_source: &'static str,
+    /// UTC offset of the embedded date when the file records one (EXIF
+    /// `OffsetTimeOriginal` and friends, e.g. `+09:00`). Kept for
+    /// inspection and internal ordering; the filename keeps the zone-less
+    /// wall clock exactly as the camera wrote it.
+    pub date_offset: Option<String>,
     /// Embedded title metadata when an extractor provided one.
     pub embedded_title: Option<String>,
     /// Embedded author/artist when an extractor provided one (EXIF Artist),
@@ -254,6 +261,7 @@ pub fn analyze(
                 provenance: prov,
                 extracted_date: date,
                 date_source: source,
+                date_offset: meta.date_offset.clone(),
                 embedded_title: meta.title.clone(),
                 embedded_author: meta.author.clone(),
                 camera_model: meta.camera.clone(),

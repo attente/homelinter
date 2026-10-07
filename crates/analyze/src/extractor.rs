@@ -38,6 +38,12 @@ pub struct ExtractionContext {
 pub struct EmbeddedMeta {
     /// Date taken (photos: `DateTimeOriginal`, fallback `DateTime`).
     pub date_taken: Option<DateParts>,
+    /// UTC offset of the capture time when the file records one (EXIF
+    /// `OffsetTimeOriginal`, fallback `OffsetTimeDigitized`/`OffsetTime`),
+    /// e.g. `+09:00`. The EXIF date itself is a zone-less wall clock, so an
+    /// offset is the only way to recover the absolute instant; it is kept
+    /// for inspection and internal ordering and never rewrites the filename.
+    pub date_offset: Option<String>,
     /// Title (photos: XPTitle, fallback ImageDescription).
     pub title: Option<String>,
     /// Author / artist (photos: EXIF Artist).
@@ -98,6 +104,9 @@ pub trait MetadataExtractor: Send + Sync {
 pub fn merge_meta(acc: &mut EmbeddedMeta, m: &EmbeddedMeta) {
     if acc.date_taken.is_none() {
         acc.date_taken = m.date_taken;
+    }
+    if acc.date_offset.is_none() {
+        acc.date_offset = m.date_offset.clone();
     }
     if acc.title.is_none() {
         acc.title = m.title.clone();
