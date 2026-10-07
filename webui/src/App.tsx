@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, resolveApiError } from "./api";
+import { api, resolveApiError, SelectionFilter } from "./api";
 import { Browse } from "./components/Browse";
 import { ConfigView } from "./components/ConfigView";
 import { Header } from "./components/Header";
@@ -8,6 +8,7 @@ import { ScanForm, ScanFormValues } from "./components/ScanForm";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
+import { Filter, matchesFilter } from "./lib/filter";
 import { elapsedLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
@@ -39,6 +40,16 @@ interface AppState {
 
 const POLL_MS = 2000;
 
+/** Map the SPA's filter view onto the service's selection-filter body;
+ *  `all` becomes an omitted (unconstrained) field. */
+function toApiFilter(f: Filter): SelectionFilter {
+  return {
+    type: f.type === "all" ? undefined : f.type,
+    asset_kind: f.kind === "all" ? undefined : f.kind,
+    status: f.status === "all" ? undefined : f.status,
+  };
+}
+
 export default function App() {
   const [st, setSt] = useState<AppState>({
     phase: "idle",
@@ -58,6 +69,58 @@ export default function App() {
   const sseRef = useRef<EventSourceClient | null>(null);
   const stRef = useRef(st);
   stRef.current = st;
+
+  // Provider metadata resolves one suggestion at a time over SSE. Buffer
+  // those deltas and apply them once per animation frame so a large batch
+  // does not trigger one state update (and one full-list reconcile) per row.
+  const pendingUpdatesRef = useRef<Map<string, Suggestion>>(new Map());
+  const pendingRemovalsRef = useRef<Set<string>>(new Set());
+  const flushScheduledRef = useRef(false);
+
+  const flushSuggestionEvents = useCallback(() => {
+    flushScheduledRef.current = false;
+    const updates = pendingUpdatesRef.current;
+    const removals = pendingRemovalsRef.current;
+    if (updates.size === 0 && removals.size === 0) return;
+    pendingUpdatesRef.current = new Map();
+    pendingRemovalsRef.current = new Set();
+    setSt((prev) => {
+      let changed = false;
+      let next = prev.suggestions;
+      if (updates.size > 0) {
+        const unmatched = new Set(updates.keys());
+        next = next.map((s) => {
+          const item = updates.get(s.id);
+          if (!item) return s;
+          unmatched.delete(s.id);
+          if (item === s) return s;
+          changed = true;
+          return item;
+        });
+        for (const id of unmatched) {
+          const item = updates.get(id);
+          if (item) next.push(item);
+          changed = true;
+        }
+      }
+      if (removals.size > 0 && next.some((s) => removals.has(s.id))) {
+        next = next.filter((s) => !removals.has(s.id));
+        changed = true;
+      }
+      return changed ? { ...prev, suggestions: next } : prev;
+    });
+  }, []);
+
+  const scheduleSuggestionFlush = useCallback(() => {
+    if (flushScheduledRef.current) return;
+    flushScheduledRef.current = true;
+    requestAnimationFrame(flushSuggestionEvents);
+  }, [flushSuggestionEvents]);
+
+  const dropPendingSuggestionEvents = useCallback(() => {
+    if (pendingUpdatesRef.current.size > 0) pendingUpdatesRef.current = new Map();
+    if (pendingRemovalsRef.current.size > 0) pendingRemovalsRef.current = new Set();
+  }, []);
 
   const patch = useCallback((p: Partial<AppState>) => {
     setSt((prev) => ({ ...prev, ...p }));
@@ -81,10 +144,11 @@ export default function App() {
   }, []);
 
   const refreshSuggestions = useCallback(async (): Promise<Suggestion[]> => {
+    dropPendingSuggestionEvents();
     const list = await api.suggestions();
     setSt((prev) => ({ ...prev, suggestions: list.items }));
     return list.items;
-  }, []);
+  }, [dropPendingSuggestionEvents]);
 
   const enterBrowse = useCallback(async () => {
     try {
@@ -191,6 +255,7 @@ export default function App() {
           }
           break;
         case "suggestion.batch":
+          dropPendingSuggestionEvents();
           setSt((prev) => ({
             ...prev,
             suggestions: (d.items as Suggestion[]) ?? [],
@@ -199,23 +264,17 @@ export default function App() {
         case "suggestion.updated": {
           const item = d.item as Suggestion | undefined;
           if (item) {
-            setSt((prev) => {
-              const idx = prev.suggestions.findIndex((s) => s.id === item.id);
-              const next = [...prev.suggestions];
-              if (idx >= 0) next[idx] = item;
-              else next.push(item);
-              return { ...prev, suggestions: next };
-            });
+            pendingUpdatesRef.current.set(item.id, item);
+            scheduleSuggestionFlush();
           }
           break;
         }
         case "suggestion.removed": {
           const id = String(d.id ?? "");
           if (id) {
-            setSt((prev) => ({
-              ...prev,
-              suggestions: prev.suggestions.filter((s) => s.id !== id),
-            }));
+            pendingRemovalsRef.current.add(id);
+            pendingUpdatesRef.current.delete(id);
+            scheduleSuggestionFlush();
           }
           break;
         }
@@ -293,7 +352,7 @@ export default function App() {
           break;
       }
     },
-    [enterBrowse, fetchExecution, pushToast],
+    [dropPendingSuggestionEvents, enterBrowse, fetchExecution, pushToast, scheduleSuggestionFlush],
   );
 
   const poll = useCallback(async () => {
@@ -392,28 +451,44 @@ export default function App() {
     [pushToast, refreshSuggestions],
   );
 
-  const selectMany = useCallback(
-    async (ids: string[]) => {
+  const selectAll = useCallback(
+    (filter: Filter) => {
       setSt((prev) => ({
         ...prev,
-        suggestions: prev.suggestions.map((s) => ({
-          ...s,
-          selected: ids.includes(s.id),
-        })),
+        suggestions: prev.suggestions.map((s) =>
+          !s.selected && matchesFilter(s, filter)
+            ? { ...s, selected: true }
+            : s,
+        ),
       }));
-      try {
-        await api.selectionPut(ids);
-      } catch (e: unknown) {
-        pushToast(`selection update failed: ${resolveApiError(e)}`);
-        await refreshSuggestions();
-      }
+      void (async () => {
+        try {
+          await api.selectionAddFilter(toApiFilter(filter));
+        } catch (e: unknown) {
+          pushToast(`selection update failed: ${resolveApiError(e)}`);
+          await refreshSuggestions();
+        }
+      })();
     },
     [pushToast, refreshSuggestions],
   );
 
   const clearSelection = useCallback(() => {
-    void selectMany([]);
-  }, [selectMany]);
+    setSt((prev) => ({
+      ...prev,
+      suggestions: prev.suggestions.map((s) =>
+        s.selected ? { ...s, selected: false } : s,
+      ),
+    }));
+    void (async () => {
+      try {
+        await api.selectionPut([]);
+      } catch (e: unknown) {
+        pushToast(`selection update failed: ${resolveApiError(e)}`);
+        await refreshSuggestions();
+      }
+    })();
+  }, [pushToast, refreshSuggestions]);
 
   const startRun = useCallback(
     async (ids: string[]) => {
@@ -645,8 +720,8 @@ export default function App() {
           suggestions={st.suggestions}
           actionsDisabled={!canAct}
           root={st.session?.scan_root ?? null}
-          onToggle={(id, sel) => void toggle(id, sel)}
-          onSelectMany={(ids) => void selectMany(ids)}
+          onToggle={toggle}
+          onSelectAll={selectAll}
           onClearSelection={clearSelection}
           onRun={() => void run()}
           onExport={() => void exportPlan()}

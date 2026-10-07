@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ALL_FILTER,
   Filter,
@@ -24,7 +25,7 @@ interface BrowseProps {
   actionsDisabled?: boolean;
   root?: string | null;
   onToggle: (id: string, select: boolean) => void;
-  onSelectMany: (ids: string[]) => void;
+  onSelectAll: (filter: Filter) => void;
   onClearSelection: () => void;
   onRun: () => void;
   onExport: () => void;
@@ -216,10 +217,52 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
   );
 }
 
+// Virtualization needs a stable row height. Rows are a single ellipsized
+// line (see `.list-row`/`.row-hit` in styles.css), so a fixed size is exact
+// and avoids per-row measurement.
+const ROW_HEIGHT = 29;
+
+interface SuggestionRowProps {
+  suggestion: Suggestion;
+  root: string | null;
+  onToggle: (id: string, select: boolean) => void;
+  onOpen: (id: string) => void;
+}
+
+/** One list row. Memoized so a checkbox toggle or a single provider-metadata
+ *  update only reconciles the rows whose props actually changed. */
+const SuggestionRow = memo(function SuggestionRow({
+  suggestion,
+  root,
+  onToggle,
+  onOpen,
+}: SuggestionRowProps) {
+  return (
+    <>
+      <input
+        type="checkbox"
+        className="row-check"
+        checked={suggestion.selected}
+        onChange={() => onToggle(suggestion.id, !suggestion.selected)}
+        aria-label="select"
+      />
+      <button
+        type="button"
+        className="row-hit"
+        onClick={() => onOpen(suggestion.id)}
+      >
+        {suggestion.metadata_pending && <span className="spinner" aria-hidden="true" />}
+        {rowText(suggestion, root)}
+      </button>
+    </>
+  );
+});
+
 export function Browse(props: BrowseProps) {
-  const { suggestions, actionsDisabled, root, onToggle, onSelectMany, onClearSelection, onRun, onExport } = props;
+  const { suggestions, actionsDisabled, root, onToggle, onSelectAll, onClearSelection, onRun, onExport } = props;
   const [filter, setFilter] = useState<Filter>(ALL_FILTER);
   const [openId, setOpenId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLElement | null>(null);
 
   const kinds = useMemo(() => uniqueKinds(suggestions), [suggestions]);
   const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
@@ -231,6 +274,16 @@ export function Browse(props: BrowseProps) {
     () => suggestions.find((s) => s.id === openId) ?? null,
     [suggestions, openId],
   );
+
+  // Only the rows in and around the viewport are mounted, so a 160k-
+  // suggestion batch never becomes a 160k-row DOM tree.
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    getItemKey: (index) => filtered[index].id,
+    overscan: 12,
+  });
 
   return (
     <main className="browse">
@@ -262,7 +315,7 @@ export function Browse(props: BrowseProps) {
           </button>
         </div>
         <div className="toolbar">
-          <button type="button" onClick={() => onSelectMany(filtered.map((s) => s.id))}>
+          <button type="button" onClick={() => onSelectAll(filter)}>
             select all
           </button>
           <button type="button" onClick={() => onClearSelection()}>
@@ -288,29 +341,42 @@ export function Browse(props: BrowseProps) {
         </div>
       </div>
       <div className="browse-panes">
-        <section className="list-pane">
-          <ul className="suggest-list">
-            {filtered.map((s) => (
-              <li key={s.id} className={`list-row${openId === s.id ? ' row-open' : ''}`}>
-                <input
-                  type="checkbox"
-                  className="row-check"
-                  checked={s.selected}
-                  onChange={() => onToggle(s.id, !s.selected)}
-                  aria-label="select"
-                />
-                <button
-                  type="button"
-                  className="row-hit"
-                  onClick={() => setOpenId(s.id)}
-                >
-                  {s.metadata_pending && <span className="spinner" aria-hidden="true" />}
-                  {rowText(s, root)}
-                </button>
-              </li>
-            ))}
-            {filtered.length === 0 && <li className="empty">no suggestions match this filter</li>}
-          </ul>
+        <section className="list-pane" ref={scrollRef}>
+          {filtered.length === 0 ? (
+            <ul className="suggest-list">
+              <li className="empty">no suggestions match this filter</li>
+            </ul>
+          ) : (
+            <ul
+              className="suggest-list"
+              style={{ height: virtualizer.getTotalSize() }}
+            >
+              {virtualizer.getVirtualItems().map((v) => {
+                const s = filtered[v.index];
+                return (
+                  <li
+                    key={s.id}
+                    className={`list-row${openId === s.id ? ' row-open' : ''}`}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: v.size,
+                      transform: `translateY(${v.start}px)`,
+                    }}
+                  >
+                    <SuggestionRow
+                      suggestion={s}
+                      root={root ?? null}
+                      onToggle={onToggle}
+                      onOpen={setOpenId}
+                    />
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </section>
         {openSuggestion && (
           <DetailPane

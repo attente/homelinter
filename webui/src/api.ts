@@ -68,6 +68,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Filter body accepted by the selection endpoints; omitted fields are
+ *  unconstrained, so an empty object matches every suggestion. */
+export interface SelectionFilter {
+  type?: string;
+  asset_kind?: string;
+  status?: string;
+  selected?: boolean;
+}
+
 export const api = {
   async health(): Promise<void> {
     await request<void>("/health");
@@ -115,6 +124,16 @@ export const api = {
     await request<void>("/selection/add", {
       method: "POST",
       body: JSON.stringify({ ids }),
+    });
+  },
+
+  /** Add every suggestion matching `filter` to the selection, without
+   *  shipping the ids (see DESIGN.md "Service API > Suggestions &
+   *  Selection"). */
+  async selectionAddFilter(filter: SelectionFilter): Promise<void> {
+    await request<void>("/selection/add", {
+      method: "POST",
+      body: JSON.stringify({ filter }),
     });
   },
 
