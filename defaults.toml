@@ -1,7 +1,10 @@
-# homelinter configuration template.
-# A working example validated against the current schema by the test in
-# crates/homelinter/tests/template.rs; it must be updated alongside any
-# configuration schema change.
+# homelinter configuration defaults.
+# A faithful dump of the built-in defaults: every key is shown with its
+# effective default value, and loading this file is behaviorally equivalent
+# to running with no configuration file at all. The test in
+# crates/homelinter/tests/template.rs asserts that equivalence and that every
+# key is present, so this file is updated alongside any default change.
+# Copy it and change a value to opt in.
 # Use with: homelinter --config defaults.toml
 # Placeholders: %Y/%y year, %m/%d month/day, %H/%M/%S hour/minute/second,
 # %t title, %a artist/author, %l location, %s description, %c camera,
@@ -11,7 +14,7 @@
 
 [target_paths]
 # Destination per asset kind, relative to $HOME (or absolute). Each value
-# must contain at least one placeholder. Defaults shown for reference:
+# must contain at least one placeholder. These are the built-in defaults:
 document   = "Documents/%a-%t.%e"
 photo      = "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 video      = "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
@@ -23,63 +26,63 @@ executable = "bin/%f"
 other      = "Other/%f"
 
 [geocoder]
-# Reverse geocoding for GPS-tagged photos (%l). Public services are
-# rate-limited (nominatim: 1 req/s). google/mapbox require api_key.
+# Reverse geocoding for GPS-tagged photos (%l). Disabled by default.
 enabled = false
 service = "nominatim"       # nominatim | photon | google | mapbox | custom
 endpoint = "https://nominatim.openstreetmap.org"
-api_key = ""
-language = "en"
-user_agent_contact = ""     # recommended for public services
+# api_key, language, and user_agent_contact are unset by default.
+# api_key is required by google/mapbox and optional for custom; language is
+# an ISO 639-1 code; user_agent_contact is recommended for public services.
+# api_key = ""
+# language = "en"
+# user_agent_contact = ""
 # %l renders the city from the provider's structured address; add a city
 # name here to use the finer neighbourhood level there instead (matched
 # case-insensitively against the provider's city component).
 neighbourhood_cities = []
-# Applies to every service as an additional floor on its built-in pacing
-# (e.g. nominatim 1 req/s -> 1000 ms); custom starts from zero. 0 = none.
-# rate_limit_ms = 0
+# Additional floor on the service's built-in pacing (e.g. nominatim 1 req/s
+# -> 1000 ms); custom starts from zero. 0 = none.
+rate_limit_ms = 0
 
 [description]
 # Content descriptions for %s (and recovered document titles for %t) via an
-# LLM. Requires a reachable provider
-# when enabled; model is required then, api_key only for openrouter.
-# Per-modality overrides ([description.text], [description.image],
-# [description.video], [description.audio]) inherit unset keys from this base
-# section, so an override needs only the key it changes, and enabled = false
-# suppresses descriptions for that modality.
+# LLM. Disabled by default, so no provider is contacted. Per-modality
+# overrides ([description.text], [description.image], [description.video],
+# [description.audio]) inherit unset keys from this base section.
 enabled = false
 service = "ollama"          # ollama | openrouter | custom
 endpoint = "http://localhost:11434"
-model = ""                  # required when enabled = true
-api_key = ""                # optional; sent as Authorization: Bearer
+# model and api_key are unset by default. model is required once enabled;
+# api_key is required by openrouter and sent as Authorization: Bearer.
+# model = ""
+# api_key = ""
 max_words = 4                   # maximum words in the generated description
-# Optional prompt template; placeholder {words} ({{ }} for literal braces).
-# Unset = built-in wording: documents recover the original title first and
-# fall back to at most max_words keywords, other modalities use keywords.
-# The full file path (carrying the filename) and any extracted document text
-# are always included; with text the content comes first and the question
-# last so the model answers the question instead of the document.
-# prompt = "Describe the file in at most {words} words"
+# prompt is unset by default (built-in wording). Placeholder {words}; {{ }}
+# escapes literal braces. The full path (with the filename) and any extracted
+# document text are always included.
+# prompt = ""
 # Longest side in px for photos sent to a vision backend; larger photos are
 # downscaled before the request. 0 = forward original bytes.
-# max_image_dimension = 1024
+max_image_dimension = 1024
 # Cap on representative frames sampled from a video for the vision backend:
 # about one frame per second, evenly distributed across the clip, thinned to
 # at most this many. Must be positive.
-# max_video_frames = 8
+max_video_frames = 8
 # Upper bound on the ollama context window (num_ctx) requested per
 # description; the window is sized from the request payload (images plus
 # prompt and completion budget). Lower it for a small-context model; must be
 # positive.
-# max_context = 32768
+max_context = 32768
 # Minimum milliseconds between requests (description backends have no
 # built-in pacing; requests stay serialized one-in-flight regardless).
-# rate_limit_ms = 0
+rate_limit_ms = 0
 
 [document_extraction]
-# Text extraction before description generation. {path} is the input file;
-# commands run directly, never through a shell. Empty array disables a
-# format. Defaults: pdftotext for pdf, pandoc for docx/odt/epub.
+# Text extraction before description generation. There is no static default:
+# the runtime selects pdftotext for pdf and pandoc for docx/odt/epub when the
+# tool is on the PATH, and otherwise an in-process reader. Set a format key to
+# a command to override it, or to [] to disable extraction for that format.
+# {path} is the input file; commands run directly, never through a shell.
 # pdf  = ["pdftotext", "-layout", "{path}", "-"]
 # docx = ["pandoc", "{path}", "-t", "plain"]
 
@@ -90,12 +93,12 @@ large_file_threshold = 104857600
 [scan]
 # Glob patterns for primary discovery. Patterns with a separator match
 # relative to the scan root; without one, match the filename at any depth.
-exclude_paths = [".cache/**", "build/**", "node_modules/**"]
+exclude_paths = []
 # Extensions excluded from discovery at any depth, without a leading dot and
 # matched case-insensitively (e.g. ["png"] skips a.png and PHOTO.PNG).
-# exclude_extensions = ["png"]
+exclude_extensions = []
 # Windows only: explorer (default) | attribute | dotfiles.
-# hidden_definition = "explorer"
+hidden_definition = "explorer"
 
 [output]
 format = "pretty"           # pretty | json | toml

@@ -294,6 +294,8 @@ The configuration files are merged from lowest to highest precedence with a deep
 
 Resolution is implemented over an injectable search chain (`ConfigChain` in the model crate): the system-wide and per-user files below the explicit file. Production always resolves the host chain; the service accepts a chain override in `ServiceOptions` (like the home and app-data overrides) so embedded and test runs can supply an empty chain, keeping config-file behavior hermetic on hosts that have their own per-user configuration.
 
+The repository-root `defaults.toml` is a faithful dump of the built-in defaults: it lists every configurable key with its effective default value, and loading it is behaviorally equivalent to supplying no configuration file at all. A test asserts both that equivalence and that every key is present, so the dump is updated alongside any default change; keys whose default is unset (API keys, `language`, `user_agent_contact`, `model`, `prompt`) appear commented with the effective value documented.
+
 ### Configuration File Schema
 
 The configuration file is TOML. The supported schema is:

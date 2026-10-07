@@ -1314,7 +1314,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
             "language": raw.geocoder.language,
             "user_agent_contact": raw.geocoder.user_agent_contact,
             "neighbourhood_cities": raw.geocoder.neighbourhood_cities,
-            "rate_limit_ms": raw.geocoder.rate_limit_ms,
+            "rate_limit_ms": raw.geocoder.rate_limit_ms.unwrap_or(0),
         }),
     );
     let mut desc = serde_json::Map::new();
