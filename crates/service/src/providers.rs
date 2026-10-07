@@ -55,8 +55,8 @@ use tokio::sync::Notify;
 use homelinter_analyze::Analysis;
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
-    GeocoderService, RawConfig, DEFAULT_MAX_IMAGE_DIMENSION, DEFAULT_MAX_VIDEO_FRAMES,
-    DEFAULT_MAX_WORDS,
+    GeocoderService, RawConfig, DEFAULT_MAX_CONTEXT, DEFAULT_MAX_IMAGE_DIMENSION,
+    DEFAULT_MAX_VIDEO_FRAMES, DEFAULT_MAX_WORDS,
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
@@ -165,6 +165,9 @@ pub struct ProviderSettings {
     /// Cap on representative frames sampled from a video for a vision
     /// description; `None` uses `DEFAULT_MAX_VIDEO_FRAMES`.
     pub max_video_frames: Option<u64>,
+    /// Upper bound on the context window (`num_ctx`) for an ollama
+    /// description request; `None` uses `DEFAULT_MAX_CONTEXT`.
+    pub max_context: Option<u64>,
     /// Cities whose `%l` uses the finer neighbourhood name instead of the
     /// settlement name (geocode jobs only; empty everywhere else resolves
     /// at the city level).
@@ -985,6 +988,34 @@ async fn mapbox_reverse(
 /// scans instead of paying a cold-load on each first image request.
 const OLLAMA_KEEP_ALIVE: &str = "30m";
 
+/// Context-window sizing for an ollama request. ollama's own default (4096
+/// tokens) is smaller than a multi-frame vision payload: a single 1024 px
+/// image costs roughly 1034 tokens, so the default eight-frame video
+/// request needs about 8.4k tokens and is rejected with HTTP 400 unless
+/// `num_ctx` is raised. The window is sized from the payload (one
+/// conservative allowance per image, plus the prompt and completion
+/// budget), rounded up to a power of two, and capped by the configured
+/// `max_context` to bound KV-cache memory.
+const IMAGE_CONTEXT_TOKENS: u64 = 1600;
+const MIN_OLLAMA_CONTEXT: u64 = 4096;
+
+/// Context window to request for one ollama request: images times the
+/// per-image allowance, plus a rough text estimate and the completion
+/// budget, rounded up to a power of two and clamped to the ollama default
+/// floor and the configured `max_context` cap.
+fn ollama_context_window(images: usize, prompt: &str, budget: u64, max_context: u64) -> u64 {
+    let image_tokens = images as u64 * IMAGE_CONTEXT_TOKENS;
+    // ~4 characters per token is a rough but adequate English estimate; the
+    // floor and margin absorb the error.
+    let text_tokens = prompt.chars().count() as u64 / 4 + 16;
+    let needed = image_tokens + text_tokens + budget + 256;
+    // Preserve ollama's default for a text-only request, but never exceed the
+    // configured cap (which may itself be below the default).
+    needed
+        .next_power_of_two()
+        .clamp(MIN_OLLAMA_CONTEXT.min(max_context), max_context)
+}
+
 /// Tokens reserved for a reasoning model's hidden chain of thought, which
 /// counts against the same completion budget as the answer. Observed
 /// reasoning spans vary widely (hundreds to over a thousand tokens),
@@ -1084,7 +1115,16 @@ async fn ollama_complete(
     // (it counts against `num_predict` too), so a thinking model can reason
     // and still emit an answer in `message.content`; non-thinking models
     // simply stop early.
-    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": budget }, "keep_alive": OLLAMA_KEEP_ALIVE });
+    // ollama's default context (4096) cannot hold a multi-frame vision
+    // payload, so size the window from the request, capped by the configured
+    // `max_context`.
+    let num_ctx = ollama_context_window(
+        images.len(),
+        prompt,
+        budget,
+        s.max_context.unwrap_or(DEFAULT_MAX_CONTEXT),
+    );
+    let body = json!({ "model": s.model.clone().unwrap_or_default(), "messages": [message], "stream": false, "options": { "num_predict": budget, "num_ctx": num_ctx }, "keep_alive": OLLAMA_KEEP_ALIVE });
     let v = post_json(&endpoint, s.api_key.as_deref(), body).await?;
     let raw = first_nonempty_pointer(&v, &["/message/content"])
         .ok_or_else(|| "ollama response has no message content".to_string())?;
@@ -1561,6 +1601,7 @@ pub fn geocoder_settings(cfg: &RawConfig) -> Option<ProviderSettings> {
         prompt: String::new(),
         max_image_dimension: None,
         max_video_frames: None,
+        max_context: None,
         neighbourhood_cities: cfg.geocoder.neighbourhood_cities.clone(),
     })
 }
@@ -1619,6 +1660,7 @@ fn description_settings_for(cfg: &RawConfig, modality: Option<&str>) -> Option<P
         neighbourhood_cities: Vec::new(),
         max_image_dimension: Some(eff.max_image_dimension),
         max_video_frames: Some(eff.max_video_frames),
+        max_context: Some(eff.max_context),
     })
 }
 
@@ -2032,6 +2074,7 @@ mod tests {
                 max_words: None,
                 max_image_dimension: None,
                 max_video_frames: None,
+                max_context: None,
                 prompt: String::new(),
                 neighbourhood_cities: Vec::new(),
             },
@@ -2071,6 +2114,7 @@ mod tests {
                 max_words: Some(8),
                 max_image_dimension: Some(1024),
                 max_video_frames: None,
+                max_context: None,
                 prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
                 neighbourhood_cities: Vec::new(),
             },
@@ -2230,6 +2274,7 @@ mod tests {
             max_words: Some(12),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2319,6 +2364,7 @@ mod tests {
             max_words: Some(8),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2363,6 +2409,7 @@ mod tests {
             max_words: Some(8),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2450,6 +2497,31 @@ mod tests {
         assert!(!vision_without_pixels(&text_doc));
     }
 
+    #[test]
+    fn ollama_context_grows_with_frames_and_text() {
+        let cap = DEFAULT_MAX_CONTEXT;
+        // A text-only request keeps the floor.
+        assert_eq!(
+            ollama_context_window(0, "hi", 1040, cap),
+            MIN_OLLAMA_CONTEXT
+        );
+        // The default eight-frame video request needs 16k (>8.4k prompt plus
+        // the completion budget), where ollama's default 4096 would 400.
+        assert_eq!(ollama_context_window(8, "Path: x", 1040, cap), 16384);
+        // Four frames already overflow the default window.
+        assert_eq!(ollama_context_window(4, "Path: x", 1040, cap), 8192);
+        // A long document grows the window with its text.
+        let doc = "a".repeat(4000 * 4);
+        assert_eq!(ollama_context_window(0, &doc, 1040, cap), 8192);
+        // A pathological input is capped rather than allocating unbounded
+        // KV cache.
+        let huge = "a".repeat(10_000_000);
+        assert_eq!(ollama_context_window(0, &huge, 1040, cap), cap);
+        // A configured cap below the ollama default is honored, even for a
+        // payload that would want more.
+        assert_eq!(ollama_context_window(8, "Path: x", 1040, 2048), 2048);
+    }
+
     #[tokio::test]
     async fn ollama_budgets_for_reasoning_and_strips_inline_reasoning() {
         // A thinking model spends hidden reasoning tokens against
@@ -2486,6 +2558,7 @@ mod tests {
             max_words: Some(4),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: DEFAULT_DOCUMENT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2526,6 +2599,7 @@ mod tests {
             max_words: Some(4),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: DEFAULT_DESCRIPTION_PROMPT.to_string(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2566,6 +2640,7 @@ mod tests {
             max_words: None,
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
             prompt: String::new(),
             neighbourhood_cities: Vec::new(),
         };
@@ -2849,6 +2924,7 @@ mod tests {
             neighbourhood_cities: Vec::new(),
             max_image_dimension: None,
             max_video_frames: None,
+            max_context: None,
         };
         // With extracted text, the document is delimited and placed first
         // and the rendered question last: a trailing document block makes

@@ -67,6 +67,11 @@ max_words = 4                   # maximum words in the generated description
 # about one frame per second, evenly distributed across the clip, thinned to
 # at most this many. Must be positive.
 # max_video_frames = 8
+# Upper bound on the ollama context window (num_ctx) requested per
+# description; the window is sized from the request payload (images plus
+# prompt and completion budget). Lower it for a small-context model; must be
+# positive.
+# max_context = 32768
 # Minimum milliseconds between requests (description backends have no
 # built-in pacing; requests stay serialized one-in-flight regardless).
 # rate_limit_ms = 0

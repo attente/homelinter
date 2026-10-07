@@ -48,6 +48,12 @@ pub const DEFAULT_MAX_IMAGE_DIMENSION: u64 = 1024;
 /// evenly distributed across the clip; a longer video is thinned to this
 /// many frames.
 pub const DEFAULT_MAX_VIDEO_FRAMES: u64 = 8;
+/// Default upper bound on an ollama description request's context window
+/// (`num_ctx`). The window is sized from the payload (images plus prompt and
+/// completion budget), and this cap keeps KV-cache memory bounded. Must be
+/// positive; lower it for a small-context model, raise it to fit larger
+/// inputs.
+pub const DEFAULT_MAX_CONTEXT: u64 = 32768;
 pub const DEFAULT_PROVIDER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 30;
 
@@ -258,6 +264,15 @@ pub struct DescriptionProvider {
     /// re-describes. Must be positive.
     #[serde(default)]
     pub max_video_frames: Option<u64>,
+    /// Upper bound on the context window (`num_ctx`) requested from an
+    /// ollama description backend. The window is sized from the request
+    /// payload, so a multi-frame vision request is not truncated by ollama's
+    /// small default (4096), and this cap bounds KV-cache memory. Unset
+    /// inherits the base entry, then [`DEFAULT_MAX_CONTEXT`]. Must be
+    /// positive; lower it for a small-context model. The value does not join
+    /// the settings hash because it does not change the model's input.
+    #[serde(default)]
+    pub max_context: Option<u64>,
     /// Minimum interval between requests in milliseconds, enforced between
     /// request starts on the provider worker. Description backends have no
     /// built-in pacing; the value only ever adds delay, and requests remain
@@ -279,6 +294,7 @@ pub struct EffectiveDescription {
     pub max_words: u64,
     pub max_image_dimension: u64,
     pub max_video_frames: u64,
+    pub max_context: u64,
     pub rate_limit_ms: u64,
     pub prompt: String,
 }
@@ -305,6 +321,10 @@ impl DescriptionProvider {
                 .max_video_frames
                 .or(base.max_video_frames)
                 .unwrap_or(DEFAULT_MAX_VIDEO_FRAMES),
+            max_context: self
+                .max_context
+                .or(base.max_context)
+                .unwrap_or(DEFAULT_MAX_CONTEXT),
             rate_limit_ms: self.rate_limit_ms.or(base.rate_limit_ms).unwrap_or(0),
             prompt: self
                 .prompt
@@ -860,6 +880,12 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
                 "max_video_frames must be positive".into(),
             ));
         }
+        if eff.max_context == 0 {
+            fields.push((
+                format!("{prefix}.max_context"),
+                "max_context must be positive".into(),
+            ));
+        }
         // `{path}` and `{name}` are intentionally not placeholders: the
         // full source path (which carries the filename) and any extracted
         // text are always included around the rendered template, so a custom
@@ -1295,6 +1321,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         "max_video_frames".into(),
         JsonValue::from(base_eff.max_video_frames),
     );
+    desc.insert("max_context".into(), JsonValue::from(base_eff.max_context));
     desc.insert(
         "rate_limit_ms".into(),
         JsonValue::from(base_eff.rate_limit_ms),
@@ -1312,6 +1339,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 "prompt": eff.prompt,
                 "max_image_dimension": eff.max_image_dimension,
                 "max_video_frames": eff.max_video_frames,
+                "max_context": eff.max_context,
                 "rate_limit_ms": eff.rate_limit_ms,
             }),
         );
@@ -1468,6 +1496,30 @@ mod tests {
         );
         // Zero would sample no frames, so it is a structural error.
         assert!(parse("[description]\nmax_video_frames = 0\n").is_err());
+    }
+
+    #[test]
+    fn max_context_defaults_falls_back_and_must_be_positive() {
+        let rc = parse("").unwrap();
+        assert_eq!(
+            rc.description.base_effective().max_context,
+            DEFAULT_MAX_CONTEXT
+        );
+        // A per-modality override inherits the base entry's cap.
+        let rc = parse(
+            "[description]\nmax_context = 8192\n[description.video]\nenabled = true\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        assert_eq!(rc.description.base_effective().max_context, 8192);
+        assert_eq!(
+            rc.description
+                .effective_for_modality(Some("video"))
+                .max_context,
+            8192
+        );
+        // A zero context window could not hold a request, so it is a
+        // structural error.
+        assert!(parse("[description]\nmax_context = 0\n").is_err());
     }
 
     #[test]

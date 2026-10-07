@@ -53,6 +53,7 @@ fn config_template_loads_and_validates() {
         "max_words",
         "max_image_dimension",
         "max_video_frames",
+        "max_context",
         "rate_limit_ms",
         "prompt",
     ] {
