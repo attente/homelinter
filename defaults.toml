@@ -91,6 +91,9 @@ large_file_threshold = 104857600
 # Glob patterns for primary discovery. Patterns with a separator match
 # relative to the scan root; without one, match the filename at any depth.
 exclude_paths = [".cache/**", "build/**", "node_modules/**"]
+# Extensions excluded from discovery at any depth, without a leading dot and
+# matched case-insensitively (e.g. ["png"] skips a.png and PHOTO.PNG).
+# exclude_extensions = ["png"]
 # Windows only: explorer (default) | attribute | dotfiles.
 # hidden_definition = "explorer"
 

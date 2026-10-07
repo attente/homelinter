@@ -432,6 +432,13 @@ pub enum HiddenDefinition {
 pub struct ScanConfig {
     #[serde(default)]
     pub exclude_paths: Vec<String>,
+    /// Extensions excluded from primary discovery, without a leading dot.
+    /// Matched case-insensitively against the final extension at any depth,
+    /// in addition to `exclude_paths`. Entries are normalized (trimmed,
+    /// dot-stripped, lowercased) before matching; a wildcard or path
+    /// separator is a structural error.
+    #[serde(default)]
+    pub exclude_extensions: Vec<String>,
     #[serde(default)]
     pub hidden_definition: Option<HiddenDefinition>,
 }
@@ -961,6 +968,27 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     }
 
+    // scan.exclude_extensions
+    for (i, ext) in raw.scan.exclude_extensions.iter().enumerate() {
+        let normalized = ext.trim().trim_start_matches('.');
+        if normalized.is_empty() {
+            fields.push((
+                format!("scan.exclude_extensions[{i}]"),
+                "extension must not be empty".into(),
+            ));
+        } else if normalized.contains('/') || normalized.contains('\\') {
+            fields.push((
+                format!("scan.exclude_extensions[{i}]"),
+                "extension must be a bare extension, not a path".into(),
+            ));
+        } else if normalized.contains(['*', '?', '[', ']']) {
+            fields.push((
+                format!("scan.exclude_extensions[{i}]"),
+                "extension must be a literal, not a glob".into(),
+            ));
+        }
+    }
+
     // limits: timeouts and output caps must be positive so limits are never
     // infinite by configuration.
     if raw.limits.provider_timeout_seconds == Some(0) {
@@ -1357,6 +1385,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         "scan".into(),
         serde_json::json!({
             "exclude_paths": raw.scan.exclude_paths,
+            "exclude_extensions": raw.scan.exclude_extensions,
             "hidden_definition": match raw.hidden_definition() {
                 HiddenDefinition::Explorer => "explorer",
                 HiddenDefinition::Attribute => "attribute",
@@ -1459,6 +1488,17 @@ mod tests {
     fn rejects_scan_root_and_hidden() {
         assert!(parse("[scan]\nroot = \"/x\"\n").is_err());
         assert!(parse("[scan]\nhidden = true\n").is_err());
+    }
+
+    #[test]
+    fn scan_exclude_extensions_validate_and_survive_normalization() {
+        // A leading dot and mixed case are accepted; matching normalizes them.
+        let rc = parse("[scan]\nexclude_extensions = [\".PNG\", \"jpg\"]\n").unwrap();
+        assert_eq!(rc.scan.exclude_extensions, vec![".PNG", "jpg"]);
+        // Empty, path-like, and glob entries are structural errors.
+        assert!(parse("[scan]\nexclude_extensions = [\"\"]\n").is_err());
+        assert!(parse("[scan]\nexclude_extensions = [\"a/png\"]\n").is_err());
+        assert!(parse("[scan]\nexclude_extensions = [\"*\"]\n").is_err());
     }
 
     #[test]

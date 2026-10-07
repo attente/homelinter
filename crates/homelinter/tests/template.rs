@@ -56,6 +56,9 @@ fn config_template_loads_and_validates() {
         "max_context",
         "rate_limit_ms",
         "prompt",
+        // [scan]: discovery filters.
+        "exclude_paths",
+        "exclude_extensions",
     ] {
         assert!(
             text.contains(key),

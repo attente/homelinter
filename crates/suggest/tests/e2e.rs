@@ -39,6 +39,7 @@ fn discovery(root: &std::path::Path, hidden: bool) -> DiscoveryOptions {
         hidden,
         hidden_definition: HiddenDefinition::Dotfiles,
         exclude_patterns: vec![],
+        exclude_extensions: vec![],
     }
 }
 

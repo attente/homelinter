@@ -1,5 +1,6 @@
 //! The primary discovery walk.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -82,6 +83,9 @@ pub struct DiscoveryOptions {
     pub hidden_definition: HiddenDefinition,
     /// `scan.exclude_paths` patterns (host globs).
     pub exclude_patterns: Vec<String>,
+    /// `scan.exclude_extensions` entries: bare, case-insensitive extensions
+    /// excluded at any depth in addition to `exclude_patterns`.
+    pub exclude_extensions: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -103,14 +107,21 @@ struct ExcludeSet {
     /// scan root.
     relative_matchers: Vec<GlobMatcher>,
     relative_patterns: Vec<String>,
+    /// Normalized, lowercased extensions excluded at any depth.
+    extensions: BTreeSet<String>,
 }
 
 impl ExcludeSet {
-    fn compile(patterns: &[String]) -> Result<ExcludeSet, DiscoveryError> {
+    fn compile(patterns: &[String], extensions: &[String]) -> Result<ExcludeSet, DiscoveryError> {
         let mut out = ExcludeSet {
             basename_matchers: Vec::new(),
             relative_matchers: Vec::new(),
             relative_patterns: Vec::new(),
+            extensions: extensions
+                .iter()
+                .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect(),
         };
         for raw in patterns {
             let p = raw.trim();
@@ -145,8 +156,26 @@ impl ExcludeSet {
     }
 
     fn excludes_file(&self, rel: &str, name: &str) -> bool {
-        self.excludes_dir(rel, name)
+        if self.excludes_dir(rel, name) {
+            return true;
+        }
+        match final_extension(name) {
+            Some(ext) => self.extensions.contains(&ext),
+            None => false,
+        }
     }
+}
+
+/// The lowercased final extension of a file name, if it has one. A hidden
+/// name like `.png` or a trailing dot yields `None`, matching how the asset
+/// classifier treats extension-free names.
+fn final_extension(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let dot = lower.rfind('.')?;
+    if dot == 0 || dot + 1 >= lower.len() {
+        return None;
+    }
+    Some(lower[dot + 1..].to_string())
 }
 
 fn rel_path(root: &Path, abs: &Path) -> String {
@@ -212,7 +241,7 @@ pub fn discover(
             root.display()
         )));
     }
-    let excludes = ExcludeSet::compile(&opts.exclude_patterns)?;
+    let excludes = ExcludeSet::compile(&opts.exclude_patterns, &opts.exclude_extensions)?;
     let mut out = ScanOutput::default();
     walk_dir(&root, &root, opts, &excludes, cancel, &mut out)?;
     // Deterministic order: repository roots before files keeps reporting
@@ -349,6 +378,7 @@ mod tests {
             hidden: false,
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: Vec::new(),
+            exclude_extensions: Vec::new(),
         };
         let out = discover(&opts, &|| false).unwrap();
         assert_eq!(out.files.len(), 2);
@@ -386,6 +416,7 @@ mod tests {
             hidden: false,
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: vec!["build/**".into(), "*.hs".into()],
+            exclude_extensions: Vec::new(),
         };
         let out = discover(&opts, &|| false).unwrap();
         let names: Vec<String> = out
@@ -396,6 +427,35 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.iter().any(|n| n.ends_with("keep.rs")));
         assert!(names.iter().any(|n| n.ends_with("keep.txt")));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn excludes_by_extension_case_insensitively_at_any_depth() {
+        let root = tmpdir("excl-ext");
+        std::fs::write(root.join("keep.jpg"), "j").unwrap();
+        std::fs::write(root.join("shot.png"), "p").unwrap();
+        std::fs::write(root.join("UPPER.PNG"), "P").unwrap();
+        std::fs::write(root.join(".png"), "hidden").unwrap();
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("sub/deep/icon.Png"), "i").unwrap();
+
+        let opts = DiscoveryOptions {
+            root: root.clone(),
+            hidden: true,
+            hidden_definition: HiddenDefinition::Explorer,
+            exclude_patterns: Vec::new(),
+            exclude_extensions: vec![" .PNG ".into(), "png".into()],
+        };
+        let out = discover(&opts, &|| false).unwrap();
+        let mut names: Vec<String> = out
+            .files
+            .iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![".png", "keep.jpg"]);
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -413,6 +473,7 @@ mod tests {
             hidden: false,
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: Vec::new(),
+            exclude_extensions: Vec::new(),
         };
         let out = discover(&opts, &|| false).unwrap();
         assert_eq!(out.files.len(), 1); // outside.txt only
@@ -435,6 +496,7 @@ mod tests {
             hidden: false,
             hidden_definition: HiddenDefinition::Explorer,
             exclude_patterns: Vec::new(),
+            exclude_extensions: Vec::new(),
         };
         // A probe that fires immediately leaves the walk empty but succeeds.
         let out = discover(&opts, &|| true).unwrap();
@@ -464,6 +526,7 @@ mod tests {
                 hidden: false,
                 hidden_definition: HiddenDefinition::Explorer,
                 exclude_patterns: Vec::new(),
+                exclude_extensions: Vec::new(),
             };
             let out = discover(&opts, &|| false).unwrap();
             // real.txt + sub/inner.txt; empty.txt and symlinks are ignored.
