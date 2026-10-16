@@ -8,7 +8,7 @@ import { ScanForm, ScanFormValues } from "./components/ScanForm";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
-import { ALL_FILTER, Filter, matchesFilter } from "./lib/filter";
+import { ALL_FILTER, Filter, matchesFilter, mergeSuggestionEvents } from "./lib/filter";
 import { elapsedLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
@@ -96,29 +96,13 @@ export default function App() {
     pendingUpdatesRef.current = new Map();
     pendingRemovalsRef.current = new Set();
     setSt((prev) => {
-      let changed = false;
-      let next = prev.suggestions;
-      if (updates.size > 0) {
-        const unmatched = new Set(updates.keys());
-        next = next.map((s) => {
-          const item = updates.get(s.id);
-          if (!item) return s;
-          unmatched.delete(s.id);
-          if (item === s) return s;
-          changed = true;
-          return item;
-        });
-        for (const id of unmatched) {
-          const item = updates.get(id);
-          if (item) next.push(item);
-          changed = true;
-        }
-      }
-      if (removals.size > 0 && next.some((s) => removals.has(s.id))) {
-        next = next.filter((s) => !removals.has(s.id));
-        changed = true;
-      }
-      return changed ? { ...prev, suggestions: next } : prev;
+      const { suggestions, changed } = mergeSuggestionEvents(
+        prev.suggestions,
+        updates,
+        removals,
+        prev.filter,
+      );
+      return changed ? { ...prev, suggestions } : prev;
     });
   }, []);
 
@@ -402,18 +386,20 @@ export default function App() {
           }
           if (v.rejected.length > 0) {
             const reasons = new Map(v.rejected.map((r) => [r.id, r.reason]));
-            setSt((prev) => ({
-              ...prev,
-              suggestions: prev.suggestions.map((s) =>
-                reasons.has(s.id)
-                  ? {
-                      ...s,
-                      status: "rejected" as SuggestionStatus,
-                      rejection_reason: reasons.get(s.id) ?? null,
-                    }
-                  : s,
-              ),
-            }));
+            setSt((prev) => {
+              const next = prev.suggestions
+                .map((s) =>
+                  reasons.has(s.id)
+                    ? {
+                        ...s,
+                        status: "rejected" as SuggestionStatus,
+                        rejection_reason: reasons.get(s.id) ?? null,
+                      }
+                    : s,
+                )
+                .filter((s) => matchesFilter(s, prev.filter));
+              return { ...prev, suggestions: next };
+            });
           }
           break;
         }

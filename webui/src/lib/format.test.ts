@@ -5,6 +5,7 @@ import {
   TYPE_CYCLE,
   cycleNext,
   matchesFilter,
+  mergeSuggestionEvents,
   uniqueKinds,
 } from './filter';
 import {
@@ -60,6 +61,46 @@ describe('filter', () => {
       sampleSuggestion({ asset_kind: '' }),
     ];
     expect(uniqueKinds(items)).toEqual(['audio', 'photo']);
+  });
+
+  it('streamed updates respect the active filter', () => {
+    const filter = { type: 'all' as const, kind: 'all' as const, status: 'pending' as const };
+    const loaded = sampleSuggestion({ id: 's-1', status: 'pending' });
+
+    // A new row that does not match the filter is not appended.
+    const leaked = mergeSuggestionEvents(
+      [loaded],
+      new Map([['s-2', sampleSuggestion({ id: 's-2', status: 'rejected' })]]),
+      new Set(),
+      filter,
+    );
+    expect(leaked.changed).toBe(false);
+    expect(leaked.suggestions.map((s) => s.id)).toEqual(['s-1']);
+
+    // A new row that matches is appended.
+    const appended = mergeSuggestionEvents(
+      [loaded],
+      new Map([['s-3', sampleSuggestion({ id: 's-3', status: 'pending' })]]),
+      new Set(),
+      filter,
+    );
+    expect(appended.changed).toBe(true);
+    expect(appended.suggestions.map((s) => s.id)).toEqual(['s-1', 's-3']);
+
+    // An update that pushes a loaded row out of the filter drops it.
+    const dropped = mergeSuggestionEvents(
+      [loaded],
+      new Map([['s-1', sampleSuggestion({ id: 's-1', status: 'rejected' })]]),
+      new Set(),
+      filter,
+    );
+    expect(dropped.changed).toBe(true);
+    expect(dropped.suggestions).toEqual([]);
+
+    // Removals still apply.
+    const removed = mergeSuggestionEvents([loaded], new Map(), new Set(['s-1']), ALL_FILTER);
+    expect(removed.changed).toBe(true);
+    expect(removed.suggestions).toEqual([]);
   });
 });
 
