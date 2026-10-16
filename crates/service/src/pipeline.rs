@@ -140,7 +140,7 @@ pub async fn start_scan(
             root: root.clone(),
             hidden,
             hidden_definition: cfg.hidden_definition(),
-            exclude_patterns: cfg.scan.exclude_paths.clone(),
+            exclude_patterns: cfg.scan.effective_exclude_paths(),
             exclude_extensions: cfg.scan.exclude_extensions.clone(),
         },
         cfg.duplication.large_file_threshold,

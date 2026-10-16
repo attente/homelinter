@@ -22,6 +22,8 @@ export interface ApiErrorBody {
 export interface ScanDefaults {
   hidden: boolean;
   target_paths: Record<string, string>;
+  /** Built-in directory exclusions, surfaced so the scan form can list them. */
+  default_exclude_paths?: string[];
 }
 
 export interface Session {

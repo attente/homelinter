@@ -433,9 +433,37 @@ pub enum HiddenDefinition {
     Dotfiles,
 }
 
+/// Conventional dependency, cache, and generated-output directories excluded
+/// from primary discovery in addition to the user's `scan.exclude_paths`.
+/// Set `scan.default_exclusions = false` to drop these and use only the
+/// user's patterns.
+pub const DEFAULT_EXCLUDE_PATHS: &[&str] = &[
+    "node_modules",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "target",
+    "build",
+    "dist",
+    ".gradle",
+    ".m2",
+    ".next",
+    ".nuxt",
+    ".terraform",
+    "Pods",
+    "DerivedData",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ScanConfig {
+    /// Extra directory patterns to exclude. They are merged with
+    /// `DEFAULT_EXCLUDE_PATHS` unless `default_exclusions` is `false`, so a
+    /// user who adds one pattern keeps the built-in ones.
     #[serde(default)]
     pub exclude_paths: Vec<String>,
     /// Extensions excluded from primary discovery, without a leading dot.
@@ -445,8 +473,53 @@ pub struct ScanConfig {
     /// separator is a structural error.
     #[serde(default)]
     pub exclude_extensions: Vec<String>,
+    /// Whether `DEFAULT_EXCLUDE_PATHS` apply. Absent means `true`; set it to
+    /// `false` to drop every built-in exclusion and use only `exclude_paths`.
+    #[serde(default)]
+    pub default_exclusions: Option<bool>,
     #[serde(default)]
     pub hidden_definition: Option<HiddenDefinition>,
+}
+
+impl ScanConfig {
+    /// Whether the built-in `DEFAULT_EXCLUDE_PATHS` apply (default `true`).
+    pub fn default_exclusions_enabled(&self) -> bool {
+        self.default_exclusions != Some(false)
+    }
+
+    /// Built-in exclusion names the user re-enabled with `!name` entries.
+    fn opted_out_defaults(&self) -> std::collections::HashSet<&str> {
+        self.exclude_paths
+            .iter()
+            .filter_map(|pattern| pattern.trim().strip_prefix('!'))
+            .collect()
+    }
+
+    /// Effective directory exclusions: the built-in defaults (unless disabled
+    /// or re-enabled by name with `!name`) followed by the user's positive
+    /// patterns, de-duplicated in first-seen order. A `!name` entry cancels
+    /// only a built-in, never a positive pattern.
+    pub fn effective_exclude_paths(&self) -> Vec<String> {
+        let opted_out = self.opted_out_defaults();
+        let mut out: Vec<String> = Vec::new();
+        if self.default_exclusions_enabled() {
+            out.extend(
+                DEFAULT_EXCLUDE_PATHS
+                    .iter()
+                    .filter(|name| !opted_out.contains(**name))
+                    .map(|name| (*name).to_string()),
+            );
+        }
+        out.extend(
+            self.exclude_paths
+                .iter()
+                .filter(|pattern| !pattern.trim().starts_with('!'))
+                .cloned(),
+        );
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|pattern| seen.insert(pattern.clone()));
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -966,11 +1039,29 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
 
     // scan.exclude_paths
     for (i, pat) in raw.scan.exclude_paths.iter().enumerate() {
-        if pat.trim().is_empty() {
+        let trimmed = pat.trim();
+        if trimmed.is_empty() {
             fields.push((
                 format!("scan.exclude_paths[{i}]"),
                 "pattern must not be empty".into(),
             ));
+        } else if let Some(name) = trimmed.strip_prefix('!') {
+            // `!name` re-includes one built-in directory; anything else is a
+            // typo that would silently do nothing, so reject it.
+            if name.is_empty() {
+                fields.push((
+                    format!("scan.exclude_paths[{i}]"),
+                    "'!' must be followed by a built-in exclusion name".into(),
+                ));
+            } else if !DEFAULT_EXCLUDE_PATHS.contains(&name) {
+                fields.push((
+                    format!("scan.exclude_paths[{i}]"),
+                    format!(
+                        "'!{name}' does not match a built-in exclusion; use '!' only to \
+                         re-include one of the built-in directories"
+                    ),
+                ));
+            }
         }
     }
 
@@ -1396,6 +1487,7 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         serde_json::json!({
             "exclude_paths": raw.scan.exclude_paths,
             "exclude_extensions": raw.scan.exclude_extensions,
+            "default_exclusions": raw.scan.default_exclusions_enabled(),
             "hidden_definition": match raw.hidden_definition() {
                 HiddenDefinition::Explorer => "explorer",
                 HiddenDefinition::Attribute => "attribute",
@@ -1484,6 +1576,58 @@ mod tests {
         assert_eq!(rc.description.base_effective().max_words, DEFAULT_MAX_WORDS);
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
+        // The user's list starts empty while the built-in defaults apply.
+        assert!(rc.scan.exclude_paths.is_empty());
+        assert!(rc.scan.default_exclusions_enabled());
+        let effective = rc.scan.effective_exclude_paths();
+        assert_eq!(
+            effective.len(),
+            DEFAULT_EXCLUDE_PATHS.len(),
+            "built-in defaults apply when nothing is configured"
+        );
+    }
+
+    #[test]
+    fn scan_exclusions_merge_with_defaults_and_can_be_disabled() {
+        // A single user pattern keeps the built-in defaults.
+        let rc = parse("[scan]\nexclude_paths = [\"my-cache\"]\n").unwrap();
+        let effective = rc.scan.effective_exclude_paths();
+        assert!(effective.contains(&"my-cache".to_string()));
+        assert!(effective.contains(&"node_modules".to_string()));
+        assert_eq!(effective.len(), DEFAULT_EXCLUDE_PATHS.len() + 1);
+
+        // Re-listing a default does not duplicate it.
+        let rc = parse("[scan]\nexclude_paths = [\"node_modules\"]\n").unwrap();
+        assert_eq!(
+            rc.scan.effective_exclude_paths().len(),
+            DEFAULT_EXCLUDE_PATHS.len()
+        );
+
+        // Disabling defaults leaves only the user's patterns.
+        let rc =
+            parse("[scan]\nexclude_paths = [\"my-cache\"]\ndefault_exclusions = false\n").unwrap();
+        assert!(!rc.scan.default_exclusions_enabled());
+        assert_eq!(
+            rc.scan.effective_exclude_paths(),
+            vec!["my-cache".to_string()]
+        );
+
+        // A `!name` entry re-includes one built-in while the rest stay.
+        let rc = parse("[scan]\nexclude_paths = [\"!build\", \"my-cache\"]\n").unwrap();
+        let effective = rc.scan.effective_exclude_paths();
+        assert!(!effective.contains(&"build".to_string()));
+        assert!(effective.contains(&"node_modules".to_string()));
+        assert!(effective.contains(&"my-cache".to_string()));
+        assert_eq!(effective.len(), DEFAULT_EXCLUDE_PATHS.len());
+
+        // `!name` cancels only the built-in, not a positive pattern for the
+        // same directory.
+        let rc = parse("[scan]\nexclude_paths = [\"build\", \"!build\"]\n").unwrap();
+        assert!(rc.scan.effective_exclude_paths().contains(&"build".to_string()));
+
+        // An exception naming a non-built-in is a structural error.
+        assert!(parse("[scan]\nexclude_paths = [\"!buidl\"]\n").is_err());
+        assert!(parse("[scan]\nexclude_paths = [\"!\"]\n").is_err());
     }
 
     #[test]

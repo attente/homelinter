@@ -67,6 +67,7 @@ fn config_template_loads_and_validates() {
         // [scan]
         "exclude_paths",
         "exclude_extensions",
+        "default_exclusions",
         "hidden_definition",
         // [output]
         "format",

@@ -94,9 +94,21 @@ rate_limit_ms = 0
 large_file_threshold = 104857600
 
 [scan]
-# Glob patterns for primary discovery. Patterns with a separator match
-# relative to the scan root; without one, match the filename at any depth.
+# Extra glob patterns for primary discovery, merged with the built-in defaults
+# below unless default_exclusions is false. Patterns without a path separator
+# match a component at any depth, pruning matching directories and subtrees.
 exclude_paths = []
+# The built-in exclusions are conventional dependency, cache, and build-output
+# directories that are usually reproducible artifacts, not personal files:
+# node_modules, vendor, .venv, venv, __pycache__, .pytest_cache, .mypy_cache,
+# .ruff_cache, target, build, dist, .gradle, .m2, .next, .nuxt, .terraform,
+# Pods, and DerivedData. A user pattern is added to these, never replacing
+# them; prefix a built-in name with '!' to re-include just that directory
+# (for example "!build"). Set default_exclusions = false to drop all built-ins
+# and use only the positive patterns. Broad names such as build and dist may
+# also be meaningful user directories, so re-include them with "!build" or
+# "!dist" when that matters.
+# default_exclusions = true
 # Extensions excluded from discovery at any depth, without a leading dot and
 # matched case-insensitively (e.g. ["png"] skips a.png and PHOTO.PNG).
 exclude_extensions = []

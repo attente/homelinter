@@ -764,6 +764,7 @@ export default function App() {
         defaultHome={st.session?.home ?? ""}
         defaultHidden={defaults?.hidden ?? false}
         defaultTargetPaths={defaults?.target_paths}
+        defaultExcludePaths={defaults?.default_exclude_paths}
         configHash={st.session?.config_hash ?? null}
         hasSuggestions={st.suggestionsTotal > 0}
         startDisabled={!canScan}

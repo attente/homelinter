@@ -46,6 +46,7 @@ const EXTRACTION_DEFAULTS: Array<[string, string]> = [
 // completed save clear protection only for values that were actually saved.
 interface OverrideState {
   excludePaths: string;
+  defaultExclusions: boolean;
   geoEnabled: boolean;
   geoService: string;
   geoEndpoint: string;
@@ -72,6 +73,7 @@ interface OverrideState {
 
 const SCALAR_KEYS: Array<keyof OverrideState> = [
   "excludePaths",
+  "defaultExclusions",
   "geoEnabled",
   "geoService",
   "geoEndpoint",
@@ -119,6 +121,17 @@ function exclusionsOf(doc: Json | null): string[] {
   return Array.isArray(raw) ? raw.map(String) : [];
 }
 
+/// Collect the `!name` built-in re-inclusions from the raw exclusion entries,
+/// which share the `exclude_paths` array with the positive patterns.
+function splitExclusions(raw: string): { exceptions: Set<string> } {
+  const exceptions = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("!")) exceptions.add(t.slice(1));
+  }
+  return { exceptions };
+}
+
 function formFromDoc(doc: Json): OverrideState {
   const geo = obj(doc.geocoder);
   const desc = obj(doc.description);
@@ -146,6 +159,7 @@ function formFromDoc(doc: Json): OverrideState {
   }
   return {
     excludePaths: exclusionsOf(doc).join("\n"),
+    defaultExclusions: obj(doc.scan).default_exclusions !== false,
     geoEnabled: geo.enabled === true,
     geoService: str(geo.service) || "nominatim",
     geoEndpoint: str(geo.endpoint),
@@ -211,14 +225,20 @@ function buildPatch(
   const patch: Json = {};
   const fields: string[] = [];
 
+  const scan: Json = {};
   const patterns = form.excludePaths
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (JSON.stringify(patterns) !== JSON.stringify(exclusionsOf(doc))) {
-    patch.scan = { exclude_paths: patterns };
+    scan.exclude_paths = patterns;
     fields.push("excludePaths");
   }
+  if (form.defaultExclusions !== (obj(doc.scan).default_exclusions !== false)) {
+    scan.default_exclusions = form.defaultExclusions;
+    fields.push("defaultExclusions");
+  }
+  if (Object.keys(scan).length > 0) patch.scan = scan;
 
   const effGeo = obj(doc.geocoder);
   const geo: Json = {};
@@ -403,6 +423,8 @@ interface ScanFormProps {
   defaultHome?: string;
   defaultHidden?: boolean;
   defaultTargetPaths?: Record<string, string>;
+  /** Built-in directory exclusions, rendered as per-directory toggles. */
+  defaultExcludePaths?: string[];
   /** Hash of the service's live configuration; a change re-seeds untouched fields. */
   configHash: string | null;
   hasSuggestions: boolean;
@@ -417,6 +439,7 @@ export function ScanForm(props: ScanFormProps) {
     defaultHome,
     defaultHidden,
     defaultTargetPaths,
+    defaultExcludePaths,
     configHash,
     hasSuggestions,
     startDisabled,
@@ -509,6 +532,7 @@ export function ScanForm(props: ScanFormProps) {
       const bySection: Record<string, string[]> = {};
       const sectionFor: Record<string, string> = {
         excludePaths: "scan",
+        defaultExclusions: "scan",
         geoEnabled: "geocoder",
         geoService: "geocoder",
         geoEndpoint: "geocoder",
@@ -546,6 +570,8 @@ export function ScanForm(props: ScanFormProps) {
         if (section === "scan") {
           if ("exclude_paths" in sectionObj)
             entry.exclude_paths = sectionObj.exclude_paths;
+          if ("default_exclusions" in sectionObj)
+            entry.default_exclusions = sectionObj.default_exclusions;
         } else if (section === "duplication") {
           if ("large_file_threshold" in sectionObj) {
             entry.large_file_threshold = sectionObj.large_file_threshold;
@@ -664,8 +690,25 @@ export function ScanForm(props: ScanFormProps) {
     scheduleSave({});
   };
 
+  const toggleBuiltin = (name: string, excluded: boolean) => {
+    const lines = formRef.current!.excludePaths
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const tag = `!${name}`;
+    const next = excluded
+      ? lines.filter((l) => l !== tag)
+      : lines.includes(tag)
+        ? lines
+        : [...lines, tag];
+    patch({ excludePaths: next.join("\n") });
+  };
+
   const pathDefaults = obj(doc?.target_path_defaults) as Record<string, string>;
   const configWarnings = Object.entries(obj(doc?.warnings));
+  const exclusions = form
+    ? splitExclusions(form.excludePaths)
+    : { exceptions: new Set<string>() };
 
   const start = async () => {
     if (!(await flush())) {
@@ -770,8 +813,11 @@ export function ScanForm(props: ScanFormProps) {
             <details className="scan-paths">
               <summary>Scan exclusions</summary>
               <p className="hint">
-                One glob per line; saved to the configuration as you edit. An
-                empty list means no exclusions.
+                Additional glob patterns, one per line; saved to the
+                configuration as you edit. They are added to the built-in
+                exclusions below unless those are turned off. Prefix a
+                built-in name with {"!"} to scan that directory again (for
+                example {"!build"}).
               </p>
               <textarea
                 rows={4}
@@ -779,6 +825,41 @@ export function ScanForm(props: ScanFormProps) {
                 onChange={(e) => patch({ excludePaths: e.target.value })}
                 spellCheck={false}
               />
+              <label className="field check">
+                <input
+                  type="checkbox"
+                  checked={form.defaultExclusions}
+                  onChange={(e) =>
+                    patch({ defaultExclusions: e.target.checked })
+                  }
+                />
+                <span>
+                  Also exclude common dependency, cache, and build directories
+                </span>
+              </label>
+              {defaultExcludePaths !== undefined &&
+                defaultExcludePaths.length > 0 && (
+                  <div className="field-grid">
+                    {defaultExcludePaths.map((name) => {
+                      const active =
+                        form.defaultExclusions &&
+                        !exclusions.exceptions.has(name);
+                      return (
+                        <label className="field check" key={name}>
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            disabled={!form.defaultExclusions}
+                            onChange={(e) =>
+                              toggleBuiltin(name, e.target.checked)
+                            }
+                          />
+                          <span>{name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
             </details>
 
             <details className="scan-paths">

@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{
     config_hash, effective_config_json, merge_and_validate_config_chain,
-    merge_and_write_config_chain, overlay_scan_config, platform_name,
+    merge_and_write_config_chain, overlay_scan_config, platform_name, DEFAULT_EXCLUDE_PATHS,
 };
 use homelinter_model::error::{ApiError, ErrorCode};
 use homelinter_model::format::FormatString;
@@ -462,6 +462,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "scan_defaults": {
             "hidden": app.default_hidden,
             "target_paths": app.default_target_paths,
+            "default_exclude_paths": DEFAULT_EXCLUDE_PATHS,
         },
     });
     if let Some(f) = &sess.failure {

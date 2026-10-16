@@ -352,6 +352,20 @@ async fn scan_config_overlay_applies_for_one_scan_only() {
     let app = env.service();
     seed_duplicates(&env.home);
 
+    // Keep the effective configuration to verify the scan-only overlay
+    // does not persist, including the built-in exclusion defaults.
+    let (_, initial_cfg) = request(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(initial_cfg["scan"]["default_exclusions"], json!(true));
+    assert_eq!(initial_cfg["scan"]["exclude_paths"], json!([]));
+
+    // The session advertises the built-in exclusions for the scan form.
+    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
+    assert!(sess["scan_defaults"]["default_exclude_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "node_modules"));
+
     // Overlay excluding the Downloads tree: the duplicates are not found.
     let (status, _) = request(
         &app,
@@ -370,7 +384,10 @@ async fn scan_config_overlay_applies_for_one_scan_only() {
 
     // The overlay was not persisted: the effective config is unchanged.
     let (_, cfg) = request(&app, "GET", "/api/v1/config", None).await;
-    assert_eq!(cfg["scan"]["exclude_paths"], json!([]));
+    assert_eq!(
+        cfg["scan"]["exclude_paths"],
+        initial_cfg["scan"]["exclude_paths"]
+    );
 
     // A scan without the overlay finds the duplicates again.
     scan_to_ready(&app, &env.home).await;
