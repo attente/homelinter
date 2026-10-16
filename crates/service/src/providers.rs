@@ -60,7 +60,7 @@ use homelinter_model::config::{
 };
 use homelinter_model::format::{FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
-use homelinter_model::suggestion::{Suggestion, SuggestionStatus};
+use homelinter_model::suggestion::{Suggestion, SuggestionStatus, SuggestionType};
 use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
 use homelinter_suggest::rebuild_move_suggestion;
@@ -1438,6 +1438,15 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
         return false;
     };
+    // A redundant duplicate's only top-level suggestion is a delete, and
+    // `plan_provider_jobs` never plans provider work for one. This is a
+    // defensive guard against the shared `id_for_target` space: a rebuilt
+    // move must never overwrite a delete. Leave the delete untouched and
+    // just clear any stray pending flag.
+    if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
+        sess.suggestions[pos].metadata_pending = false;
+        return false;
+    }
     // Newly rejected ids from re-validation after a rebuild, published as a
     // `batch.validated` event so clients can surface them.
     let mut newly_rejected: Vec<(String, String)> = Vec::new();
@@ -1713,7 +1722,20 @@ pub async fn plan_provider_jobs(
 ) -> Vec<ProviderJob> {
     let geo = geocoder_settings(cfg);
     let mut jobs = Vec::new();
+    // Redundant duplicates get exactly one delete suggestion and never a
+    // move, so provider metadata (location, description, author) can never
+    // reach a rendered destination for them. Skip them here so a scan does
+    // not spend provider calls - and background worker rebuilds - on files
+    // whose only suggestion is a delete.
+    let redundant: std::collections::BTreeSet<usize> = analysis
+        .groups
+        .iter()
+        .flat_map(|g| g.redundant.iter().copied())
+        .collect();
     for (i, f) in analysis.files.iter().enumerate() {
+        if redundant.contains(&i) {
+            continue;
+        }
         let Some(fmt) = formats.get(&f.kind) else {
             continue;
         };
@@ -2231,6 +2253,47 @@ mod tests {
                 .as_deref(),
             Some("march invoices")
         );
+    }
+
+    #[tokio::test]
+    async fn provider_resolution_never_replaces_a_delete_suggestion() {
+        // A redundant duplicate's only top-level suggestion is a delete, and
+        // a move and a delete for the same path share `id_for_target`. A
+        // stray provider resolution for that unit (for example from a scan
+        // predating the redundant-duplicate job filter) must leave the
+        // delete in place instead of overwriting it with a rebuilt move,
+        // which would then collide with the keeper's move and reject both.
+        let (app, epoch) = primed_app().await;
+        let target = {
+            let sess = app.session.lock().await;
+            sess.suggestions[0].target.clone()
+        };
+        {
+            let mut sess = app.session.lock().await;
+            let prior = sess.suggestions[0].clone();
+            let mut delete = Suggestion::new_delete(
+                prior.asset_kind,
+                std::path::Path::new(&target),
+                "Duplicate of keeper.".into(),
+                Default::default(),
+                Vec::new(),
+                prior.provenance.clone(),
+            );
+            delete.metadata_pending = true;
+            sess.suggestions = vec![delete];
+        }
+        let port = stub_describe("unused").await;
+        let job = describe_job(&app, port, epoch).await;
+        let _ = resolve_provider_job(&app, &job, Some("some subject")).await;
+
+        let sess = app.session.lock().await;
+        assert_eq!(sess.suggestions.len(), 1);
+        assert_eq!(
+            sess.suggestions[0].suggestion_type,
+            SuggestionType::Delete,
+            "a delete suggestion must never be replaced by a rebuilt move"
+        );
+        assert!(!sess.suggestions[0].metadata_pending);
     }
 
     #[tokio::test]
@@ -3149,6 +3212,38 @@ mod tests {
         assert_eq!(key(&jobs[0]), key(&jobs[1]));
         // Different content yields a different key.
         assert_ne!(key(&jobs[0]), key(&jobs[2]));
+    }
+
+    #[tokio::test]
+    async fn plan_provider_jobs_skips_redundant_duplicates() {
+        // A redundant duplicate receives a delete suggestion, never a move,
+        // so provider work for it would be wasted and its rebuild could
+        // overwrite the delete. Only the keeper (and non-duplicates) are
+        // planned.
+        let cfg: RawConfig = toml::from_str("[description]\nenabled = true\n").unwrap();
+        let dir = tmp_dir("skip-redundant");
+        let mut keeper = file_at(&dir, "keeper.pdf", AssetKind::Document, None, None);
+        let mut redundant = file_at(&dir, "redundant.pdf", AssetKind::Document, None, None);
+        keeper.full_hash = Some([9u8; 32]);
+        redundant.full_hash = Some([9u8; 32]);
+        let analysis = Arc::new(Analysis {
+            files: vec![keeper, redundant],
+            repos: Vec::new(),
+            groups: vec![homelinter_analyze::DupGroup {
+                keeper: 0,
+                redundant: vec![1],
+                metadata_warning: None,
+            }],
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%s/%f").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].unit.index, 0);
     }
 
     #[tokio::test]
