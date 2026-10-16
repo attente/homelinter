@@ -775,6 +775,7 @@ export default function App() {
       <ScanForm
         key={st.session ? "session-loaded" : "booting"}
         defaultRoot={st.session?.scan_root ?? ""}
+        defaultHome={st.session?.home ?? ""}
         defaultHidden={defaults?.hidden ?? false}
         defaultTargetPaths={defaults?.target_paths}
         configHash={st.session?.config_hash ?? null}

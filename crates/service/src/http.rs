@@ -449,6 +449,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
     let mut v = json!({
         "state": sess.state,
         "scan_root": sess.scan_root,
+        "home": sess.home,
         "platform": sess.platform,
         "config_hash": sess.config_hash,
         "batch_config_hash": sess.batch_config_hash,

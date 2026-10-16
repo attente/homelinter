@@ -399,6 +399,8 @@ function mergePatch(a: Json, b: Json): Json {
 
 interface ScanFormProps {
   defaultRoot: string;
+  /** Effective home directory; the path an empty scan root falls back to. */
+  defaultHome?: string;
   defaultHidden?: boolean;
   defaultTargetPaths?: Record<string, string>;
   /** Hash of the service's live configuration; a change re-seeds untouched fields. */
@@ -412,6 +414,7 @@ interface ScanFormProps {
 export function ScanForm(props: ScanFormProps) {
   const {
     defaultRoot,
+    defaultHome,
     defaultHidden,
     defaultTargetPaths,
     configHash,
@@ -723,7 +726,7 @@ export function ScanForm(props: ScanFormProps) {
             type="text"
             value={root}
             onChange={(e) => setRoot(e.target.value)}
-            placeholder="/home/you"
+            placeholder={defaultHome || "/home/you"}
           />
         </label>
         <label className="field check">

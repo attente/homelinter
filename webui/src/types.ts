@@ -27,6 +27,7 @@ export interface ScanDefaults {
 export interface Session {
   state: SessionState;
   scan_root: string | null;
+  home: string;
   platform: string;
   config_hash: string | null;
   batch_config_hash: string | null;
