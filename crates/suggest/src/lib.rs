@@ -105,11 +105,11 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
                     AssetKind::Repository,
                     &repo.root,
                     &new_path,
-                    format!(
-                        "Moved repository {} to the {} destination.",
-                        repo.root.display(),
-                        "repository"
-                    ),
+                    // Move suggestions carry no human-readable reason: the
+                    // from/to paths already explain the operation, so the
+                    // generic "moved to the <kind> destination" text was
+                    // redundant.
+                    String::new(),
                     meta_json,
                     dependents,
                     repo_provenance(&repo.root),
@@ -299,12 +299,14 @@ fn build_move_suggestion(
     if let Some(a) = &f.embedded_author {
         metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
-    let reason = format!("Moved to the {} destination.", f.kind.name());
+    // Move suggestions carry no human-readable reason: the from/to paths
+    // already explain the operation, so the generic "moved to the <kind>
+    // destination" text was redundant (see `Suggestion.reason`).
     Ok(Some(Suggestion::new_move(
         f.kind,
         &f.path,
         &new_path,
-        reason,
+        String::new(),
         metadata,
         dependents,
         f.provenance.clone(),

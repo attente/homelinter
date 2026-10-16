@@ -71,10 +71,12 @@ fn export_posix_move(s: &Suggestion, out: &mut String) -> Result<(), String> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     let parent_q = shell_quote(&parent);
-    out.push_str(&format!(
-        "# {}\n",
-        s.reason.replace('\n', " ").replace('#', "")
-    ));
+    if !s.reason.is_empty() {
+        out.push_str(&format!(
+            "# {}\n",
+            s.reason.replace('\n', " ").replace('#', "")
+        ));
+    }
     out.push_str(&format!(
         "[ -e {src} ] || abort \"source missing: {src}\"\n"
     ));
@@ -106,10 +108,12 @@ fn export_posix_move(s: &Suggestion, out: &mut String) -> Result<(), String> {
 
 fn export_posix_delete(s: &Suggestion, out: &mut String) -> Result<(), String> {
     let target = shell_quote(&s.target);
-    out.push_str(&format!(
-        "# {}\n",
-        s.reason.replace('\n', " ").replace('#', "")
-    ));
+    if !s.reason.is_empty() {
+        out.push_str(&format!(
+            "# {}\n",
+            s.reason.replace('\n', " ").replace('#', "")
+        ));
+    }
     out.push_str(&format!(
         "[ -e {target} ] || abort \"delete target missing: {target}\"\n"
     ));
@@ -167,7 +171,9 @@ fn export_powershell_move(s: &Suggestion, out: &mut String) -> Result<(), String
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
+    if !s.reason.is_empty() {
+        out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
+    }
     out.push_str(&format!(
         "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'source missing: {src}' }}\n",
         src = s.target
@@ -195,7 +201,9 @@ fn export_powershell_delete(s: &Suggestion, out: &mut String) -> Result<(), Stri
         ));
     };
     let expected = hex::encode(hash_hex);
-    out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
+    if !s.reason.is_empty() {
+        out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
+    }
     out.push_str(&format!(
         "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'delete target missing: {src}' }}\n",
         src = s.target

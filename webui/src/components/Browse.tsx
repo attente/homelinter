@@ -191,7 +191,15 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
               )}
             </>
           )}
-          <p className="detail-reason">{suggestion.reason}</p>
+          {suggestion.reason && (
+            <p className="detail-reason">{suggestion.reason}</p>
+          )}
+          {suggestion.rejection_reason && (
+            <p className="detail-rejected">
+              <span className="detail-label">rejected: </span>
+              {suggestion.rejection_reason}
+            </p>
+          )}
         </div>
       )}
 

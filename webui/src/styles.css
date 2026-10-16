@@ -414,6 +414,12 @@ textarea:focus {
   color: var(--dim);
 }
 
+.detail-rejected {
+  margin: 0;
+  color: var(--bad);
+  word-break: break-all;
+}
+
 .detail-coords {
   margin: 0;
 }
