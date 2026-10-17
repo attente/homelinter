@@ -13,6 +13,7 @@ import {
   countsOf,
   countsSummary,
   entryLine,
+  manualOverrideLabel,
   pathLabel,
   rowLabel,
   shorten,
@@ -144,6 +145,16 @@ describe('format', () => {
     expect(delNoMeta).toContain('delete IMG_1.jpg');
     expect(delNoMeta).not.toContain('duplicate of');
     expect(asciiOnly(label)).toBe(true);
+  });
+
+  it('manual override labels join fields like the service diagnostic', () => {
+    expect(manualOverrideLabel(undefined)).toBe('');
+    expect(manualOverrideLabel([])).toBe('');
+    expect(manualOverrideLabel(['location'])).toBe('location');
+    expect(manualOverrideLabel(['location', 'subject'])).toBe('location and subject');
+    expect(manualOverrideLabel(['location', 'subject', 'author'])).toBe(
+      'location, subject, and author',
+    );
   });
 
   it('row label shows a scanning placeholder while provider metadata is pending', () => {

@@ -212,6 +212,16 @@ impl Session {
             .collect()
     }
 
+    /// Number of move suggestions whose destination metadata currently
+    /// includes at least one manual override. Delete suggestions never carry
+    /// editable metadata and are not counted.
+    pub fn manual_overrides_total(&self) -> usize {
+        self.suggestions
+            .iter()
+            .filter(|s| !s.manual_overrides.is_empty())
+            .count()
+    }
+
     /// Progress of outstanding provider metadata requests as
     /// `(completed, total)`: the number of suggestions that originally had
     /// provider requests and have now had every request resolve, over the

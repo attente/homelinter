@@ -5,6 +5,8 @@ export interface HeaderCounts {
   suggestions: number;
   shown: number;
   selected: number;
+  /** Suggestions with at least one saved manual metadata override. */
+  manual: number;
 }
 
 interface HeaderProps {
@@ -27,7 +29,7 @@ export function Header(props: HeaderProps) {
       <span className={badgeClass}>{stateLabel(state)}{busy ? '...' : ''}</span>
       <span className="root-label">{root ?? 'no scan root'}</span>
       <span className="counts">
-        {counts.suggestions} suggestions, {counts.shown} shown, {counts.selected} selected
+        {counts.suggestions} suggestions, {counts.shown} shown, {counts.selected} selected, {counts.manual} with manual overrides
       </span>
       {metadataProgress && metadataProgress.total > 0 && (
         <span className="counts metadata-progress">

@@ -70,6 +70,14 @@ struct IdsBody {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct RefreshQuery {
+    /// Clear every manual metadata override for the suggestion's content
+    /// before re-planning provider work.
+    #[serde(default)]
+    clear_overrides: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct SelectionBody {
     #[serde(default)]
     ids: Option<Vec<String>>,
@@ -403,6 +411,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
     let suggestions_total = sess.suggestions.len();
     let selection_count = sess.suggestions.iter().filter(|s| s.selected).count();
     let (metadata_completed, metadata_total) = sess.metadata_progress();
+    let manual_overrides_total = sess.manual_overrides_total();
     let mut v = json!({
         "state": sess.state,
         "scan_root": sess.scan_root,
@@ -412,6 +421,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "batch_config_hash": sess.batch_config_hash,
         "suggestions_total": suggestions_total,
         "selection_count": selection_count,
+        "manual_overrides_total": manual_overrides_total,
         "metadata_progress": {
             "completed": metadata_completed,
             "total": metadata_total,
@@ -549,8 +559,11 @@ async fn suggestion_rebuild(
 async fn suggestion_refresh(
     State(app): State<AppHandle>,
     AxumPath(id): AxumPath<String>,
+    Query(q): Query<RefreshQuery>,
 ) -> ApiResult {
-    match crate::providers::refresh_suggestion_metadata(&app, &id).await {
+    match crate::providers::refresh_suggestion_metadata_with_options(&app, &id, q.clear_overrides)
+        .await
+    {
         Ok(item) => accepted(json!({ "item": item })),
         Err(message) => Err(err(ErrorCode::Conflict, message)),
     }

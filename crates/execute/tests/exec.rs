@@ -318,6 +318,7 @@ fn suggestion_type_serde_roundtrip() {
         new_path: Some("/c/b.txt".into()),
         reason: "r".into(),
         metadata: Default::default(),
+        manual_overrides: vec![],
         dependent_operations: vec![],
         selected: false,
         status: SuggestionStatus::Pending,

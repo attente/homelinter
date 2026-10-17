@@ -117,10 +117,16 @@ export const api = {
   },
 
   /** Invalidate one suggestion's cached provider metadata and re-request
-   *  it. Returns the updated suggestion, now marked pending. */
-  async refreshMetadata(id: string): Promise<Suggestion> {
+   *  it. When `clearOverrides` is true the service first removes every saved
+   *  manual metadata override for the content, so the provider fields can be
+   *  requested again. Returns the updated suggestion, now marked pending. */
+  async refreshMetadata(
+    id: string,
+    clearOverrides = false,
+  ): Promise<Suggestion> {
+    const qs = clearOverrides ? "?clear_overrides=true" : "";
     const res = await request<{ item: Suggestion }>(
-      `/suggestions/${encodeURIComponent(id)}/refresh`,
+      `/suggestions/${encodeURIComponent(id)}/refresh${qs}`,
       { method: "POST" },
     );
     return res.item;

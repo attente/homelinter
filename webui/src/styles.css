@@ -316,6 +316,17 @@ textarea:focus {
   cursor: pointer;
 }
 
+.list-row .row-badge {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 16px;
+  text-transform: uppercase;
+}
+
 .list-row .row-hit {
   flex: 1 1 auto;
   min-width: 0;

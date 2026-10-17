@@ -77,6 +77,16 @@ export function rowText(s: Suggestion, root?: string | null): string {
   return rowLabel(s, root).slice(4);
 }
 
+/** Human-readable list of the fields backed by manual overrides. */
+export function manualOverrideLabel(
+  fields: readonly string[] | null | undefined,
+): string {
+  if (!fields || fields.length === 0) return '';
+  if (fields.length === 1) return fields[0];
+  if (fields.length === 2) return `${fields[0]} and ${fields[1]}`;
+  return `${fields.slice(0, -1).join(', ')}, and ${fields[fields.length - 1]}`;
+}
+
 /** Keep the head of a string, truncating the tail when too long. */
 export function head(s: string, max: number): string {
   if (s.length <= max) return s;

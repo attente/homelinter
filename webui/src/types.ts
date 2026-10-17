@@ -28,12 +28,18 @@ export interface Session {
   batch_config_hash: string | null;
   suggestions_total: number;
   selection_count: number;
+  /** Move suggestions whose destination metadata currently includes at
+   * least one saved manual override. */
+  manual_overrides_total: number;
   metadata_progress?: MetadataProgress;
   failure?: ApiErrorBody['error'] | null;
   [key: string]: unknown;
 }
 
 export type SuggestionType = 'move' | 'delete';
+
+/** Destination metadata fields that a manual override can back. */
+export type MetadataField = 'location' | 'subject' | 'author';
 
 export type SuggestionStatus =
   | 'pending'
@@ -59,6 +65,9 @@ export interface Suggestion {
   new_path?: string | null;
   reason: string;
   metadata?: Record<string, unknown>;
+  /** Fields currently backed by saved manual overrides rather than provider
+   * or embedded values. Absent when the suggestion has none. */
+  manual_overrides?: MetadataField[];
   dependent_operations?: DependentOperation[];
   selected: boolean;
   status: SuggestionStatus;

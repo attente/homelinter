@@ -2113,6 +2113,122 @@ fn plan_unit_jobs(
     jobs
 }
 
+/// Join field names for the re-request diagnostic: "location", "location and
+/// subject", or "location, subject, and author".
+fn join_field_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Explain why `plan_unit_jobs` planned nothing for one unit. A configured
+/// provider can still be skipped because the format has no provider
+/// placeholder, the input (GPS coordinates, embedded title/author) is already
+/// enough, or every applicable field is answered by a manual override. Naming
+/// the blocker turns a re-request's 409 into an actionable message instead of
+/// implying that the provider itself is disabled.
+fn no_provider_jobs_reason(
+    geo: Option<&ProviderSettings>,
+    cfg: &RawConfig,
+    f: &AnalyzedFile,
+    formats: &BTreeMap<AssetKind, FormatString>,
+) -> String {
+    let Some(fmt) = formats.get(&f.kind) else {
+        return "no provider metadata is configured for this suggestion".to_string();
+    };
+    let uses = |placeholder: Placeholder| {
+        fmt.segments()
+            .iter()
+            .any(|s| matches!(s, Segment::Placeholder(p) if *p == placeholder))
+    };
+    let uses_location = uses(Placeholder::Location);
+    let uses_subject = uses(Placeholder::Subject);
+    let uses_title = uses(Placeholder::Title);
+    let uses_author = uses(Placeholder::Author);
+    let wants_description = uses_subject || (f.kind == AssetKind::Document && uses_title);
+    let wants_author = uses_author && f.kind == AssetKind::Document;
+    if !uses_location && !wants_description && !wants_author {
+        return "no provider metadata is needed for this suggestion: its destination format does not use it"
+            .to_string();
+    }
+
+    let mut overridden = Vec::new();
+    let mut embedded = Vec::new();
+    let mut disabled = Vec::new();
+    if uses_location {
+        if f.overrides.location.is_some() {
+            overridden.push("location");
+        } else if geo.is_none() {
+            disabled.push("geocoder");
+        }
+        // No GPS coordinates: no provider call is possible for this field,
+        // but another field may still explain the empty plan.
+    }
+    if wants_description {
+        if f.overrides.subject.is_some() {
+            overridden.push("subject");
+        } else if f.authoritative_title().is_some() {
+            embedded.push("title");
+        } else if description_settings(cfg, &f.kind).is_none() && !disabled.contains(&"description")
+        {
+            disabled.push("description");
+        }
+    }
+    if wants_author {
+        if f.overrides.author.is_some() {
+            overridden.push("author");
+        } else if f
+            .embedded_author
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|author| !author.is_empty())
+        {
+            embedded.push("author");
+        } else if description_settings(cfg, &f.kind).is_none() && !disabled.contains(&"description")
+        {
+            disabled.push("description");
+        }
+    }
+
+    let mut details = Vec::new();
+    if !overridden.is_empty() {
+        details.push(format!(
+            "{} set by manual overrides",
+            join_field_names(&overridden)
+        ));
+    }
+    if !embedded.is_empty() {
+        details.push(format!(
+            "{} already supplied by embedded metadata",
+            join_field_names(&embedded)
+        ));
+    }
+    if !disabled.is_empty() {
+        let providers = join_field_names(&disabled);
+        details.push(if disabled.len() == 1 {
+            format!("the {providers} provider is not enabled")
+        } else {
+            format!("the {providers} providers are not enabled")
+        });
+    }
+    if details.is_empty() {
+        return "no provider metadata is configured for this suggestion".to_string();
+    }
+    let mut reason = format!(
+        "no provider metadata can be re-requested for this suggestion: {}",
+        details.join("; ")
+    );
+    if !overridden.is_empty() {
+        reason.push_str(
+            "; clear the overridden fields in the metadata editor to use the provider again",
+        );
+    }
+    reason
+}
+
 /// Invalidate the cached provider results for one suggestion's unit and
 /// re-enqueue its provider requests, without re-running the scan. The fresh
 /// jobs carry a bumped per-unit generation (so an in-flight request from
@@ -2121,6 +2237,19 @@ fn plan_unit_jobs(
 /// the caller's events carry the eventual update. Errors (no batch, not a
 /// move, no provider work) are returned as messages for a 409.
 pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Suggestion, String> {
+    refresh_suggestion_metadata_with_options(app, id, false).await
+}
+
+/// Like `refresh_suggestion_metadata`, with the option to clear every manual
+/// metadata override for this content first. Planning uses the cleared view,
+/// so the re-request can proceed even when overrides previously suppressed
+/// every provider field; the persisted overrides are only removed once at
+/// least one job has been planned.
+pub async fn refresh_suggestion_metadata_with_options(
+    app: &AppHandle,
+    id: &str,
+    clear_overrides: bool,
+) -> Result<Suggestion, String> {
     let mut sess = app.session.lock().await;
     // Provider metadata only means something for a published, non-executing
     // batch; guard the action the same way scan/execute/export are guarded.
@@ -2130,7 +2259,7 @@ pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Su
         );
     }
     let cfg = sess.config.clone();
-    let (index, generation, jobs) = {
+    let (index, generation, jobs, content_key) = {
         let Some(ctx) = sess.provider_ctx.as_ref() else {
             return Err("no scan batch is available to refresh".to_string());
         };
@@ -2160,20 +2289,42 @@ pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Su
             );
         }
         let generation = ctx.generations.get(&index).copied().unwrap_or(0) + 1;
+        let content_key = content_identity(&ctx.analysis.files[index]);
+        // Plan against the view the user asked for. Clearing is not persisted
+        // unless planning succeeds, so a request that still has no work
+        // leaves the saved overrides untouched.
+        let mut trial = ctx.analysis.files[index].clone();
+        if clear_overrides {
+            trial.overrides = MetadataOverrides::default();
+        }
+        let geo = geocoder_settings(&cfg);
         let jobs = plan_unit_jobs(
-            geocoder_settings(&cfg).as_ref(),
+            geo.as_ref(),
             &cfg,
-            &ctx.analysis.files[index],
+            &trial,
             &ctx.formats,
             ctx.epoch,
             index,
             generation,
         );
         if jobs.is_empty() {
-            return Err("no provider metadata is configured for this suggestion".to_string());
+            return Err(no_provider_jobs_reason(
+                geo.as_ref(),
+                &cfg,
+                &trial,
+                &ctx.formats,
+            ));
         }
-        (index, generation, jobs)
+        (index, generation, jobs, content_key)
     };
+    if clear_overrides {
+        let cache = app.cache.lock().await;
+        for field in [FIELD_LOCATION, FIELD_SUBJECT, FIELD_AUTHOR] {
+            cache.override_clear(&content_key, field).map_err(|e| {
+                format!("cannot clear manual metadata overrides for this suggestion: {e}")
+            })?;
+        }
+    }
     // Supersede any in-flight request and drop the recorded values so a
     // failed re-request degrades to the fallback instead of resurrecting
     // the previous answer.
@@ -2185,6 +2336,9 @@ pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Su
         ctx.pending.insert(index, jobs.len() as u32);
         ctx.pending_units.insert(index);
         ctx.total_units.insert(index);
+        if clear_overrides {
+            Arc::make_mut(&mut ctx.analysis).files[index].overrides = MetadataOverrides::default();
+        }
     }
     let pos = sess
         .suggestions
@@ -2193,6 +2347,9 @@ pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Su
         .expect("checked above");
     let mut suggestion = sess.suggestions[pos].clone();
     suggestion.metadata_pending = true;
+    if clear_overrides {
+        suggestion.manual_overrides.clear();
+    }
     sess.suggestions[pos] = suggestion.clone();
     let (completed, total) = sess.metadata_progress();
 
@@ -2489,7 +2646,7 @@ mod tests {
     use axum::{Json, Router};
 
     use homelinter_analyze::AnalyzedFile;
-    use homelinter_model::suggestion::{Provenance, ScanSummary, SessionState};
+    use homelinter_model::suggestion::{MetadataField, Provenance, ScanSummary, SessionState};
     use homelinter_suggest::{generate_suggestions, GenerateInput};
 
     use crate::build_service;
@@ -3853,6 +4010,76 @@ mod tests {
         assert!(after.is_empty(), "{after:?}");
     }
 
+    #[test]
+    fn empty_refresh_names_the_blocker() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+
+            [description]
+            enabled = true
+            model = "m"
+            "#,
+        )
+        .unwrap();
+        let geo = geocoder_settings(&cfg);
+        let dir = tmp_dir("refresh-reason");
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%Y/%l/%s.%e").unwrap(),
+        );
+
+        // Both provider-shaped fields are manual overrides: a re-request has
+        // nothing to ask for and the message says which fields to clear.
+        let mut photo = file_at(
+            &dir,
+            "PXL_0001.jpg",
+            AssetKind::Photo,
+            Some(33.56),
+            Some(133.54),
+        );
+        photo.overrides.location = Some("Kochi".into());
+        photo.overrides.subject = Some("Naruko Collection".into());
+        let reason = no_provider_jobs_reason(geo.as_ref(), &cfg, &photo, &formats);
+        assert!(
+            reason.contains("location and subject set by manual overrides"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("clear the overridden fields in the metadata editor"),
+            "{reason}"
+        );
+
+        // An embedded title answers %s without a provider call, while the
+        // overridden location is still reported.
+        photo.overrides.subject = None;
+        photo.embedded_title = Some("Naruko Collection".into());
+        let reason = no_provider_jobs_reason(geo.as_ref(), &cfg, &photo, &formats);
+        assert!(
+            reason.contains("location set by manual overrides"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("title already supplied by embedded metadata"),
+            "{reason}"
+        );
+
+        // A format without any provider placeholder never consults a provider.
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%f").unwrap(),
+        );
+        let reason = no_provider_jobs_reason(geo.as_ref(), &cfg, &photo, &formats);
+        assert!(
+            reason.contains("its destination format does not use it"),
+            "{reason}"
+        );
+    }
+
     #[tokio::test]
     async fn priority_refresh_jobs_overtake_queued_scan_jobs() {
         let (app, epoch) = primed_app().await;
@@ -3909,6 +4136,65 @@ mod tests {
         assert!(ctx.total_units.contains(&0));
         // The denominator stays one unit even after the re-request.
         assert_eq!(sess.metadata_progress(), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn clearing_overrides_lets_a_refresh_proceed() {
+        let (app, _epoch) = primed_app_with_format("Pictures/%s/%f").await;
+        let id = {
+            let mut sess = app.session.lock().await;
+            sess.config = toml::from_str("[description]\nenabled = true\n").unwrap();
+            sess.suggestions[0].id.clone()
+        };
+        let content_key = {
+            let sess = app.session.lock().await;
+            let f = &sess.provider_ctx.as_ref().unwrap().analysis.files[0];
+            content_identity(f)
+        };
+
+        let edited = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: Some("Pinned Place".into()),
+                subject: Some("Pinned Subject".into()),
+                author: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            edited.manual_overrides,
+            vec![MetadataField::Location, MetadataField::Subject]
+        );
+
+        // Overrides still suppress the provider, so a plain re-request has
+        // no work and leaves the saved edits alone.
+        let err = refresh_suggestion_metadata(&app, &id).await.unwrap_err();
+        assert!(err.contains("set by manual overrides"), "{err}");
+        {
+            let cache = app.cache.lock().await;
+            assert!(cache.all_overrides().unwrap().contains_key(&content_key));
+        }
+
+        // Confirming the clear plans against the un-overridden values, and
+        // only then removes the persisted overrides and in-memory copy.
+        let refreshed = refresh_suggestion_metadata_with_options(&app, &id, true)
+            .await
+            .unwrap();
+        assert!(refreshed.metadata_pending);
+        assert!(refreshed.manual_overrides.is_empty());
+        {
+            let sess = app.session.lock().await;
+            let f = &sess.provider_ctx.as_ref().unwrap().analysis.files[0];
+            assert!(f.overrides.is_empty());
+            assert_eq!(sess.manual_overrides_total(), 0);
+        }
+        {
+            let cache = app.cache.lock().await;
+            assert!(!cache.all_overrides().unwrap().contains_key(&content_key));
+        }
     }
 
     #[tokio::test]

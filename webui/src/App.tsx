@@ -690,20 +690,21 @@ export default function App() {
   // provider results and ask again, without re-running the scan. The
   // service returns it marked pending and streams the resolved update.
   const refreshMetadata = useCallback(
-    async (id: string) => {
+    async (id: string, clearOverrides = false) => {
       try {
-        const updated = await api.refreshMetadata(id);
+        const updated = await api.refreshMetadata(id, clearOverrides);
         setSt((prev) => ({
           ...prev,
           suggestions: prev.suggestions.map((s) =>
             s.id === id ? updated : s,
           ),
         }));
+        void refreshSession();
       } catch (e: unknown) {
         pushToast(`cannot re-request metadata: ${resolveApiError(e)}`);
       }
     },
-    [pushToast],
+    [pushToast, refreshSession],
   );
 
   // Save a manual metadata edit. The service persists it keyed by content
@@ -729,11 +730,12 @@ export default function App() {
             : prev.suggestions.filter((s) => s.id !== id),
         }));
         pushToast(updated ? 'metadata saved' : 'edit removed the suggestion');
+        void refreshSession();
       } catch (e: unknown) {
         pushToast(`cannot save metadata: ${resolveApiError(e)}`);
       }
     },
-    [pushToast],
+    [pushToast, refreshSession],
   );
 
   // Re-apply the effective metadata for this suggestion and rebuild its
@@ -749,11 +751,12 @@ export default function App() {
             : prev.suggestions.filter((s) => s.id !== id),
         }));
         pushToast(updated ? 'suggestion rebuilt' : 'rebuild removed the suggestion');
+        void refreshSession();
       } catch (e: unknown) {
         pushToast(`cannot rebuild: ${resolveApiError(e)}`);
       }
     },
-    [pushToast],
+    [pushToast, refreshSession],
   );
 
   const dismissPending = useCallback(() => {
@@ -807,6 +810,7 @@ export default function App() {
     suggestions: st.session?.suggestions_total ?? st.suggestionsTotal,
     shown: st.suggestionsTotal,
     selected: st.session?.selection_count ?? 0,
+    manual: st.session?.manual_overrides_total ?? 0,
   };
 
   let body;
@@ -895,7 +899,9 @@ export default function App() {
           onClearSelection={clearSelection}
           onRun={() => void run()}
           onExport={() => void exportPlan()}
-          onRefreshMetadata={(id) => void refreshMetadata(id)}
+          onRefreshMetadata={(id, clearOverrides) =>
+            void refreshMetadata(id, clearOverrides)
+          }
           onSetMetadata={(id, edit) => void setMetadata(id, edit)}
           onRebuild={(id) => void rebuildSuggestion(id)}
         />

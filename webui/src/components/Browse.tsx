@@ -12,7 +12,7 @@ import {
   TYPE_CYCLE,
   cycleNext,
 } from '../lib/filter';
-import { rowText } from '../lib/format';
+import { manualOverrideLabel, rowText } from '../lib/format';
 import type { Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
@@ -42,7 +42,7 @@ interface BrowseProps {
   onClearSelection: () => void;
   onRun: () => void;
   onExport: () => void;
-  onRefreshMetadata: (id: string) => void;
+  onRefreshMetadata: (id: string, clearOverrides?: boolean) => void;
   onSetMetadata: (
     id: string,
     edit: { location: string; subject: string; author: string },
@@ -102,21 +102,72 @@ function metaRows(s: Suggestion): [string, unknown][] {
  *  offered for them. */
 function RefreshMetadataButton(props: {
   suggestion: Suggestion;
-  onRefresh: (id: string) => void;
+  onRefresh: (id: string, clearOverrides?: boolean) => void;
 }) {
   const { suggestion, onRefresh } = props;
+  const [confirming, setConfirming] = useState(false);
   if (suggestion.type !== 'move') return null;
   const pending = suggestion.metadata_pending;
+  const manual = manualOverrideLabel(suggestion.manual_overrides);
+  const confirm = () => {
+    setConfirming(false);
+    onRefresh(suggestion.id, true);
+  };
   return (
-    <button
-      type="button"
-      className="meta-refresh-btn"
-      disabled={pending}
-      title="discard the cached provider results and ask again"
-      onClick={() => onRefresh(suggestion.id)}
-    >
-      {pending ? 're-requesting...' : 're-request metadata'}
-    </button>
+    <>
+      <button
+        type="button"
+        className="meta-refresh-btn"
+        disabled={pending}
+        title={
+          manual
+            ? 'discard the cached provider results and ask again; ' +
+              `this clears the manual overrides for ${manual}`
+            : 'discard the cached provider results and ask again'
+        }
+        onClick={() => {
+          if (manual) setConfirming(true);
+          else onRefresh(suggestion.id);
+        }}
+      >
+        {pending ? 're-requesting...' : 're-request metadata'}
+      </button>
+      {confirming && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setConfirming(false)}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Clear manual metadata overrides?</h2>
+            <p>
+              This suggestion's {manual}{' '}
+              {suggestion.manual_overrides?.length === 1 ? 'is' : 'are'} set by
+              manual overrides. Re-requesting metadata will clear those overrides
+              and use provider or embedded metadata instead. This cannot be
+              undone.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setConfirming(false)}
+              >
+                cancel
+              </button>
+              <button type="button" className="danger" onClick={confirm}>
+                clear and re-request
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -262,6 +313,7 @@ function MetadataEditor(props: {
 }) {
   const { suggestion, onSave } = props;
   const m = suggestion.metadata ?? {};
+  const overridden = new Set(suggestion.manual_overrides ?? []);
   const effective = {
     location: typeof m.location === 'string' ? m.location : '',
     subject: typeof m.title === 'string' ? m.title : '',
@@ -288,7 +340,9 @@ function MetadataEditor(props: {
       }}
     >
       <label className="field">
-        <span className="field-label">Location (%l)</span>
+        <span className="field-label">
+          Location (%l){overridden.has('location') ? ' - manual' : ''}
+        </span>
         <input
           value={location}
           onChange={(e) => setLocation(e.target.value)}
@@ -296,7 +350,9 @@ function MetadataEditor(props: {
         />
       </label>
       <label className="field">
-        <span className="field-label">Subject (%s, %t)</span>
+        <span className="field-label">
+          Subject (%s, %t){overridden.has('subject') ? ' - manual' : ''}
+        </span>
         <input
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
@@ -304,7 +360,9 @@ function MetadataEditor(props: {
         />
       </label>
       <label className="field">
-        <span className="field-label">Author (%a)</span>
+        <span className="field-label">
+          Author (%a){overridden.has('author') ? ' - manual' : ''}
+        </span>
         <input
           value={author}
           onChange={(e) => setAuthor(e.target.value)}
@@ -321,7 +379,7 @@ function MetadataEditor(props: {
 function DetailPane(props: {
   suggestion: Suggestion;
   onClose: () => void;
-  onRefreshMetadata: (id: string) => void;
+  onRefreshMetadata: (id: string, clearOverrides?: boolean) => void;
   onSetMetadata: (
     id: string,
     edit: { location: string; subject: string; author: string },
@@ -528,6 +586,14 @@ const SuggestionRow = memo(function SuggestionRow({
         onChange={() => onToggle(suggestion.id, !suggestion.selected)}
         aria-label="select"
       />
+      {suggestion.manual_overrides && suggestion.manual_overrides.length > 0 && (
+        <span
+          className="row-badge"
+          title={`manual overrides: ${manualOverrideLabel(suggestion.manual_overrides)}`}
+        >
+          manual
+        </span>
+      )}
       <button
         type="button"
         className="row-hit"

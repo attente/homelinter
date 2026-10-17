@@ -432,6 +432,12 @@ async fn suggestion_metadata_edit_persists_and_rebuilds() {
     assert_eq!(v["item"]["metadata"]["title"], "Manual Subject");
     assert_eq!(v["item"]["metadata"]["author"], "Ada");
     assert_eq!(v["item"]["metadata"]["location"], "Kyoto, Japan");
+    assert_eq!(
+        v["item"]["manual_overrides"],
+        json!(["location", "subject", "author"])
+    );
+    let (_, session) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(session["manual_overrides_total"], 1);
 
     // An over-cap value is refused with 422 and changes nothing.
     let long = vec!["word"; 25].join(" ");
@@ -460,6 +466,9 @@ async fn suggestion_metadata_edit_persists_and_rebuilds() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_ne!(v["item"]["metadata"]["title"], "Manual Subject");
+    assert!(v["item"].get("manual_overrides").is_none());
+    let (_, session) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(session["manual_overrides_total"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

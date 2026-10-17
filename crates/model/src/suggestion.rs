@@ -24,6 +24,11 @@ pub struct Suggestion {
     pub reason: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Destination metadata fields backed by manual overrides rather than
+    /// provider or embedded values. Empty for delete suggestions and for
+    /// moves with no saved edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_overrides: Vec<MetadataField>,
     pub dependent_operations: Vec<DependentOperation>,
     pub selected: bool,
     pub status: SuggestionStatus,
@@ -40,6 +45,15 @@ pub struct Suggestion {
     /// clients but required for immediate pre-execution validation.
     #[serde(skip)]
     pub provenance: Provenance,
+}
+
+/// One destination metadata field that a manual override can back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataField {
+    Location,
+    Subject,
+    Author,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +165,7 @@ impl Suggestion {
             new_path: Some(new_path.to_string_lossy().into_owned()),
             reason,
             metadata,
+            manual_overrides: Vec::new(),
             dependent_operations: dependents,
             selected: false,
             status: SuggestionStatus::Pending,
@@ -176,6 +191,7 @@ impl Suggestion {
             new_path: None,
             reason,
             metadata,
+            manual_overrides: Vec::new(),
             dependent_operations: dependents,
             selected: false,
             status: SuggestionStatus::Pending,

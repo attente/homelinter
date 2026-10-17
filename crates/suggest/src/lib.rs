@@ -17,7 +17,9 @@ use homelinter_analyze::{Analysis, AnalyzedFile};
 use homelinter_model::asset_kind::{strip_trailing_document_extension, AssetKind};
 use homelinter_model::format::{FormatString, PlaceholderValues};
 use homelinter_model::path;
-use homelinter_model::suggestion::{DependentOpType, DependentOperation, Provenance, Suggestion};
+use homelinter_model::suggestion::{
+    DependentOpType, DependentOperation, MetadataField, Provenance, Suggestion,
+};
 use homelinter_scan::SymlinkEntry;
 use homelinter_scan::SymlinkIndex;
 
@@ -320,7 +322,7 @@ fn build_move_suggestion(
     // Move suggestions carry no human-readable reason: the from/to paths
     // already explain the operation, so the generic "moved to the <kind>
     // destination" text was redundant (see `Suggestion.reason`).
-    Ok(Some(Suggestion::new_move(
+    let mut suggestion = Suggestion::new_move(
         f.kind,
         &f.path,
         &new_path,
@@ -328,7 +330,19 @@ fn build_move_suggestion(
         metadata,
         dependents,
         f.provenance.clone(),
-    )))
+    );
+    let mut manual = Vec::new();
+    if f.overrides.location.is_some() {
+        manual.push(MetadataField::Location);
+    }
+    if f.overrides.subject.is_some() {
+        manual.push(MetadataField::Subject);
+    }
+    if f.overrides.author.is_some() {
+        manual.push(MetadataField::Author);
+    }
+    suggestion.manual_overrides = manual;
+    Ok(Some(suggestion))
 }
 
 /// Format embedded GPS coordinates as a stable, filesystem-safe decimal
@@ -737,6 +751,32 @@ mod tests {
         // Clearing location falls back to embedded GPS/location.
         f.overrides.location = None;
         assert_eq!(file_values(&f).location.as_deref(), Some("embedded place"));
+    }
+
+    #[test]
+    fn suggestions_report_the_fields_backed_by_manual_overrides() {
+        let fmt = FormatString::parse("Pictures/%l/%s/%f").unwrap();
+        let home = Path::new("/home/user");
+        let symlinks = SymlinkIndex::default();
+        let mut f = analyzed("/tmp/IMG_0001.jpg");
+        f.location = Some("Provider Place".into());
+        f.subject = Some("Provider Subject".into());
+        f.embedded_author = Some("Embedded Author".into());
+
+        let plain = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert!(plain.manual_overrides.is_empty());
+
+        f.overrides = homelinter_analyze::MetadataOverrides {
+            location: None,
+            subject: Some("Manual Subject".into()),
+            author: None,
+        };
+        let edited = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.manual_overrides, vec![MetadataField::Subject]);
     }
 
     #[test]
