@@ -221,7 +221,9 @@ impl Session {
     pub fn metadata_progress(&self) -> (usize, usize) {
         match &self.provider_ctx {
             Some(ctx) => (
-                ctx.total_units.len().saturating_sub(ctx.pending_units.len()),
+                ctx.total_units
+                    .len()
+                    .saturating_sub(ctx.pending_units.len()),
                 ctx.total_units.len(),
             ),
             None => (0, 0),

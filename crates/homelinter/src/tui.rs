@@ -426,9 +426,7 @@ impl App {
         };
         let (id, typ) = (self.rows[idx].id.clone(), self.rows[idx].typ.clone());
         if typ != "move" {
-            self.toast = Some(
-                "provider metadata does not shape a delete suggestion".to_string(),
-            );
+            self.toast = Some("provider metadata does not shape a delete suggestion".to_string());
             return;
         }
         match self.client.refresh_metadata(&id).await {
@@ -1601,7 +1599,9 @@ impl App {
             Line::from(" k                   cycle the asset-kind filter"),
             Line::from(" u                   cycle the status filter"),
             Line::from(" c                   clear all filters"),
-            Line::from(" m                   re-request the highlighted suggestion's provider metadata"),
+            Line::from(
+                " m                   re-request the highlighted suggestion's provider metadata",
+            ),
             Line::from(" x                   execute selection (asks to confirm)"),
             Line::from(" e                   export selection as a shell script"),
             Line::from(" n                   scan another root (Tab toggles hidden)"),
@@ -1611,7 +1611,9 @@ impl App {
             Line::from(" q / Esc / Ctrl-C     quit"),
             Line::from(""),
             Line::from(" Filtering affects navigation and bulk selection only."),
-            Line::from(" Dependent operations (e.g. symlink repairs) run with their parent suggestion."),
+            Line::from(
+                " Dependent operations (e.g. symlink repairs) run with their parent suggestion.",
+            ),
         ]);
         f.render_widget(Clear, area);
         f.render_widget(Paragraph::new(text).block(block("Help")), area);

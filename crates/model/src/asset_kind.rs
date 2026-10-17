@@ -133,9 +133,7 @@ fn extension_kind(ext: &str) -> Option<AssetKind> {
         // safely and keep their original name under a fixed folder. Source
         // and script extensions (py, rs, go, ...) are unmanaged instead.
         "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "tgz" | "tbz2" | "txz"
-        | "iso" | "dmg" | "deb" | "rpm" | "apk" | "msi" | "exe" | "bin" => {
-            Some(AssetKind::Archive)
-        }
+        | "iso" | "dmg" | "deb" | "rpm" | "apk" | "msi" | "exe" | "bin" => Some(AssetKind::Archive),
         _ => None,
     }
 }
@@ -270,7 +268,10 @@ mod tests {
         assert_eq!(classify_file_name("IMG_0001.JPG"), Some(AssetKind::Photo));
         assert_eq!(classify_file_name("clip.mov"), Some(AssetKind::Video));
         assert_eq!(classify_file_name("song.FLAC"), Some(AssetKind::Audio));
-        assert_eq!(classify_file_name("bundle.tar.gz"), Some(AssetKind::Archive));
+        assert_eq!(
+            classify_file_name("bundle.tar.gz"),
+            Some(AssetKind::Archive)
+        );
         assert_eq!(classify_file_name("app.dmg"), Some(AssetKind::Archive));
         assert_eq!(classify_file_name("pkg.deb"), Some(AssetKind::Archive));
         assert_eq!(classify_file_name("tool.exe"), Some(AssetKind::Archive));

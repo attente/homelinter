@@ -101,10 +101,7 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
                         .map(|&j| sort_keys[j].as_str())
                         .collect();
                     if !partners.is_empty() {
-                        reasons.push(format!(
-                            "destination_collision:also={}",
-                            partners.join(",")
-                        ));
+                        reasons.push(format!("destination_collision:also={}", partners.join(",")));
                     }
                 }
                 if delete_targets.contains_key(&dest_key) {
