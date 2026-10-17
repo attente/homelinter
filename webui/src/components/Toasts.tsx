@@ -1,3 +1,5 @@
+import { CloseIcon } from './CloseIcon';
+
 interface ToastsProps {
   toasts: string[];
   onDismiss: (index: number) => void;
@@ -11,7 +13,9 @@ export function Toasts(props: ToastsProps) {
       {toasts.map((t, i) => (
         <div key={`${i}-${t}`} className="toast">
           <span>{t}</span>
-          <button type="button" onClick={() => onDismiss(i)}>x</button>
+          <button type="button" aria-label="dismiss" title="dismiss" onClick={() => onDismiss(i)}>
+            <CloseIcon />
+          </button>
         </div>
       ))}
     </div>

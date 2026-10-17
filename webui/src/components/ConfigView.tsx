@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, resolveApiError } from "../api";
 import type { CacheList } from "../types";
+import { CloseIcon } from "./CloseIcon";
 
 type Json = Record<string, unknown>;
 
@@ -105,8 +106,14 @@ export function ConfigView(props: ConfigViewProps) {
         <button type="button" onClick={() => setConfirmClear(true)}>
           clear cache
         </button>
-        <button type="button" onClick={onClose}>
-          close
+        <button
+          type="button"
+          className="close-btn"
+          aria-label="close"
+          title="close"
+          onClick={onClose}
+        >
+          <CloseIcon />
         </button>
       </div>
       <p className="note">

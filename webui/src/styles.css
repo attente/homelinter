@@ -369,6 +369,21 @@ textarea:focus {
   border-color: var(--accent);
 }
 
+.close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+  color: var(--dim);
+}
+
+.close-btn svg {
+  display: block;
+}
+
 .detail-body {
   display: flex;
   flex-direction: column;

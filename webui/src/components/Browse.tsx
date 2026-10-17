@@ -9,6 +9,7 @@ import {
 } from '../lib/filter';
 import { rowText } from '../lib/format';
 import type { Suggestion } from '../types';
+import { CloseIcon } from './CloseIcon';
 
 export interface FilterState {
   type: 'all' | 'move' | 'delete';
@@ -120,8 +121,14 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
           </button>
         ))}
         <span className="grow" />
-        <button type="button" className="tab-btn" onClick={onClose}>
-          close
+        <button
+          type="button"
+          className="close-btn"
+          aria-label="close"
+          title="close"
+          onClick={onClose}
+        >
+          <CloseIcon />
         </button>
       </div>
 
