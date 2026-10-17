@@ -3,6 +3,7 @@ import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
@@ -18,6 +19,7 @@ import type { Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
 import { ExpandIcon } from './ExpandIcon';
+import { RefreshIcon } from './RefreshIcon';
 
 export interface FilterState {
   type: 'all' | 'move' | 'delete';
@@ -102,7 +104,7 @@ function metaRows(s: Suggestion): [string, unknown][] {
 /** Discard the cached provider metadata for one move suggestion and ask for
  *  it again. Delete suggestions carry no provider metadata, so it is not
  *  offered for them. */
-function RefreshMetadataButton(props: {
+function FetchMetadataButton(props: {
   suggestion: Suggestion;
   onRefresh: (id: string, clearOverrides?: boolean) => void;
 }) {
@@ -119,7 +121,7 @@ function RefreshMetadataButton(props: {
     <>
       <button
         type="button"
-        className="meta-refresh-btn"
+        className="meta-fetch-btn"
         disabled={pending}
         title={
           manual
@@ -132,7 +134,7 @@ function RefreshMetadataButton(props: {
           else onRefresh(suggestion.id);
         }}
       >
-        {pending ? 're-requesting...' : 're-request metadata'}
+        {pending ? 'fetching...' : 'fetch metadata'}
       </button>
       {confirming && (
         <div
@@ -150,9 +152,8 @@ function RefreshMetadataButton(props: {
             <p>
               This suggestion's {manual}{' '}
               {suggestion.manual_overrides?.length === 1 ? 'is' : 'are'} set by
-              manual overrides. Re-requesting metadata will clear those overrides
-              and use provider or embedded metadata instead. This cannot be
-              undone.
+              manual overrides. Fetching metadata will clear those overrides and
+              use provider or embedded metadata instead. This cannot be undone.
             </p>
             <div className="modal-actions">
               <button
@@ -163,7 +164,7 @@ function RefreshMetadataButton(props: {
                 cancel
               </button>
               <button type="button" className="danger" onClick={confirm}>
-                clear and re-request
+                clear and fetch
               </button>
             </div>
           </div>
@@ -173,8 +174,9 @@ function RefreshMetadataButton(props: {
   );
 }
 
-/** Re-apply the effective metadata and rebuild this move's destination without
- *  a scan or a provider call. */
+/** Rebuild this move's destination from the current effective metadata without
+ *  a scan or a provider call. Rendered as an icon button beside the `to` path's
+ *  copy action. */
 function RebuildButton(props: {
   suggestion: Suggestion;
   onRebuild: (id: string) => void;
@@ -184,11 +186,12 @@ function RebuildButton(props: {
   return (
     <button
       type="button"
-      className="meta-refresh-btn"
-      title="re-apply saved metadata edits and rebuild the destination"
+      className="path-action-btn"
+      title="rebuild the destination from the current metadata"
+      aria-label="rebuild the destination from the current metadata"
       onClick={() => onRebuild(suggestion.id)}
     >
-      rebuild
+      <RefreshIcon />
     </button>
   );
 }
@@ -223,8 +226,8 @@ async function copyText(value: string): Promise<boolean> {
 /** One source/destination path in the preview. Both the path text and a
  *  trailing button copy the full path to the clipboard; the button confirms
  *  the copy for a moment. */
-function PathRow(props: { label: string; value: string }) {
-  const { label, value } = props;
+function PathRow(props: { label: string; value: string; action?: ReactNode }) {
+  const { label, value, action } = props;
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
   useEffect(
@@ -267,6 +270,7 @@ function PathRow(props: { label: string; value: string }) {
       >
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
+      {action}
     </p>
   );
 }
@@ -304,7 +308,7 @@ function PreviewContent(props: {
  *  (`%l`, `%s`/`%t`, `%a`). Saving replaces all three overrides for this
  *  content, and the service persists them keyed by content identity. The
  *  fields start from the effective metadata (a manual edit, a provider
- *  value, or embedded metadata) so a re-request is a starting point, not a
+ *  value, or embedded metadata) so a fetch is a starting point, not a
  *  reset. */
 function MetadataEditor(props: {
   suggestion: Suggestion;
@@ -312,8 +316,10 @@ function MetadataEditor(props: {
     id: string,
     edit: { location: string; subject: string; author: string },
   ) => void;
+  /** Extra action rendered beside the save button (the fetch button). */
+  actions?: ReactNode;
 }) {
-  const { suggestion, onSave } = props;
+  const { suggestion, onSave, actions } = props;
   const m = suggestion.metadata ?? {};
   const overridden = new Set(suggestion.manual_overrides ?? []);
   const effective = {
@@ -371,9 +377,12 @@ function MetadataEditor(props: {
           placeholder="leave blank to use embedded or inferred author"
         />
       </label>
-      <button type="submit" className="meta-save-btn">
-        save metadata
-      </button>
+      <div className="meta-actions">
+        <button type="submit" className="meta-save-btn">
+          save metadata
+        </button>
+        {actions}
+      </div>
     </form>
   );
 }
@@ -467,7 +476,13 @@ function DetailPane(props: {
             <>
               <p className="detail-action">move</p>
               <PathRow label="from:" value={suggestion.target} />
-              <PathRow label="to:" value={suggestion.new_path ?? '?'} />
+              <PathRow
+                label="to:"
+                value={suggestion.new_path ?? '?'}
+                action={
+                  <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
+                }
+              />
             </>
           ) : (
             <>
@@ -487,11 +502,6 @@ function DetailPane(props: {
               {suggestion.rejection_reason}
             </p>
           )}
-          <RefreshMetadataButton
-            suggestion={suggestion}
-            onRefresh={onRefreshMetadata}
-          />
-          <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
         </div>
       )}
 
@@ -519,12 +529,16 @@ function DetailPane(props: {
               ))}
             </tbody>
           </table>
-          <MetadataEditor suggestion={suggestion} onSave={onSetMetadata} />
-          <RefreshMetadataButton
+          <MetadataEditor
             suggestion={suggestion}
-            onRefresh={onRefreshMetadata}
+            onSave={onSetMetadata}
+            actions={
+              <FetchMetadataButton
+                suggestion={suggestion}
+                onRefresh={onRefreshMetadata}
+              />
+            }
           />
-          <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
         </div>
       )}
 

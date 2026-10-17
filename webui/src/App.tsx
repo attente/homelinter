@@ -688,7 +688,7 @@ export default function App() {
     await doExport(ids);
   }, [batchIsStale, batchSize, doExport, pushToast, readSelection]);
 
-  // Per-suggestion metadata re-request: invalidate this suggestion's cached
+  // Per-suggestion metadata fetch: invalidate this suggestion's cached
   // provider results and ask again, without re-running the scan. The
   // service returns it marked pending and streams the resolved update.
   const refreshMetadata = useCallback(
@@ -703,7 +703,7 @@ export default function App() {
         }));
         void refreshSession();
       } catch (e: unknown) {
-        pushToast(`cannot re-request metadata: ${resolveApiError(e)}`);
+        pushToast(`cannot fetch metadata: ${resolveApiError(e)}`);
       }
     },
     [pushToast, refreshSession],

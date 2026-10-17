@@ -535,7 +535,8 @@ textarea:focus {
   outline-offset: 2px;
 }
 
-.path-copy-btn {
+.path-copy-btn,
+.path-action-btn {
   display: inline-flex;
   align-items: center;
   margin-left: 4px;
@@ -549,7 +550,8 @@ textarea:focus {
   cursor: pointer;
 }
 
-.path-copy-btn:hover {
+.path-copy-btn:hover,
+.path-action-btn:hover {
   color: var(--fg);
   border-color: var(--dim);
 }
@@ -612,12 +614,16 @@ textarea:focus {
   word-break: break-all;
 }
 
-/* Re-request action under a move suggestion: quiet, but full-width so it
-   reads as a footer action rather than an inline control. */
-.meta-refresh-btn {
-  align-self: flex-start;
-  margin-top: 4px;
+/* Fetch action beside the save button: same size, quiet styling. */
+.meta-fetch-btn {
   font-size: 12px;
+}
+
+/* Actions under the manual metadata editor. */
+.meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* Manual metadata editor under the metadata tab: one labeled field per

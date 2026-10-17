@@ -120,8 +120,8 @@ export const api = {
     return request<{ ids: string[] }>("/selection");
   },
 
-  /** Invalidate one suggestion's cached provider metadata and re-request
-   *  it. When `clearOverrides` is true the service first removes every saved
+  /** Invalidate one suggestion's cached provider metadata and fetch it
+   *  again. When `clearOverrides` is true the service first removes every saved
    *  manual metadata override for the content, so the provider fields can be
    *  requested again. Returns the updated suggestion, now marked pending. */
   async refreshMetadata(
