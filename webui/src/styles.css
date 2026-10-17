@@ -452,9 +452,9 @@ textarea:focus {
 }
 
 /* Full-screen preview modal: the media drops the pane-sized caps and fills
-   the viewport. */
+   the viewport, with a small backdrop inset so clicking outside dismisses. */
 .preview-backdrop {
-  padding: 0;
+  padding: 16px;
 }
 
 .preview-modal {
@@ -466,8 +466,8 @@ textarea:focus {
   height: 100%;
   padding: 16px;
   background: var(--bg);
-  border: 0;
-  border-radius: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 
 .preview-modal-close {
