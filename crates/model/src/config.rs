@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as EditValue};
 
 use crate::asset_kind;
 use crate::error::ApiError;
@@ -713,10 +714,15 @@ pub fn deep_merge_toml(base: &mut TomlValue, higher: TomlValue) {
     }
 }
 
-/// Deep merge of two JSON values with the semantics `PUT /config` needs:
-/// tables merge by key, scalars and arrays replace, empty tables contribute
+/// Deep merge of two JSON values with the settings-API semantics: tables
+/// merge by key, scalars and arrays replace, empty tables contribute
 /// nothing, and a `null` value deletes the key from the base object (the
 /// only way a caller can unset a previously persisted value).
+///
+/// This applies overrides in memory (the launch-time CLI fold and the
+/// runtime-settings overlay); persisting a `PUT /config` document is a
+/// separate, formatting-preserving document edit, see
+/// `apply_patch_to_document`.
 pub fn deep_merge_json(base: &mut JsonValue, higher: JsonValue) {
     match base {
         JsonValue::Object(base_o) => {
@@ -743,9 +749,9 @@ pub fn deep_merge_json(base: &mut JsonValue, higher: JsonValue) {
     }
 }
 
-/// Total TOML -> JSON conversion for the `PUT /config` persistence path
-/// (the writable file is merged in JSON space so `null` deletions work,
-/// then converted back for parsing and writing).
+/// Total TOML -> JSON conversion (the shape `GET /config` and the settings
+/// API speak). Persistence itself edits the TOML document in place, so no
+/// conversion is involved in a write.
 pub fn toml_to_json(v: &TomlValue) -> JsonValue {
     match v {
         TomlValue::Table(t) => {
@@ -881,10 +887,32 @@ pub fn writable_config_path_chain(
     Ok(user)
 }
 
-/// Persist a TOML value atomically to `path`.
+/// Persist a TOML value atomically to `path`. This renders the whole value
+/// tree, so it rewrites the file from scratch; `PUT /config` does not use it
+/// (it edits the document in place, see `merge_and_write_config_chain`).
 pub fn write_config_toml(path: &Path, value: &TomlValue) -> Result<(), ApiError> {
     let text = toml::to_string_pretty(value)
         .map_err(|e| ApiError::internal(format!("cannot serialize config: {e}")))?;
+    write_config_text(path, &text)
+}
+
+/// Persist config text atomically to `path` (write a sibling temp file, then
+/// rename). Nothing is written when the file already holds exactly `text`, so
+/// a no-op write never touches the file's mtime.
+fn write_config_text(path: &Path, text: &str) -> Result<(), ApiError> {
+    if let Ok(current) = std::fs::read_to_string(path) {
+        if current == text {
+            return Ok(());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ApiError::internal(format!(
+                "cannot create config directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, text)
         .map_err(|e| ApiError::validation(format!("cannot write {}: {e}", path.display())))?;
@@ -1288,11 +1316,298 @@ pub fn parse_and_validate_json(value: JsonValue) -> Result<RawConfig, ApiError> 
     Ok(raw)
 }
 
-/// The file content currently at the writable path (the file `PUT /config`
-/// writes to), or an empty table when no file exists there.
-fn writable_file_toml(chain: &ConfigChain, cli: Option<&Path>) -> Result<TomlValue, ApiError> {
+// ---------------------------------------------------------------------------
+// Persistence: in-place document editing
+// ---------------------------------------------------------------------------
+
+/// The document at the writable config path (an empty document when no file
+/// exists), plus the path it is written back to.
+fn writable_file_document(
+    chain: &ConfigChain,
+    cli: Option<&Path>,
+) -> Result<(PathBuf, DocumentMut), ApiError> {
     let path = writable_config_path_chain(chain, cli)?;
-    Ok(read_config_file(&path, false)?.unwrap_or_else(|| TomlValue::Table(Default::default())))
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(ApiError::validation(format!(
+                "cannot read config file {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let doc = text.parse::<DocumentMut>().map_err(|e| {
+        ApiError::validation(format!("malformed config file {}: {e}", path.display()))
+    })?;
+    Ok((path, doc))
+}
+
+/// Apply a submitted patch document to `doc` in place.
+///
+/// The write edits the parsed TOML document instead of re-rendering a value
+/// tree, so the file's comments, blank lines, key order, dotted keys, inline
+/// tables, and multi-line strings survive, and the on-disk diff is limited to
+/// the keys the patch actually changes: tables patch key by key, scalars and
+/// arrays replace their value while keeping that item's own formatting (an
+/// inline comment on the line stays put), and a `null` value deletes the key.
+/// A table the patch leaves empty is removed so a file never accumulates stub
+/// sections. An empty table in the patch contributes nothing, matching the
+/// file-chain merge rule.
+fn apply_patch_to_document(doc: &mut DocumentMut, patch: &JsonValue) -> Result<(), ApiError> {
+    let JsonValue::Object(fields) = patch else {
+        return Err(ApiError::validation("configuration must be a table"));
+    };
+    patch_table(doc.as_table_mut(), fields)
+}
+
+fn patch_table(
+    table: &mut Table,
+    patch: &serde_json::Map<String, JsonValue>,
+) -> Result<(), ApiError> {
+    for (key, value) in patch {
+        if value.is_null() {
+            table.remove(key);
+            continue;
+        }
+        if value.as_object().is_some_and(|o| o.is_empty()) {
+            continue;
+        }
+        match value {
+            JsonValue::Object(fields) => patch_child_table(table, key, fields)?,
+            value => patch_value_item(table, key, value)?,
+        }
+    }
+    Ok(())
+}
+
+/// Patch one key whose submitted value is a table: an existing table (a
+/// `[section]` header or a dotted-key table, both modeled as a `Table`) is
+/// patched in place, an existing inline table keeps its inline form, and a
+/// missing key (or a scalar where a table belongs) gets a fresh table.
+fn patch_child_table(
+    table: &mut Table,
+    key: &str,
+    patch: &serde_json::Map<String, JsonValue>,
+) -> Result<(), ApiError> {
+    let patched_in_place = match table.get_mut(key) {
+        Some(Item::Table(child)) => {
+            patch_table(child, patch)?;
+            true
+        }
+        Some(Item::Value(EditValue::InlineTable(child))) => {
+            patch_inline_table(child, patch)?;
+            true
+        }
+        _ => false,
+    };
+    if patched_in_place {
+        let empty = match table.get(key) {
+            Some(Item::Table(child)) => child.is_empty(),
+            Some(Item::Value(EditValue::InlineTable(child))) => child.is_empty(),
+            _ => false,
+        };
+        if empty {
+            table.remove(key);
+        }
+        return Ok(());
+    }
+    let mut child = Table::new();
+    patch_table(&mut child, patch)?;
+    let mut item = Item::Table(child);
+    if let Some(Item::Table(existing)) = table.get(key) {
+        *item.as_table_mut().expect("table").decor_mut() = existing.decor().clone();
+    }
+    insert_item(table, key, item);
+    Ok(())
+}
+
+/// Patch one key whose submitted value is a scalar or an array.
+fn patch_value_item(table: &mut Table, key: &str, value: &JsonValue) -> Result<(), ApiError> {
+    // An array is rebuilt element by element so a one-per-line list stays
+    // one-per-line (see `patch_array`).
+    if let JsonValue::Array(elements) = value {
+        if let Some(Item::Value(EditValue::Array(existing))) = table.get_mut(key) {
+            patch_array(existing, elements)?;
+            return Ok(());
+        }
+    }
+    let mut item = Item::Value(json_to_edit_value(value)?);
+    if let Some(Item::Value(existing)) = table.get(key) {
+        *item.as_value_mut().expect("value").decor_mut() = existing.decor().clone();
+    }
+    insert_item(table, key, item);
+    Ok(())
+}
+
+/// Store `item` under `key`, replacing the existing slot in place when the
+/// key is already there.
+///
+/// `Table::insert` reformats the key it replaces (`Key::fmt`), which discards
+/// the comment and indentation attached to a dotted key's line, so an existing
+/// slot is overwritten directly and `insert` is only used for a new key.
+fn insert_item(table: &mut Table, key: &str, item: Item) {
+    match table.get_mut(key) {
+        Some(slot) => *slot = item,
+        None => {
+            table.insert(key, item);
+        }
+    }
+}
+
+/// Patch an inline table in place (the inline form the user wrote is kept).
+fn patch_inline_table(
+    table: &mut InlineTable,
+    patch: &serde_json::Map<String, JsonValue>,
+) -> Result<(), ApiError> {
+    for (key, value) in patch {
+        if value.is_null() {
+            table.remove(key);
+            continue;
+        }
+        if value.as_object().is_some_and(|o| o.is_empty()) {
+            continue;
+        }
+        match value {
+            JsonValue::Object(fields) => {
+                if let Some(EditValue::InlineTable(child)) = table.get_mut(key) {
+                    patch_inline_table(child, fields)?;
+                    let empty = child.is_empty();
+                    if empty {
+                        table.remove(key);
+                    }
+                } else {
+                    let mut child = InlineTable::new();
+                    patch_inline_table(&mut child, fields)?;
+                    insert_inline_value(table, key, EditValue::InlineTable(child));
+                }
+            }
+            value => {
+                let mut new_value = json_to_edit_value(value)?;
+                if let Some(existing) = table.get(key) {
+                    *new_value.decor_mut() = existing.decor().clone();
+                }
+                insert_inline_value(table, key, new_value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Store a value in an inline table, replacing an existing slot in place (see
+/// `insert_item` for why `insert` is reserved for new keys).
+fn insert_inline_value(table: &mut InlineTable, key: &str, value: EditValue) {
+    match table.get_mut(key) {
+        Some(slot) => *slot = value,
+        None => {
+            table.insert(key, value);
+        }
+    }
+}
+
+/// Rebuild an existing array from the submitted elements, reusing each
+/// element's own formatting by index.
+///
+/// In TOML the separator in front of an element (and, in a multi-line array,
+/// the newline and indentation) lives in that element's decor, so rebuilding
+/// index by index keeps the user's layout: an edited element keeps the
+/// separator and comment of the element it replaces, and an appended element
+/// copies the array's plain separator (see `separator_decor`) so a
+/// one-per-line list stays one-per-line without duplicating a comment. The
+/// array's own trailing whitespace, comments, and trailing comma are
+/// preserved.
+fn patch_array(existing: &mut Array, submitted: &[JsonValue]) -> Result<(), ApiError> {
+    let decor: Vec<toml_edit::Decor> = existing.iter().map(|v| v.decor().clone()).collect();
+    let separator = separator_decor(existing);
+    let mut rebuilt = Array::new();
+    for (index, element) in submitted.iter().enumerate() {
+        let mut value = json_to_edit_value(element)?;
+        if let Some(d) = decor.get(index).cloned().or_else(|| separator.clone()) {
+            *value.decor_mut() = d;
+        }
+        rebuilt.push_formatted(value);
+    }
+    rebuilt.set_trailing(existing.trailing().clone());
+    rebuilt.set_trailing_comma(existing.trailing_comma());
+    *existing = rebuilt;
+    Ok(())
+}
+
+/// The decor an appended array element should use: the separator between two
+/// existing elements (or the first element's own decor for a one-element
+/// array), with any comment removed so an appended element never repeats the
+/// comment that belongs to the line above it. The newline and indentation of a
+/// multi-line array are kept, so an appended element lands on its own line.
+fn separator_decor(existing: &Array) -> Option<toml_edit::Decor> {
+    let sample = existing.get(if existing.len() > 1 { 1 } else { 0 })?;
+    let prefix = sample
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+    let stripped = match (prefix.find('#'), prefix.rfind('\n')) {
+        // Multi-line: keep from the newline that follows the comment.
+        (Some(_), Some(_)) => format!("\n{}", prefix.rsplit('\n').next().unwrap_or("")),
+        // A comment with no newline: a plain single-line separator.
+        (Some(_), None) => String::new(),
+        (None, _) => prefix.to_string(),
+    };
+    let mut decor = toml_edit::Decor::default();
+    decor.set_prefix(stripped);
+    Some(decor)
+}
+
+/// Convert one JSON value to a TOML value for the in-place patch. `null` is
+/// rejected here: it is only meaningful as an object key, where it deletes the
+/// key, and TOML has no null value.
+fn json_to_edit_value(value: &JsonValue) -> Result<EditValue, ApiError> {
+    match value {
+        JsonValue::Null => Err(ApiError::validation(
+            "null is only valid as a table key, where it deletes the key",
+        )),
+        JsonValue::Bool(b) => Ok(EditValue::from(*b)),
+        JsonValue::String(s) => Ok(EditValue::from(s.clone())),
+        JsonValue::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Ok(EditValue::from(i)),
+            (None, Some(f)) => Ok(EditValue::from(f)),
+            (None, None) => Err(ApiError::validation(format!(
+                "unsupported numeric value: {n}"
+            ))),
+        },
+        JsonValue::Array(items) => {
+            let mut array = Array::new();
+            for item in items {
+                array.push(json_to_edit_value(item)?);
+            }
+            Ok(EditValue::Array(array))
+        }
+        JsonValue::Object(fields) => {
+            let mut table = InlineTable::new();
+            for (key, field) in fields {
+                table.insert(key, json_to_edit_value(field)?);
+            }
+            Ok(EditValue::InlineTable(table))
+        }
+    }
+}
+
+/// Deserialize and validate the patched document exactly as it will be
+/// written.
+fn document_to_validated_config(doc: &DocumentMut) -> Result<RawConfig, ApiError> {
+    let raw: RawConfig = toml::from_str(&doc.to_string())
+        .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
+    validate_config(&raw)?;
+    Ok(raw)
+}
+
+/// Persist the patched document atomically, ensuring the file ends with a
+/// newline.
+fn write_config_document(path: &Path, doc: &DocumentMut) -> Result<(), ApiError> {
+    let mut text = doc.to_string();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    write_config_text(path, &text)
 }
 
 /// Merge a partial configuration document into the file `PUT /config`
@@ -1311,17 +1626,10 @@ pub fn merge_and_write_config_chain(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<LoadedConfig, ApiError> {
-    let write_path = writable_config_path_chain(chain, cli)?;
-    let mut file_json = writable_file_toml(chain, cli).map(|t| toml_to_json(&t))?;
-    deep_merge_json(&mut file_json, submitted.clone());
-    let merged_toml = json_to_toml(&file_json)
-        .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
-    let raw: RawConfig = merged_toml
-        .clone()
-        .try_into()
-        .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
-    validate_config(&raw)?;
-    write_config_toml(&write_path, &merged_toml)?;
+    let (write_path, mut doc) = writable_file_document(chain, cli)?;
+    apply_patch_to_document(&mut doc, submitted)?;
+    document_to_validated_config(&doc)?;
+    write_config_document(&write_path, &doc)?;
     load_config_chain(chain, cli)
 }
 
@@ -1341,15 +1649,9 @@ pub fn merge_and_validate_config_chain(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<RawConfig, ApiError> {
-    let mut file_json = writable_file_toml(chain, cli).map(|t| toml_to_json(&t))?;
-    deep_merge_json(&mut file_json, submitted.clone());
-    let merged_toml = json_to_toml(&file_json)
-        .ok_or_else(|| ApiError::validation("configuration must be a table"))?;
-    let raw: RawConfig = merged_toml
-        .try_into()
-        .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
-    validate_config(&raw)?;
-    Ok(raw)
+    let (_, mut doc) = writable_file_document(chain, cli)?;
+    apply_patch_to_document(&mut doc, submitted)?;
+    document_to_validated_config(&doc)
 }
 
 /// Apply a partial configuration override document on top of a base
@@ -2053,6 +2355,310 @@ mod tests {
             &serde_json::json!({ "target_paths": { "photo": "no placeholders" } })
         )
         .is_err());
+    }
+
+    /// A throwaway writable config path for the persistence tests, plus the
+    /// hermetic search chain that points at it.
+    fn write_temp_config(prefix: &str, text: &str) -> (ConfigChain, PathBuf, PathBuf) {
+        let chain = ConfigChain::default();
+        let d = std::env::temp_dir().join(format!(
+            "hl-cfg-{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("config.toml");
+        std::fs::write(&file, text).unwrap();
+        (chain, d, file)
+    }
+
+    #[test]
+    fn put_config_edits_only_the_changed_keys() {
+        // A hand-written file: comments, blank lines, a deliberate section
+        // order, a dotted key, an inline table, a multi-line string, and a
+        // one-per-line array.
+        let before = concat!(
+            "# my personal homelinter config\n",
+            "\n",
+            "# scanning preferences, written as dotted keys\n",
+            "scan.hidden = false\n",
+            "scan.root = \"/home/me\"\n",
+            "\n",
+            "# where photos and documents go\n",
+            "[target_paths]\n",
+            "photo = \"Pics/%Y/%m/%f\"   # keep months\n",
+            "document = \"Docs/%t\"\n",
+            "\n",
+            "[duplication]\n",
+            "large_file_threshold = 1048576\n",
+            "\n",
+            "[geocoder]\n",
+            "endpoint = \"https://nominatim.openstreetmap.org\"\n",
+            "language = \"fr\"\n",
+            "\n",
+            "[description]\n",
+            "service = \"ollama\"\n",
+            "prompt = \"\"\"\n",
+            "Name this in {words} words.\n",
+            "Keep it lowercase.\n",
+            "\"\"\"\n",
+        );
+        let (chain, dir, file) = write_temp_config("minimal", before);
+
+        // The UI flips one scan toggle and edits one array entry.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"scan": {"hidden": true}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before.replace("scan.hidden = false", "scan.hidden = true")
+        );
+
+        // An array patch rewrites only the entries that changed, keeping the
+        // one-per-line layout and each entry's own comment.
+        let array_before = concat!(
+            "[scan]\n",
+            "exclude_paths = [\n",
+            "  \"node_modules\",\n",
+            "  \"target\",   # rust build dir\n",
+            "  \".cache\",\n",
+            "]\n",
+        );
+        let (chain, array_dir, array_file) = write_temp_config("minimal-array", array_before);
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"scan": {"exclude_paths": ["node_modules", "target", ".cache", "dist"]}}),
+            Some(&array_file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&array_file).unwrap(),
+            concat!(
+                "[scan]\n",
+                "exclude_paths = [\n",
+                "  \"node_modules\",\n",
+                "  \"target\",   # rust build dir\n",
+                "  \".cache\",\n",
+                "  \"dist\",\n",
+                "]\n",
+            )
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&array_dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_leaves_the_file_alone_when_nothing_changes() {
+        let before = "# keep me\n[duplication]\nlarge_file_threshold = 1048576\n";
+        let (chain, dir, file) = write_temp_config("noop", before);
+        let stamp = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // The same value the file already holds, and an empty patch.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"duplication": {"large_file_threshold": 1048576}}),
+            Some(&file),
+        )
+        .unwrap();
+        merge_and_write_config_chain(&chain, &serde_json::json!({}), Some(&file)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            stamp,
+            "a no-op write must not touch the file"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_is_a_minimal_diff_for_a_hand_written_file() {
+        // Deletion plus pruning: removing the only key of a section drops the
+        // now-empty section header, and the rest of the file is untouched.
+        let before = concat!(
+            "# comment kept\n",
+            "[geocoder]\n",
+            "language = \"fr\"\n",
+            "endpoint = \"https://example.invalid\"\n",
+            "\n",
+            "[duplication]\n",
+            "large_file_threshold = 2048\n",
+        );
+        let (chain, dir, file) = write_temp_config("delete", before);
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"geocoder": {"language": null}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            concat!(
+                "# comment kept\n",
+                "[geocoder]\n",
+                "endpoint = \"https://example.invalid\"\n",
+                "\n",
+                "[duplication]\n",
+                "large_file_threshold = 2048\n",
+            )
+        );
+
+        // A new key is appended to its existing section rather than
+        // re-rendering the file.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"duplication": {"large_file_threshold": 4096}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("large_file_threshold = 4096\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_preserves_section_and_key_order() {
+        // Sections are not alphabetical, and a key sits in the middle
+        // section: patching must not reorder anything, and a new key must
+        // join the end of its own section rather than the end of the file.
+        let before = concat!(
+            "[duplication]\n",
+            "large_file_threshold = 1\n",
+            "\n",
+            "[geocoder]\n",
+            "endpoint = \"https://example.invalid\"\n",
+            "\n",
+            "# destinations below\n",
+            "[target_paths]\n",
+            "video = \"Videos/%f\"\n",
+            "photo = \"Pics/%f\"\n",
+            "\n",
+            "# footer, hand maintained\n",
+        );
+        let (chain, dir, file) = write_temp_config("order", before);
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({
+                "geocoder": {"language": "fr"},
+                "target_paths": {"video": "Clips/%f"},
+                "scan": {"hidden": true},
+            }),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            concat!(
+                "[duplication]\n",
+                "large_file_threshold = 1\n",
+                "\n",
+                "[geocoder]\n",
+                "endpoint = \"https://example.invalid\"\n",
+                "language = \"fr\"\n",
+                "\n",
+                "# destinations below\n",
+                "[target_paths]\n",
+                "video = \"Clips/%f\"\n",
+                "photo = \"Pics/%f\"\n",
+                "\n",
+                "[scan]\n",
+                "hidden = true\n",
+                "\n",
+                "# footer, hand maintained\n",
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_prunes_a_removed_section_without_leaving_a_blank_line() {
+        let before = concat!(
+            "[duplication]\n",
+            "large_file_threshold = 1\n",
+            "\n",
+            "[target_paths]\n",
+            "photo = \"Archive/%f\"\n",
+        );
+        let (chain, dir, file) = write_temp_config("prune", before);
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"target_paths": {"photo": null}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "[duplication]\nlarge_file_threshold = 1\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_adds_keys_in_place_and_keeps_section_order() {
+        let before = concat!(
+            "# header comment\n",
+            "[target_paths]   # destinations\n",
+            "photo = \"Pics/%f\"\n",
+            "\n",
+            "[duplication]\n",
+            "large_file_threshold = 1048576\n",
+        );
+        let (chain, dir, file) = write_temp_config("insert", before);
+
+        // A new key joins its own section, and a new section is appended
+        // after the existing ones; nothing already in the file moves.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({
+                "target_paths": {"photo": "Pics/%f", "document": "Docs/%t"},
+                "scan": {"hidden": true},
+            }),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            concat!(
+                "# header comment\n",
+                "[target_paths]   # destinations\n",
+                "photo = \"Pics/%f\"\n",
+                "document = \"Docs/%t\"\n",
+                "\n",
+                "[duplication]\n",
+                "large_file_threshold = 1048576\n",
+                "\n",
+                "[scan]\n",
+                "hidden = true\n",
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_config_updates_an_inline_table_in_place() {
+        let before =
+            "# inline style\ntarget_paths = { photo = \"Pics/%f\", document = \"Docs/%t\" }\n";
+        let (chain, dir, file) = write_temp_config("inline", before);
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"target_paths": {"photo": "Photos/%f"}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "# inline style\ntarget_paths = { photo = \"Photos/%f\", document = \"Docs/%t\" }\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
