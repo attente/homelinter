@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALL_FILTER,
+  MANUAL_CYCLE,
   STATUS_CYCLE,
   TYPE_CYCLE,
   cycleNext,
@@ -38,13 +39,36 @@ function sampleSuggestion(over: Partial<Suggestion> = {}): Suggestion {
 }
 
 describe('filter', () => {
-  it('matches on all three dimensions', () => {
+  it('matches on all four dimensions', () => {
     const s = sampleSuggestion({ asset_kind: 'photo', status: 'pending' });
     expect(matchesFilter(s, ALL_FILTER)).toBe(true);
-    expect(matchesFilter(s, { type: 'all', kind: 'photo', status: 'all' })).toBe(true);
-    expect(matchesFilter(s, { type: 'delete', kind: 'all', status: 'all' })).toBe(false);
-    expect(matchesFilter(s, { type: 'all', kind: 'audio', status: 'all' })).toBe(false);
-    expect(matchesFilter(s, { type: 'all', kind: 'all', status: 'executed' })).toBe(false);
+    expect(
+      matchesFilter(s, { type: 'all', kind: 'photo', status: 'all', manual: 'all' }),
+    ).toBe(true);
+    expect(
+      matchesFilter(s, { type: 'delete', kind: 'all', status: 'all', manual: 'all' }),
+    ).toBe(false);
+    expect(
+      matchesFilter(s, { type: 'all', kind: 'audio', status: 'all', manual: 'all' }),
+    ).toBe(false);
+    expect(
+      matchesFilter(s, { type: 'all', kind: 'all', status: 'executed', manual: 'all' }),
+    ).toBe(false);
+  });
+
+  it('manual filter keeps only suggestions with saved overrides', () => {
+    const manualFilter = { ...ALL_FILTER, manual: 'manual' as const };
+    expect(matchesFilter(sampleSuggestion(), manualFilter)).toBe(false);
+    expect(
+      matchesFilter(sampleSuggestion({ manual_overrides: [] }), manualFilter),
+    ).toBe(false);
+    expect(
+      matchesFilter(
+        sampleSuggestion({ manual_overrides: ['location'] }),
+        manualFilter,
+      ),
+    ).toBe(true);
+    expect(matchesFilter(sampleSuggestion(), ALL_FILTER)).toBe(true);
   });
 
   it('cycles values with wraparound', () => {
@@ -52,6 +76,8 @@ describe('filter', () => {
     expect(cycleNext(TYPE_CYCLE, 'delete')).toBe('all');
     expect(cycleNext(STATUS_CYCLE, 'executed')).toBe('failed');
     expect(cycleNext(STATUS_CYCLE, 'skipped')).toBe('all');
+    expect(cycleNext(MANUAL_CYCLE, 'all')).toBe('manual');
+    expect(cycleNext(MANUAL_CYCLE, 'manual')).toBe('all');
   });
 
   it('collects unique sorted kinds', () => {
@@ -65,7 +91,12 @@ describe('filter', () => {
   });
 
   it('streamed updates respect the active filter', () => {
-    const filter = { type: 'all' as const, kind: 'all' as const, status: 'pending' as const };
+    const filter = {
+      type: 'all' as const,
+      kind: 'all' as const,
+      status: 'pending' as const,
+      manual: 'all' as const,
+    };
     const loaded = sampleSuggestion({ id: 's-1', status: 'pending' });
 
     // A new row that does not match the filter is not appended.

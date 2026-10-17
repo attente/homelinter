@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
@@ -8,6 +8,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ALL_FILTER,
   Filter,
+  MANUAL_CYCLE,
   STATUS_CYCLE,
   TYPE_CYCLE,
   cycleNext,
@@ -22,6 +23,7 @@ export interface FilterState {
   type: 'all' | 'move' | 'delete';
   kind: 'all' | string;
   status: 'all' | Suggestion['status'];
+  manual: 'all' | 'manual';
 }
 
 type TabId = 'preview' | 'location' | 'metadata';
@@ -567,6 +569,7 @@ interface SuggestionRowProps {
   root: string | null;
   onToggle: (id: string, select: boolean) => void;
   onOpen: (id: string) => void;
+  onToggleManualFilter: () => void;
 }
 
 /** One list row. Memoized so a checkbox toggle or a single provider-metadata
@@ -576,7 +579,9 @@ const SuggestionRow = memo(function SuggestionRow({
   root,
   onToggle,
   onOpen,
+  onToggleManualFilter,
 }: SuggestionRowProps) {
+  const overrides = suggestion.manual_overrides ?? [];
   return (
     <>
       <input
@@ -586,21 +591,29 @@ const SuggestionRow = memo(function SuggestionRow({
         onChange={() => onToggle(suggestion.id, !suggestion.selected)}
         aria-label="select"
       />
-      {suggestion.manual_overrides && suggestion.manual_overrides.length > 0 && (
-        <span
-          className="row-badge"
-          title={`manual overrides: ${manualOverrideLabel(suggestion.manual_overrides)}`}
-        >
-          manual
-        </span>
-      )}
       <button
         type="button"
         className="row-hit"
         onClick={() => onOpen(suggestion.id)}
       >
-        {suggestion.metadata_pending && <span className="spinner" aria-hidden="true" />}
-        {rowText(suggestion, root)}
+        <span className="row-text">
+          {suggestion.metadata_pending && (
+            <span className="spinner" aria-hidden="true" />
+          )}
+          {rowText(suggestion, root)}
+        </span>
+        {overrides.length > 0 && (
+          <span
+            className="row-badge"
+            title={`manual overrides: ${manualOverrideLabel(overrides)}; click to filter`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleManualFilter();
+            }}
+          >
+            manual
+          </span>
+        )}
       </button>
     </>
   );
@@ -617,6 +630,11 @@ export function Browse(props: BrowseProps) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
+  // The row badge and the toolbar button share one toggle: filtering to the
+  // manual-only view and back is a two-value cycle.
+  const toggleManualFilter = useCallback(() => {
+    onFilterChange({ ...filter, manual: cycleNext(MANUAL_CYCLE, filter.manual) });
+  }, [filter, onFilterChange]);
   const openSuggestion = useMemo(
     () => suggestions.find((s) => s.id === openId) ?? null,
     [suggestions, openId],
@@ -700,6 +718,14 @@ export function Browse(props: BrowseProps) {
           >
             u:{filter.status}
           </button>
+          <button
+            type="button"
+            className="filter-btn"
+            title="show only suggestions with saved manual overrides"
+            onClick={toggleManualFilter}
+          >
+            m:{filter.manual}
+          </button>
           <button type="button" className="filter-btn" onClick={() => onFilterChange(ALL_FILTER)}>
             clear
           </button>
@@ -769,6 +795,7 @@ export function Browse(props: BrowseProps) {
                       root={root ?? null}
                       onToggle={onToggle}
                       onOpen={setOpenId}
+                      onToggleManualFilter={toggleManualFilter}
                     />
                   </li>
                 );

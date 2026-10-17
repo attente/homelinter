@@ -325,16 +325,31 @@ textarea:focus {
   font-size: 10px;
   line-height: 16px;
   text-transform: uppercase;
+  cursor: pointer;
+}
+
+.list-row .row-badge:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .list-row .row-hit {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 4px;
   padding: 4px 6px;
+  overflow: hidden;
+}
+
+.list-row .row-text {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

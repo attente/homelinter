@@ -439,6 +439,35 @@ async fn suggestion_metadata_edit_persists_and_rebuilds() {
     let (_, session) = request(&app, "GET", "/api/v1/session", None).await;
     assert_eq!(session["manual_overrides_total"], 1);
 
+    // The manual dimension narrows the list to that one overridden row; the
+    // inverse keeps only the rest, so the two totals partition the batch.
+    let (status, manual) = request(&app, "GET", "/api/v1/suggestions?manual=true", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(manual["total"], 1);
+    assert_eq!(manual["items"][0]["id"], move_id.as_str());
+    let (_, rest) = request(&app, "GET", "/api/v1/suggestions?manual=false", None).await;
+    assert!(rest["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["id"] != move_id.as_str()));
+    let (_, all) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    assert_eq!(
+        rest["total"].as_u64().unwrap() + 1,
+        all["total"].as_u64().unwrap()
+    );
+
+    // Filter-based bulk selection honors the manual dimension too.
+    let (status, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "filter": { "manual": true } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sel["ids"], json!([move_id]));
+
     // An over-cap value is refused with 422 and changes nothing.
     let long = vec!["word"; 25].join(" ");
     let (status, v) = request(&app, "PUT", &edit_path, Some(json!({ "subject": long }))).await;

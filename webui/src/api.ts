@@ -74,6 +74,8 @@ export interface SelectionFilter {
   asset_kind?: string;
   status?: string;
   selected?: boolean;
+  /** `true` restricts to suggestions with a saved manual override. */
+  manual?: boolean;
 }
 
 export const api = {
@@ -97,6 +99,7 @@ export const api = {
     kind?: string;
     status?: string;
     selected?: boolean;
+    manual?: boolean;
     offset?: number;
     limit?: number;
   }): Promise<SuggestionList> {
@@ -106,6 +109,7 @@ export const api = {
     if (params?.status) q.set("status", params.status);
     if (params?.selected !== undefined)
       q.set("selected", String(params.selected));
+    if (params?.manual !== undefined) q.set("manual", String(params.manual));
     if (params?.offset !== undefined) q.set("offset", String(params.offset));
     if (params?.limit !== undefined) q.set("limit", String(params.limit));
     const qs = q.toString();

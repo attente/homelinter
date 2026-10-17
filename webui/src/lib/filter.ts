@@ -23,9 +23,18 @@ export interface Filter {
   type: 'all' | SuggestionType;
   kind: 'all' | string;
   status: 'all' | SuggestionStatus;
+  /** `manual` keeps only suggestions backed by a saved manual override. */
+  manual: 'all' | 'manual';
 }
 
-export const ALL_FILTER: Filter = { type: 'all', kind: 'all', status: 'all' };
+export const ALL_FILTER: Filter = {
+  type: 'all',
+  kind: 'all',
+  status: 'all',
+  manual: 'all',
+};
+
+export const MANUAL_CYCLE: ReadonlyArray<'all' | 'manual'> = ['all', 'manual'];
 
 export function matchesFilter(s: Suggestion, f: Filter): boolean {
   if (f.type !== 'all' && s.type !== f.type) {
@@ -35,6 +44,9 @@ export function matchesFilter(s: Suggestion, f: Filter): boolean {
     return false;
   }
   if (f.status !== 'all' && s.status !== f.status) {
+    return false;
+  }
+  if (f.manual === 'manual' && (s.manual_overrides?.length ?? 0) === 0) {
     return false;
   }
   return true;

@@ -95,6 +95,10 @@ struct Filter {
     status: Option<String>,
     #[serde(default)]
     selected: Option<bool>,
+    /// `true` keeps only suggestions with at least one saved manual
+    /// metadata override; `false` keeps only the rest.
+    #[serde(default)]
+    manual: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +111,8 @@ struct ListQuery {
     status: Option<String>,
     #[serde(default)]
     selected: Option<String>,
+    #[serde(default)]
+    manual: Option<bool>,
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
@@ -473,6 +479,11 @@ fn matches_filter(s: &Suggestion, f: &Filter) -> bool {
             return false;
         }
     }
+    if let Some(manual) = f.manual {
+        if s.manual_overrides.is_empty() == manual {
+            return false;
+        }
+    }
     true
 }
 
@@ -482,6 +493,7 @@ async fn suggestions_list(State(app): State<AppHandle>, Query(q): Query<ListQuer
         asset_kind: q.asset_kind,
         status: q.status,
         selected: q.selected.and_then(|s| s.parse().ok()),
+        manual: q.manual,
     };
     let offset = q.offset.unwrap_or(0);
     let limit = q.limit.unwrap_or(usize::MAX);

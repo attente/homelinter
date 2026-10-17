@@ -55,6 +55,7 @@ function toApiFilter(f: Filter): SelectionFilter {
     type: f.type === "all" ? undefined : f.type,
     asset_kind: f.kind === "all" ? undefined : f.kind,
     status: f.status === "all" ? undefined : f.status,
+    manual: f.manual === "manual" ? true : undefined,
   };
 }
 
@@ -146,6 +147,7 @@ export default function App() {
       type: filter.type === "all" ? undefined : filter.type,
       kind: filter.kind === "all" ? undefined : filter.kind,
       status: filter.status === "all" ? undefined : filter.status,
+      manual: filter.manual === "manual" ? true : undefined,
       offset,
       limit: PAGE_SIZE,
     }),

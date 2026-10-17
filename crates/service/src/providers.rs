@@ -2428,6 +2428,19 @@ fn normalize_manual_value(
     Ok(Some(normalized))
 }
 
+/// Drop a manual value that merely repeats the provider's resolved value for
+/// the field. Such an edit changes nothing, so it must not pin an override
+/// (and an override saved earlier is cleared instead of persisting the same
+/// text). Values match after the same ASCII normalization the provider
+/// output goes through.
+fn drop_provider_match(value: Option<String>, provider: Option<&str>) -> Option<String> {
+    let value = value?;
+    match provider.map(normalize_provider_text) {
+        Some(p) if !p.is_empty() && p == value => None,
+        _ => Some(value),
+    }
+}
+
 /// Locate the editable move unit behind `id`: its file index and content
 /// identity. Shared by the manual-edit and rebuild paths.
 fn editable_unit(sess: &Session, id: &str) -> Result<(usize, [u8; 32]), MetadataActionError> {
@@ -2482,6 +2495,16 @@ pub async fn set_suggestion_metadata(
     let location = normalize_manual_value(&edit.location, "location")?;
     let subject = normalize_manual_value(&edit.subject, "subject")?;
     let author = normalize_manual_value(&edit.author, "author")?;
+    // A value that repeats the provider's answer is not an override: it
+    // falls through to the provider value, and any override saved earlier
+    // for that field is removed with the rest of the full replacement.
+    let provider = {
+        let ctx = sess.provider_ctx.as_ref().expect("checked above");
+        ctx.meta.get(&index).cloned().unwrap_or_default()
+    };
+    let location = drop_provider_match(location, provider.location.as_deref());
+    let subject = drop_provider_match(subject, provider.subject.as_deref());
+    let author = drop_provider_match(author, provider.author.as_deref());
     // Persist first, then rebuild from the in-memory override. The write and
     // the rebuild happen under one session lock, so a scan cannot replace
     // the batch between them (no cache->session lock nesting exists).
@@ -4341,6 +4364,76 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, MetadataActionError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn manual_edit_matching_the_provider_is_not_an_override() {
+        let (app, _epoch) = primed_app_with_format("Pictures/%l/%s/%f").await;
+        let id = { app.session.lock().await.suggestions[0].id.clone() };
+        let content_key = {
+            let sess = app.session.lock().await;
+            let f = &sess.provider_ctx.as_ref().unwrap().analysis.files[0];
+            content_identity(f)
+        };
+        // The provider has already resolved every editable field.
+        {
+            let mut sess = app.session.lock().await;
+            let ctx = sess.provider_ctx.as_mut().unwrap();
+            ctx.meta.insert(
+                0,
+                ProviderUnitMeta {
+                    location: Some("Kyoto, Japan".into()),
+                    subject: Some("Provider Subject".into()),
+                    author: Some("Provider Author".into()),
+                },
+            );
+        }
+
+        // A real edit is still pinned as an override.
+        let edited = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: Some("Osaka".into()),
+                subject: Some("Manual Subject".into()),
+                author: Some("Manual Author".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(edited.manual_overrides.len(), 3);
+        assert_eq!(app.cache.lock().await.override_count().unwrap(), 3);
+
+        // Saving the provider's own values is a no-op: it removes the
+        // overrides instead of pinning text the provider already returns.
+        let deduped = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: Some("Kyoto, Japan".into()),
+                subject: Some("Provider Subject".into()),
+                author: Some("Provider Author".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(deduped.manual_overrides.is_empty());
+        let path = deduped.new_path.as_deref().unwrap();
+        assert!(path.contains("kyoto-japan"), "new_path={path:?}");
+        assert!(path.contains("provider-subject"), "new_path={path:?}");
+        {
+            let sess = app.session.lock().await;
+            assert!(sess.provider_ctx.as_ref().unwrap().analysis.files[0]
+                .overrides
+                .is_empty());
+            assert_eq!(sess.manual_overrides_total(), 0);
+        }
+        {
+            let cache = app.cache.lock().await;
+            assert!(!cache.all_overrides().unwrap().contains_key(&content_key));
+        }
     }
 
     #[tokio::test]
