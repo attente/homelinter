@@ -1263,7 +1263,7 @@ impl App {
             .unwrap_or('-');
         let lines = vec![
             Line::from(vec![Span::styled(
-                " Scanning home directory",
+                " Scanning files",
                 Style::new().fg(Color::Cyan).bold(),
             )]),
             Line::from(""),
@@ -1285,7 +1285,7 @@ impl App {
         }
         if self.metadata_total > 0 {
             text.lines.push(Line::from(format!(
-                " metadata: {}/{} suggestions resolved",
+                " metadata: {}/{} resolved",
                 self.metadata_completed, self.metadata_total
             )));
         }
@@ -1389,7 +1389,7 @@ impl App {
         }
         text.lines.push(Line::from(""));
         text.lines
-            .push(Line::from(" q/Esc: cancel the run and return"));
+            .push(Line::from(" q/Esc: quit (cancels the run)"));
         f.render_widget(Paragraph::new(text).block(block("Execution")), area);
     }
 
@@ -1573,24 +1573,23 @@ impl App {
             Line::from(""),
             Line::from(" j or Up/Down         move through suggestions"),
             Line::from(" PageUp/PageDown      page through the list"),
-            Line::from(" space               select / deselect the highlighted suggestion"),
-            Line::from(" a                   select all suggestions matching the filter"),
-            Line::from(" A                   clear the whole selection"),
+            Line::from(" space               toggle the highlighted suggestion"),
+            Line::from(" a                   select all filtered suggestions"),
+            Line::from(" A                   clear the selection"),
             Line::from(" t                   cycle the type filter (all/move/delete)"),
             Line::from(" k                   cycle the asset-kind filter"),
             Line::from(" u                   cycle the status filter"),
             Line::from(" c                   clear all filters"),
-            Line::from(" x                   execute the selection (asks for confirmation)"),
-            Line::from(" e                   export the selection to a shell script"),
-            Line::from(" n                   scan another root (edit root, Tab toggles hidden)"),
-            Line::from(" g                   view the effective configuration (read-only)"),
-            Line::from(" v / l               view the metadata cache (from the config view)"),
+            Line::from(" x                   execute selection (asks to confirm)"),
+            Line::from(" e                   export selection as a shell script"),
+            Line::from(" n                   scan another root (Tab toggles hidden)"),
+            Line::from(" g                   view the configuration (read-only)"),
+            Line::from(" v / l               view the metadata cache (from config)"),
             Line::from(" ?                   show this help"),
             Line::from(" q / Esc / Ctrl-C     quit"),
             Line::from(""),
             Line::from(" Filtering affects navigation and bulk selection only."),
-            Line::from(" Dependent operations (e.g. symlink repairs) run with their parent"),
-            Line::from(" suggestion automatically."),
+            Line::from(" Dependent operations (e.g. symlink repairs) run with their parent suggestion."),
         ]);
         f.render_widget(Clear, area);
         f.render_widget(Paragraph::new(text).block(block("Help")), area);

@@ -110,12 +110,10 @@ export function ConfigView(props: ConfigViewProps) {
         </button>
       </div>
       <p className="note">
-        This is the service's live effective configuration; it refreshes
-        automatically whenever the configuration changes, in any client.
-        Settings are edited on the scan setup page (saved to the service as they
-        change) or directly in the config file. A key set to null there resets
-        to its built-in default. Changes apply to the next scan; a scan in
-        progress keeps the configuration snapshot it started under.
+        The service's live effective configuration, refreshed whenever any
+        client changes it. Edit settings on the scan setup page or in the
+        config file; null resets a key to its default. Changes apply to the
+        next scan, while a scan in progress keeps its snapshot.
       </p>
       {configWarnings.length > 0 && (
         <div className="config-warnings">
@@ -131,9 +129,9 @@ export function ConfigView(props: ConfigViewProps) {
         {doc === null ? "loading..." : JSON.stringify(doc, null, 2)}
       </pre>
       <p className="hint">
-        Per-kind description overrides ([description.photo] and friends) are
-        visible in the document above. API keys are write-only and never shown:
-        they are set in the config file or on the scan setup page.
+        Per-modality description overrides ([description.image] and friends)
+        appear above. API keys are write-only; set them in the config file or
+        on the scan setup page.
       </p>
       {showCache && (
         <section className="cache-view">
@@ -212,9 +210,9 @@ export function ConfigView(props: ConfigViewProps) {
           >
             <h2>Clear the metadata cache?</h2>
             <p>
-              This deletes all cached metadata. The next scan has to re-extract
-              everything from scratch, which is slower and may re-run external
-              tools. This cannot be undone.
+              Deletes all cached metadata. The next scan re-extracts everything
+              from scratch, which is slower and may re-run external tools. This
+              cannot be undone.
             </p>
             <div className="modal-actions">
               <button

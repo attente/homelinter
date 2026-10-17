@@ -769,21 +769,20 @@ export function ScanForm(props: ScanFormProps) {
     <main className="scan-form">
       <h1>homelinter</h1>
       <p className="subtitle">
-        Duplicate and home cleanup suggestions for your files
+        Deduplication and cleanup suggestions for your files
       </p>
       {hasSuggestions && (
         <div className="resume">
-          <span>An existing scan session has suggestions ready.</span>
+          <span>An earlier scan has suggestions ready.</span>
           <button type="button" onClick={onResume}>
             open suggestions
           </button>
         </div>
       )}
       <p className="hint">
-        The settings below are the service's persistent configuration: changes
-        are saved to the service as you edit and apply to the next scan. Only
-        the scan root, hidden files, and destination paths are per-scan choices
-        and are never saved.
+        These settings persist in the service and apply to the next scan. The
+        sections save as you edit; scan root, hidden files, and destination
+        paths save on scan start.
       </p>
       {saveNote !== null && <p className="error">{saveNote}</p>}
       {configWarnings.length > 0 && (
@@ -831,8 +830,8 @@ export function ScanForm(props: ScanFormProps) {
         >
           <summary>Destination paths (optional)</summary>
           <p className="hint">
-            Destination format string per asset kind, relative to home or
-            absolute; must contain a placeholder. Empty uses the configured
+            Destination format per asset kind, relative to home or absolute,
+            with a placeholder. Empty clears the override and uses the built-in
             default shown as the placeholder.
           </p>
           <div className="field-grid">
@@ -855,11 +854,9 @@ export function ScanForm(props: ScanFormProps) {
             <details className="scan-paths">
               <summary>Scan exclusions</summary>
               <p className="hint">
-                Additional glob patterns, one per line; saved to the
-                configuration as you edit. They are added to the built-in
-                exclusions below unless those are turned off. Prefix a
-                built-in name with {"!"} to scan that directory again (for
-                example {"!build"}).
+                Extra glob patterns, one per line, saved as you edit. Added to
+                the built-in exclusions below unless those are off. Prefix a
+                built-in name with {"!"} to re-include it (e.g. {"!build"}).
               </p>
               <textarea
                 rows={4}
@@ -876,7 +873,7 @@ export function ScanForm(props: ScanFormProps) {
                   }
                 />
                 <span>
-                  Also exclude common dependency, cache, and build directories
+                  Exclude common dependency, cache, and build directories
                 </span>
               </label>
               {builtinExclusions.length > 0 && (
@@ -1054,11 +1051,9 @@ export function ScanForm(props: ScanFormProps) {
             <details className="scan-paths">
               <summary>Extraction, limits & cache</summary>
               <p className="hint">
-                Document text extraction command per format; arguments are split
-                on spaces and {"{path}"} marks the input file. The disable
-                checkbox turns extraction off for that format; empty uses the
-                built-in default command. All values are saved to the
-                configuration as you edit.
+                Extraction command per format; arguments split on spaces and
+                {"{path}"} is the input file. The checkbox disables a format;
+                empty uses the built-in default. Saved as you edit.
               </p>
               <div className="field-grid">
                 {EXTRACTION_DEFAULTS.map(([format, def]) => (

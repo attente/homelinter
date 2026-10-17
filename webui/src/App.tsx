@@ -807,9 +807,8 @@ export default function App() {
       <>
         {configDirty && (
           <p className="banner warn" role="status">
-            Configuration changed after this scan: the current suggestions still
-            use the settings from the scan. Start a new scan to apply the
-            changes.
+            Configuration changed after this scan: the suggestions still use the
+            scan's settings. Start a new scan to apply the changes.
           </p>
         )}
         <Browse
@@ -860,8 +859,8 @@ export default function App() {
           >
             <h2>Configuration changed since this scan</h2>
             <p>
-              Destinations and provider settings still reflect the configuration
-              from the scan; the saved changes apply to the next scan.
+              Destinations and provider settings still reflect the scan's
+              configuration; saved changes apply to the next scan.
             </p>
             <div className="modal-actions">
               <button
