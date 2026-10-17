@@ -16,7 +16,7 @@ export interface ScanFormValues {
 // other kinds: those files are unmanaged and never moved or deduplicated.
 const KINDS: Array<[string, string]> = [
   ["document", "Documents/%a-%t.%e"],
-  ["photo", "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
+  ["photo", "Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
   ["video", "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"],
   ["audio", "Audio/%a-%t.%e"],
   ["repository", "Projects/%o/%n"],

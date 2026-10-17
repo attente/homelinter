@@ -234,7 +234,7 @@ When neither configuration nor inference supplies a format string for a kind, th
 | Kind | Default format string |
 |---|---|
 | `document` | `Documents/%a-%t.%e` |
-| `photo` | `Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e` |
+| `photo` | `Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e` |
 | `video` | `Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e` |
 | `audio` | `Audio/%a-%t.%e` |
 | `repository` | `Projects/%o/%n` |
@@ -331,7 +331,7 @@ The configuration file is TOML. The supported schema is:
 # placeholder and name the target file. The original filename is optional
 # (omit %f/%F/%n/%e to discard it and name the target from metadata).
 document = "Documents/%a-%t.%e"
-photo = "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
+photo = "Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 
 [geocoder]
 enabled = false

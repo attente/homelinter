@@ -16,7 +16,7 @@
 # Destination per asset kind, relative to $HOME (or absolute). Each value
 # must contain at least one placeholder. These are the built-in defaults:
 document   = "Documents/%a-%t.%e"
-photo      = "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
+photo      = "Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 video      = "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
 audio      = "Audio/%a-%t.%e"
 repository = "Projects/%o/%n"

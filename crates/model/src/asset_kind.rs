@@ -67,7 +67,7 @@ impl AssetKind {
     pub fn default_format(self) -> &'static str {
         match self {
             AssetKind::Document => "Documents/%a-%t.%e",
-            AssetKind::Photo => "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
+            AssetKind::Photo => "Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
             AssetKind::Video => "Videos/%Y-%m-%d-%H-%M-%S-%l-%s.%e",
             AssetKind::Audio => "Audio/%a-%t.%e",
             AssetKind::Repository => "Projects/%o/%n",

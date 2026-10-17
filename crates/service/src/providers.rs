@@ -3572,7 +3572,7 @@ mod tests {
         let mut formats = BTreeMap::new();
         formats.insert(
             AssetKind::Photo,
-            FormatString::parse("Images/%s.%e").unwrap(),
+            FormatString::parse("Photos/%s.%e").unwrap(),
         );
         let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
         assert_eq!(jobs.len(), 1);
