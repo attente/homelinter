@@ -687,17 +687,6 @@ textarea:focus {
   min-height: 360px;
 }
 
-.config-editor {
-  display: block;
-  width: 100%;
-  min-height: 340px;
-  margin: 0;
-  font-family: var(--mono);
-  font-size: 12px;
-  white-space: pre;
-  overflow: auto;
-}
-
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
