@@ -261,7 +261,6 @@ textarea:focus {
 /* Monospace is reserved for machine-readable content: file paths, code,
    config documents, cache hashes, and the run log. */
 .detail-path,
-.detail-rejected,
 .file-preview-text {
   font-family: var(--mono);
 }
@@ -480,6 +479,7 @@ textarea:focus {
 
 .detail-label {
   color: var(--dim);
+  font-family: var(--sans);
 }
 
 .detail-reason {
