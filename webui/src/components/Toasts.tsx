@@ -13,7 +13,13 @@ export function Toasts(props: ToastsProps) {
       {toasts.map((t, i) => (
         <div key={`${i}-${t}`} className="toast">
           <span>{t}</span>
-          <button type="button" aria-label="dismiss" title="dismiss" onClick={() => onDismiss(i)}>
+          <button
+            type="button"
+            className="close-btn"
+            aria-label="dismiss"
+            title="dismiss"
+            onClick={() => onDismiss(i)}
+          >
             <CloseIcon />
           </button>
         </div>
