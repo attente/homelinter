@@ -1052,7 +1052,7 @@ const MAX_METADATA_CHARS: usize = 240;
 /// framing (content and question placement), the delimiters, or the
 /// metadata cap does not reuse completions cached under the old contract,
 /// which the rendered template alone cannot capture.
-const PROMPT_SCHEMA_REVISION: &[u8] = b"homelinter-prompt-v3";
+const PROMPT_SCHEMA_REVISION: &[u8] = b"homelinter-prompt-v1";
 
 /// Revision of the provider output normalization. It joins both the
 /// description and geocoder settings hashes so a change to the ASCII
