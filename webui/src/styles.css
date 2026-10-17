@@ -462,13 +462,14 @@ textarea:focus {
 
 .path-copy-btn {
   flex: 0 0 auto;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--bg);
   color: var(--dim);
-  font-family: var(--sans);
-  font-size: 11px;
+  line-height: 0;
   cursor: pointer;
 }
 

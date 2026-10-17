@@ -10,6 +10,7 @@ import {
 import { rowText } from '../lib/format';
 import type { Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
+import { CheckIcon, CopyIcon } from './CopyIcon';
 
 export interface FilterState {
   type: 'all' | 'move' | 'delete';
@@ -192,10 +193,11 @@ function PathRow(props: { label: string; value: string }) {
       <button
         type="button"
         className="path-copy-btn"
-        title="copy path to clipboard"
+        title={copied ? 'copied' : 'copy path to clipboard'}
+        aria-label={copied ? 'copied' : 'copy path to clipboard'}
         onClick={() => void copy()}
       >
-        {copied ? 'copied' : 'copy'}
+        {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
     </p>
   );
