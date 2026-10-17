@@ -599,7 +599,11 @@ impl PlaceholderValues {
                 sanitize_metadata_segment(self.file_name.as_deref().unwrap_or(""))
             }
             Placeholder::Stem => self.stem.clone().unwrap_or_default(),
-            Placeholder::Extension => self.extension.clone().unwrap_or_default(),
+            Placeholder::Extension => self
+                .extension
+                .as_deref()
+                .map(str::to_lowercase)
+                .unwrap_or_default(),
         }
     }
 }
@@ -818,6 +822,16 @@ mod tests {
         let p = fs.resolve(&v, home).unwrap().unwrap();
         // %n is the original filename stem, kept verbatim.
         assert_eq!(p, PathBuf::from("/home/alice/Music/artist/2024/IMG_0001"));
+    }
+
+    #[test]
+    fn extension_placeholder_is_lowercased() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Pictures/%n.%e").unwrap();
+        let mut v = vals();
+        v.extension = Some("JPG".into());
+        let p = fs.resolve(&v, home).unwrap().unwrap();
+        assert_eq!(p, PathBuf::from("/home/alice/Pictures/IMG_0001.jpg"));
     }
 
     #[test]
