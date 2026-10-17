@@ -458,11 +458,48 @@ fn is_platform_invalid(_c: char) -> bool {
     }
 }
 
-/// ASCII punctuation that separates words. Underscores and dots are
-/// preserved as filename characters; hyphens are separators so runs of them
-/// collapse with surrounding whitespace into a single hyphen.
+/// Punctuation that separates words. ASCII punctuation (other than the
+/// underscores and dots preserved as filename characters) qualifies, as do
+/// the typographic dash characters such as the en and em dash. Hyphens are
+/// separators too, so a run mixing them with surrounding whitespace or
+/// typographic dashes collapses into a single hyphen.
 fn is_separator_punctuation(c: char) -> bool {
-    c.is_ascii_punctuation() && c != '_' && c != '.'
+    (c.is_ascii_punctuation() && c != '_' && c != '.') || is_unicode_dash(c)
+}
+
+/// The Unicode `Dash` property characters outside ASCII. These are treated
+/// exactly like the ASCII hyphen so that a title such as
+/// `aws-administration---the-definitive-guide` (with an em dash between the
+/// ASCII hyphens) normalizes to a single hyphen instead of preserving the
+/// typographic dash in a filename.
+fn is_unicode_dash(c: char) -> bool {
+    matches!(
+        c,
+        '\u{058a}'
+            | '\u{05be}'
+            | '\u{1400}'
+            | '\u{1806}'
+            | '\u{2010}'
+            | '\u{2011}'
+            | '\u{2012}'
+            | '\u{2013}'
+            | '\u{2014}'
+            | '\u{2015}'
+            | '\u{2e17}'
+            | '\u{2e1a}'
+            | '\u{2e3a}'
+            | '\u{2e3b}'
+            | '\u{2e40}'
+            | '\u{301c}'
+            | '\u{3030}'
+            | '\u{30a0}'
+            | '\u{fe31}'
+            | '\u{fe32}'
+            | '\u{fe58}'
+            | '\u{fe63}'
+            | '\u{ff0d}'
+            | '\u{10ead}'
+    )
 }
 
 /// Characters that may never appear in a host file name.
@@ -687,6 +724,16 @@ mod tests {
         assert_eq!(sanitize_metadata_segment("señor"), "senor");
         // Decomposed input (base + combining mark) normalizes the same way.
         assert_eq!(sanitize_metadata_segment("cafe\u{301}"), "cafe");
+        // Typographic dashes are separators: an em dash between hyphens (or
+        // spaces) collapses with its neighbors into one hyphen.
+        assert_eq!(
+            sanitize_metadata_segment("aws-administration-\u{2014}-the-definitive-guide"),
+            "aws-administration-the-definitive-guide"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("AWS Administration \u{2013} The Definitive Guide"),
+            "aws-administration-the-definitive-guide"
+        );
     }
 
     #[test]
