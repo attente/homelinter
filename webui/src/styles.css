@@ -384,6 +384,13 @@ textarea:focus {
   display: block;
 }
 
+/* In the config toolbar, match the adjacent text buttons: their height is
+   the 1.5em line box plus 3px/1px vertical padding and border. */
+.toolbar .close-btn {
+  width: calc(1.5em + 8px);
+  height: calc(1.5em + 8px);
+}
+
 .detail-body {
   display: flex;
   flex-direction: column;
