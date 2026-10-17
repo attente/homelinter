@@ -1569,25 +1569,39 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
     let Some(commit) = commit_unit_rebuild(&mut sess, &id, rebuild, true) else {
         return false;
     };
-    // Snapshot the progress for the client update published after the
-    // suggestion delta; taken before releasing the lock.
-    let (completed, meta_total) = sess.metadata_progress();
+    let (completed, total) = sess.metadata_progress();
     drop(sess);
-    match commit.updated {
-        Some(item) => app.events.publish(ServerEvent::SuggestionUpdated { item }),
-        None => app.events.publish(ServerEvent::SuggestionRemoved { id }),
+    publish_rebuild_commit(app, &id, &commit, completed, total);
+    true
+}
+
+/// Publish the client deltas for one committed rebuild: the changed row (or
+/// its removal), the metadata-progress snapshot, and any newly rejected ids.
+/// A provider resolution, a manual edit, and an explicit rebuild all call
+/// this after releasing the session lock.
+fn publish_rebuild_commit(
+    app: &AppHandle,
+    id: &str,
+    commit: &RebuildCommit,
+    completed: usize,
+    total: usize,
+) {
+    match &commit.updated {
+        Some(item) => app
+            .events
+            .publish(ServerEvent::SuggestionUpdated { item: item.clone() }),
+        None => app
+            .events
+            .publish(ServerEvent::SuggestionRemoved { id: id.to_string() }),
     }
-    app.events.publish(ServerEvent::MetadataProgress {
-        completed,
-        total: meta_total,
-    });
+    app.events
+        .publish(ServerEvent::MetadataProgress { completed, total });
     if !commit.rejected.is_empty() {
         app.events.publish(ServerEvent::BatchValidated {
             valid: false,
-            rejected: commit.rejected,
+            rejected: commit.rejected.clone(),
         });
     }
-    true
 }
 
 /// The trial view of one unit's file with the collected provider values
@@ -2230,9 +2244,9 @@ pub struct MetadataEdit {
     pub author: Option<String>,
 }
 
-/// Why a manual metadata edit was refused.
+/// Why a manual metadata action was refused.
 #[derive(Debug)]
-pub enum EditMetadataError {
+pub enum MetadataActionError {
     /// The action is not valid for the current session or suggestion.
     Conflict(String),
     /// A value is over the metadata cap or otherwise unusable.
@@ -2244,7 +2258,7 @@ pub enum EditMetadataError {
 fn normalize_manual_value(
     value: &Option<String>,
     field: &str,
-) -> Result<Option<String>, EditMetadataError> {
+) -> Result<Option<String>, MetadataActionError> {
     let Some(raw) = value else {
         return Ok(None);
     };
@@ -2253,8 +2267,41 @@ fn normalize_manual_value(
         return Ok(None);
     }
     validate_metadata_completion(&normalized)
-        .map_err(|e| EditMetadataError::Validation(format!("{field}: {e}")))?;
+        .map_err(|e| MetadataActionError::Validation(format!("{field}: {e}")))?;
     Ok(Some(normalized))
+}
+
+/// Locate the editable move unit behind `id`: its file index and content
+/// identity. Shared by the manual-edit and rebuild paths.
+fn editable_unit(sess: &Session, id: &str) -> Result<(usize, [u8; 32]), MetadataActionError> {
+    let Some(ctx) = sess.provider_ctx.as_ref() else {
+        return Err(MetadataActionError::Conflict(
+            "no scan batch is available".to_string(),
+        ));
+    };
+    let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
+        return Err(MetadataActionError::Conflict(format!(
+            "no suggestion with id {id}"
+        )));
+    };
+    if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
+        return Err(MetadataActionError::Conflict(
+            "metadata does not shape a delete suggestion".to_string(),
+        ));
+    }
+    let Some(index) = ctx
+        .analysis
+        .files
+        .iter()
+        .enumerate()
+        .find(|(_, f)| Suggestion::id_for_target(&f.path) == id)
+        .map(|(i, _)| i)
+    else {
+        return Err(MetadataActionError::Conflict(format!(
+            "no suggestion with id {id}"
+        )));
+    };
+    Ok((index, content_identity(&ctx.analysis.files[index])))
 }
 
 /// Persist a manual metadata edit for one move suggestion and rebuild it in
@@ -2267,43 +2314,14 @@ pub async fn set_suggestion_metadata(
     app: &AppHandle,
     id: &str,
     edit: MetadataEdit,
-) -> Result<Option<Suggestion>, EditMetadataError> {
+) -> Result<Option<Suggestion>, MetadataActionError> {
     let mut sess = app.session.lock().await;
     if !matches!(sess.state, SessionState::Ready | SessionState::Done) {
-        return Err(EditMetadataError::Conflict(
+        return Err(MetadataActionError::Conflict(
             "metadata can only be edited when the batch is ready".to_string(),
         ));
     }
-    let (index, content_key) = {
-        let Some(ctx) = sess.provider_ctx.as_ref() else {
-            return Err(EditMetadataError::Conflict(
-                "no scan batch is available to edit".to_string(),
-            ));
-        };
-        let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
-            return Err(EditMetadataError::Conflict(format!(
-                "no suggestion with id {id}"
-            )));
-        };
-        if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
-            return Err(EditMetadataError::Conflict(
-                "metadata does not shape a delete suggestion".to_string(),
-            ));
-        }
-        let Some(index) = ctx
-            .analysis
-            .files
-            .iter()
-            .enumerate()
-            .find(|(_, f)| Suggestion::id_for_target(&f.path) == id)
-            .map(|(i, _)| i)
-        else {
-            return Err(EditMetadataError::Conflict(format!(
-                "no suggestion with id {id}"
-            )));
-        };
-        (index, content_identity(&ctx.analysis.files[index]))
-    };
+    let (index, content_key) = editable_unit(&sess, id)?;
     let location = normalize_manual_value(&edit.location, "location")?;
     let subject = normalize_manual_value(&edit.subject, "subject")?;
     let author = normalize_manual_value(&edit.author, "author")?;
@@ -2322,7 +2340,7 @@ pub async fn set_suggestion_metadata(
                 None => cache.override_clear(&content_key, field),
             };
             result.map_err(|e| {
-                EditMetadataError::Conflict(format!("cannot persist metadata edit: {e}"))
+                MetadataActionError::Conflict(format!("cannot persist metadata edit: {e}"))
             })?;
         }
     }
@@ -2346,29 +2364,71 @@ pub async fn set_suggestion_metadata(
     // A still-pending unit keeps its flag: an in-flight request for a field
     // the user did not override may rebuild the destination again.
     let Some(commit) = commit_unit_rebuild(&mut sess, &id, rebuild, false) else {
-        return Err(EditMetadataError::Conflict(format!(
+        return Err(MetadataActionError::Conflict(format!(
             "no suggestion with id {id}"
         )));
     };
     let (completed, total) = sess.metadata_progress();
     let updated = commit.updated.clone();
     drop(sess);
-    match &commit.updated {
-        Some(item) => app
-            .events
-            .publish(ServerEvent::SuggestionUpdated { item: item.clone() }),
-        None => app
-            .events
-            .publish(ServerEvent::SuggestionRemoved { id: id.clone() }),
+    publish_rebuild_commit(app, &id, &commit, completed, total);
+    Ok(updated)
+}
+
+/// Re-apply the effective metadata for one move suggestion and rebuild its
+/// destination in place, without a scan or a provider call. The effective
+/// metadata is the already-resolved provider values plus any manual override
+/// persisted for this content, so a client can force a fresh destination (for
+/// example after an override was saved outside this session). Returns the
+/// rebuilt suggestion, or `None` when it no longer applies (the file stays
+/// put).
+pub async fn rebuild_suggestion(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Option<Suggestion>, MetadataActionError> {
+    let mut sess = app.session.lock().await;
+    if !matches!(sess.state, SessionState::Ready | SessionState::Done) {
+        return Err(MetadataActionError::Conflict(
+            "metadata can only be rebuilt when the batch is ready".to_string(),
+        ));
     }
-    app.events
-        .publish(ServerEvent::MetadataProgress { completed, total });
-    if !commit.rejected.is_empty() {
-        app.events.publish(ServerEvent::BatchValidated {
-            valid: false,
-            rejected: commit.rejected,
-        });
+    let (index, content_key) = editable_unit(&sess, id)?;
+    // Re-read the persisted override for this content (it may have been saved
+    // through another suggestion with identical content) and apply it to the
+    // in-memory file, so the rebuild matches a fresh scan.
+    let overrides = {
+        let cache = app.cache.lock().await;
+        cache
+            .all_overrides()
+            .unwrap_or_default()
+            .get(&content_key)
+            .cloned()
+            .unwrap_or_default()
+    };
+    {
+        let ctx = sess.provider_ctx.as_mut().expect("checked above");
+        Arc::make_mut(&mut ctx.analysis).files[index].overrides = overrides;
     }
+    let (id, rebuild) = {
+        let ctx = sess.provider_ctx.as_ref().expect("checked above");
+        let trial = trial_unit_file(ctx, index);
+        let fmt = ctx.formats.get(&trial.kind);
+        (
+            Suggestion::id_for_target(&ctx.analysis.files[index].path),
+            rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks),
+        )
+    };
+    // A still-pending unit keeps its flag so an in-flight provider request can
+    // still rebuild the destination when it resolves.
+    let Some(commit) = commit_unit_rebuild(&mut sess, &id, rebuild, false) else {
+        return Err(MetadataActionError::Conflict(format!(
+            "no suggestion with id {id}"
+        )));
+    };
+    let (completed, total) = sess.metadata_progress();
+    let updated = commit.updated.clone();
+    drop(sess);
+    publish_rebuild_commit(app, &id, &commit, completed, total);
     Ok(updated)
 }
 
@@ -3994,7 +4054,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, EditMetadataError::Conflict(_)));
+        assert!(matches!(err, MetadataActionError::Conflict(_)));
     }
 
     #[tokio::test]

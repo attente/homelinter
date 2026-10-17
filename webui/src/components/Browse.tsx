@@ -40,6 +40,7 @@ interface BrowseProps {
     id: string,
     edit: { location: string; subject: string; author: string },
   ) => void;
+  onRebuild: (id: string) => void;
 }
 
 // The service falls back to a bare "lat,lng" string when reverse geocoding
@@ -106,6 +107,26 @@ function RefreshMetadataButton(props: {
       onClick={() => onRefresh(suggestion.id)}
     >
       {pending ? 're-requesting...' : 're-request metadata'}
+    </button>
+  );
+}
+
+/** Re-apply the effective metadata and rebuild this move's destination without
+ *  a scan or a provider call. */
+function RebuildButton(props: {
+  suggestion: Suggestion;
+  onRebuild: (id: string) => void;
+}) {
+  const { suggestion, onRebuild } = props;
+  if (suggestion.type !== 'move') return null;
+  return (
+    <button
+      type="button"
+      className="meta-refresh-btn"
+      title="re-apply saved metadata edits and rebuild the destination"
+      onClick={() => onRebuild(suggestion.id)}
+    >
+      rebuild
     </button>
   );
 }
@@ -189,8 +210,9 @@ function DetailPane(props: {
     id: string,
     edit: { location: string; subject: string; author: string },
   ) => void;
+  onRebuild: (id: string) => void;
 }) {
-  const { suggestion, onClose, onRefreshMetadata, onSetMetadata } = props;
+  const { suggestion, onClose, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [tab, setTab] = useState<TabId>('preview');
 
   const m = suggestion.metadata ?? {};
@@ -319,6 +341,7 @@ function DetailPane(props: {
             suggestion={suggestion}
             onRefresh={onRefreshMetadata}
           />
+          <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
         </div>
       )}
 
@@ -351,6 +374,7 @@ function DetailPane(props: {
             suggestion={suggestion}
             onRefresh={onRefreshMetadata}
           />
+          <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
         </div>
       )}
     </aside>
@@ -399,7 +423,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata, onSetMetadata } = props;
+  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
 
@@ -535,6 +559,7 @@ export function Browse(props: BrowseProps) {
             onClose={() => setOpenId(null)}
             onRefreshMetadata={onRefreshMetadata}
             onSetMetadata={onSetMetadata}
+            onRebuild={onRebuild}
           />
         )}
       </div>

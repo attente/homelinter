@@ -150,6 +150,7 @@ pub fn router(app: AppHandle) -> Router {
             "/api/v1/suggestions/{id}/metadata",
             put(suggestion_metadata),
         )
+        .route("/api/v1/suggestions/{id}/rebuild", post(suggestion_rebuild))
         .route("/api/v1/selection", get(selection_get).put(selection_put))
         .route("/api/v1/selection/add", post(selection_add))
         .route("/api/v1/selection/remove", post(selection_remove))
@@ -515,10 +516,28 @@ async fn suggestion_metadata(
 ) -> ApiResult {
     match crate::providers::set_suggestion_metadata(&app, &id, edit).await {
         Ok(item) => ok(json!({ "item": item })),
-        Err(crate::providers::EditMetadataError::Validation(message)) => {
+        Err(crate::providers::MetadataActionError::Validation(message)) => {
             Err(err(ErrorCode::ValidationFailed, message))
         }
-        Err(crate::providers::EditMetadataError::Conflict(message)) => {
+        Err(crate::providers::MetadataActionError::Conflict(message)) => {
+            Err(err(ErrorCode::Conflict, message))
+        }
+    }
+}
+
+/// Re-apply the effective metadata (including persisted manual overrides) and
+/// rebuild one move suggestion without a scan or a provider call; used to
+/// propagate an edit saved for identical content to another suggestion.
+async fn suggestion_rebuild(
+    State(app): State<AppHandle>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult {
+    match crate::providers::rebuild_suggestion(&app, &id).await {
+        Ok(item) => ok(json!({ "item": item })),
+        Err(crate::providers::MetadataActionError::Validation(message)) => {
+            Err(err(ErrorCode::ValidationFailed, message))
+        }
+        Err(crate::providers::MetadataActionError::Conflict(message)) => {
             Err(err(ErrorCode::Conflict, message))
         }
     }

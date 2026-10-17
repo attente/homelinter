@@ -304,6 +304,22 @@ impl Client {
         Ok(v)
     }
 
+    /// POST /api/v1/suggestions/{id}/rebuild: re-apply the effective metadata
+    /// (including persisted manual overrides) and rebuild the suggestion's
+    /// destination without a scan or a provider call. Returns the rebuilt
+    /// suggestion under `{"item": ...}`, or `{"item": null}` when it no
+    /// longer applies.
+    pub async fn rebuild_suggestion(&self, id: &str) -> Result<Value, ClientsError> {
+        let (_, v) = self
+            .json(
+                Method::POST,
+                &format!("/api/v1/suggestions/{id}/rebuild"),
+                None,
+            )
+            .await?;
+        Ok(v)
+    }
+
     /// GET /api/v1/selection: `{"ids": [...]}`.
     pub async fn selection(&self) -> Result<Value, ClientsError> {
         let (_, v) = self.json(Method::GET, "/api/v1/selection", None).await?;

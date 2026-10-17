@@ -141,6 +141,17 @@ export const api = {
     return res.item;
   },
 
+  /** Re-apply the effective metadata (including persisted manual overrides)
+   *  and rebuild one move suggestion without a scan or provider call. Returns
+   *  the rebuilt suggestion, or null when it no longer applies. */
+  async rebuildSuggestion(id: string): Promise<Suggestion | null> {
+    const res = await request<{ item: Suggestion | null }>(
+      `/suggestions/${encodeURIComponent(id)}/rebuild`,
+      { method: "POST" },
+    );
+    return res.item;
+  },
+
   async selectionPut(ids: string[]): Promise<void> {
     await request<void>("/selection", {
       method: "PUT",

@@ -435,6 +435,24 @@ impl App {
         }
     }
 
+    /// Re-apply the effective metadata for the highlighted move suggestion
+    /// and rebuild its destination, without a scan or a provider call. Only
+    /// move suggestions have a destination.
+    async fn rebuild_current(&mut self) {
+        let Some(idx) = self.filtered_index(self.cursor) else {
+            return;
+        };
+        let (id, typ) = (self.rows[idx].id.clone(), self.rows[idx].typ.clone());
+        if typ != "move" {
+            self.toast = Some("metadata does not shape a delete suggestion".to_string());
+            return;
+        }
+        match self.client.rebuild_suggestion(&id).await {
+            Ok(_) => self.refresh_after_mutation().await,
+            Err(e) => self.toast = Some(format!("rebuild failed: {e}")),
+        }
+    }
+
     async fn select_all_filtered(&mut self) {
         let ids: Vec<String> = self
             .filtered_ids()
@@ -1030,6 +1048,7 @@ impl App {
             }
             KeyCode::Char('g') => self.open_config().await,
             KeyCode::Char('m') => self.refresh_metadata_current().await,
+            KeyCode::Char('b') => self.rebuild_current().await,
             KeyCode::Char('n') => {
                 self.prompt = Some(Prompt {
                     title: self.scan_prompt_title(),
@@ -1543,7 +1562,7 @@ impl App {
 
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  m re-request  x execute  e export  n scan  g config  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  m re-request  b rebuild  x execute  e export  n scan  g config  ? help  q quit",
         )];
         if let Some(t) = &self.toast {
             lines.push(Line::from(vec![Span::styled(
@@ -1768,7 +1787,10 @@ fn detail_text(r: &Row) -> Text<'static> {
     if r.pending_meta {
         lines.push(Line::from(vec![
             Span::styled("metadata: ", Style::new().fg(Color::DarkGray)),
-            Span::styled("pending (m to re-request)", Style::new().fg(Color::Yellow)),
+            Span::styled(
+                "pending (m to re-request, b to rebuild)",
+                Style::new().fg(Color::Yellow),
+            ),
         ]));
     }
     Text::from(lines)

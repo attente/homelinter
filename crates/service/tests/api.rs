@@ -463,6 +463,64 @@ async fn suggestion_metadata_edit_persists_and_rebuilds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn suggestion_rebuild_reapplies_metadata_and_rejects_deletes() {
+    let env = Env::new("meta_rebuild");
+    let app = env.service();
+    seed_duplicates(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let items = list["items"].as_array().unwrap();
+    let move_id = items
+        .iter()
+        .find(|s| s["type"] == "move")
+        .and_then(|s| s["id"].as_str())
+        .expect("a move suggestion")
+        .to_string();
+    let delete_id = items
+        .iter()
+        .find(|s| s["type"] == "delete")
+        .and_then(|s| s["id"].as_str())
+        .expect("a delete suggestion")
+        .to_string();
+
+    // Saving an override is reflected immediately; a later rebuild re-applies
+    // the persisted override without re-entering the values.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &format!("/api/v1/suggestions/{move_id}/metadata"),
+        Some(json!({ "subject": "Rebuilt Subject" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/suggestions/{move_id}/rebuild"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(v["item"].is_object());
+    assert_eq!(v["item"]["metadata"]["title"], "Rebuilt Subject");
+
+    // An unknown id has no batch context, and a delete has no destination to
+    // rebuild.
+    let (status, _) = request(&app, "POST", "/api/v1/suggestions/missing/rebuild", None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/suggestions/{delete_id}/rebuild"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settings_writes_persist_and_affect_future_scans() {
     let env = Env::new("scan_settings");
     let app = env.service();

@@ -736,6 +736,26 @@ export default function App() {
     [pushToast],
   );
 
+  // Re-apply the effective metadata for this suggestion and rebuild its
+  // destination, without a scan or a provider call.
+  const rebuildSuggestion = useCallback(
+    async (id: string) => {
+      try {
+        const updated = await api.rebuildSuggestion(id);
+        setSt((prev) => ({
+          ...prev,
+          suggestions: updated
+            ? prev.suggestions.map((s) => (s.id === id ? updated : s))
+            : prev.suggestions.filter((s) => s.id !== id),
+        }));
+        pushToast(updated ? 'suggestion rebuilt' : 'rebuild removed the suggestion');
+      } catch (e: unknown) {
+        pushToast(`cannot rebuild: ${resolveApiError(e)}`);
+      }
+    },
+    [pushToast],
+  );
+
   const dismissPending = useCallback(() => {
     setSt((prev) => ({ ...prev, pendingAction: null }));
   }, []);
@@ -877,6 +897,7 @@ export default function App() {
           onExport={() => void exportPlan()}
           onRefreshMetadata={(id) => void refreshMetadata(id)}
           onSetMetadata={(id, edit) => void setMetadata(id, edit)}
+          onRebuild={(id) => void rebuildSuggestion(id)}
         />
       </>
     );
