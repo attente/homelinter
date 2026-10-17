@@ -271,6 +271,16 @@ impl Client {
         Ok(v)
     }
 
+    /// POST /api/v1/suggestions/{id}/refresh: invalidate one suggestion's
+    /// cached provider metadata and re-request it. Returns the suggestion
+    /// marked pending under `{"item": ...}`.
+    pub async fn refresh_metadata(&self, id: &str) -> Result<Value, ClientsError> {
+        let (_, v) = self
+            .json(Method::POST, &format!("/api/v1/suggestions/{id}/refresh"), None)
+            .await?;
+        Ok(v)
+    }
+
     /// GET /api/v1/selection: `{"ids": [...]}`.
     pub async fn selection(&self) -> Result<Value, ClientsError> {
         let (_, v) = self.json(Method::GET, "/api/v1/selection", None).await?;

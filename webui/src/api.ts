@@ -116,6 +116,16 @@ export const api = {
     return request<{ ids: string[] }>("/selection");
   },
 
+  /** Invalidate one suggestion's cached provider metadata and re-request
+   *  it. Returns the updated suggestion, now marked pending. */
+  async refreshMetadata(id: string): Promise<Suggestion> {
+    const res = await request<{ item: Suggestion }>(
+      `/suggestions/${encodeURIComponent(id)}/refresh`,
+      { method: "POST" },
+    );
+    return res.item;
+  },
+
   async selectionPut(ids: string[]): Promise<void> {
     await request<void>("/selection", {
       method: "PUT",

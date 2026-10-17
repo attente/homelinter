@@ -215,11 +215,15 @@ impl Session {
     /// Progress of outstanding provider metadata requests as
     /// `(completed, total)`: the number of suggestions that originally had
     /// provider requests and have now had every request resolve, over the
-    /// number that originally had any. `(0, 0)` when the current batch has
-    /// no provider-dependent suggestions.
+    /// number that ever had any (a re-request does not change the total).
+    /// `(0, 0)` when the current batch has no provider-dependent
+    /// suggestions.
     pub fn metadata_progress(&self) -> (usize, usize) {
         match &self.provider_ctx {
-            Some(ctx) => (ctx.pending_done, ctx.pending_units.len() + ctx.pending_done),
+            Some(ctx) => (
+                ctx.total_units.len().saturating_sub(ctx.pending_units.len()),
+                ctx.total_units.len(),
+            ),
             None => (0, 0),
         }
     }

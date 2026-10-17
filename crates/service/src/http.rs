@@ -145,6 +145,7 @@ pub fn router(app: AppHandle) -> Router {
         .route("/api/v1/suggestions", get(suggestions_list))
         .route("/api/v1/suggestions/{id}", get(suggestion_get))
         .route("/api/v1/suggestions/{id}/preview", get(suggestion_preview))
+        .route("/api/v1/suggestions/{id}/refresh", post(suggestion_refresh))
         .route("/api/v1/selection", get(selection_get).put(selection_put))
         .route("/api/v1/selection/add", post(selection_add))
         .route("/api/v1/selection/remove", post(selection_remove))
@@ -496,6 +497,19 @@ async fn suggestion_get(State(app): State<AppHandle>, AxumPath(id): AxumPath<Str
             ErrorCode::NotFound,
             format!("no suggestion with id {id}"),
         )),
+    }
+}
+
+/// Invalidate one suggestion's cached provider metadata and re-request it.
+/// Runs asynchronously; the suggestion is returned marked pending and an
+/// event carries the eventual update.
+async fn suggestion_refresh(
+    State(app): State<AppHandle>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult {
+    match crate::providers::refresh_suggestion_metadata(&app, &id).await {
+        Ok(item) => accepted(json!({ "item": item })),
+        Err(message) => Err(err(ErrorCode::Conflict, message)),
     }
 }
 

@@ -417,6 +417,26 @@ impl App {
         }
     }
 
+    /// Discard the cached provider metadata for the highlighted suggestion
+    /// and ask the service to fetch it again. Only move suggestions carry
+    /// provider metadata; a delete has nothing to re-request.
+    async fn refresh_metadata_current(&mut self) {
+        let Some(idx) = self.filtered_index(self.cursor) else {
+            return;
+        };
+        let (id, typ) = (self.rows[idx].id.clone(), self.rows[idx].typ.clone());
+        if typ != "move" {
+            self.toast = Some(
+                "provider metadata does not shape a delete suggestion".to_string(),
+            );
+            return;
+        }
+        match self.client.refresh_metadata(&id).await {
+            Ok(_) => self.refresh_after_mutation().await,
+            Err(e) => self.toast = Some(format!("re-request failed: {e}")),
+        }
+    }
+
     async fn select_all_filtered(&mut self) {
         let ids: Vec<String> = self
             .filtered_ids()
@@ -1011,6 +1031,7 @@ impl App {
                 }
             }
             KeyCode::Char('g') => self.open_config().await,
+            KeyCode::Char('m') => self.refresh_metadata_current().await,
             KeyCode::Char('n') => {
                 self.prompt = Some(Prompt {
                     title: self.scan_prompt_title(),
@@ -1524,7 +1545,7 @@ impl App {
 
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  x execute  e export  n scan  g config  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  m re-request  x execute  e export  n scan  g config  ? help  q quit",
         )];
         if let Some(t) = &self.toast {
             lines.push(Line::from(vec![Span::styled(
@@ -1580,6 +1601,7 @@ impl App {
             Line::from(" k                   cycle the asset-kind filter"),
             Line::from(" u                   cycle the status filter"),
             Line::from(" c                   clear all filters"),
+            Line::from(" m                   re-request the highlighted suggestion's provider metadata"),
             Line::from(" x                   execute selection (asks to confirm)"),
             Line::from(" e                   export selection as a shell script"),
             Line::from(" n                   scan another root (Tab toggles hidden)"),
@@ -1739,6 +1761,12 @@ fn detail_text(r: &Row) -> Text<'static> {
         lines.push(Line::from(vec![
             Span::styled("rejected: ", Style::new().fg(Color::Red)),
             Span::raw(r.rejection.clone()),
+        ]));
+    }
+    if r.pending_meta {
+        lines.push(Line::from(vec![
+            Span::styled("metadata: ", Style::new().fg(Color::DarkGray)),
+            Span::styled("pending (m to re-request)", Style::new().fg(Color::Yellow)),
         ]));
     }
     Text::from(lines)

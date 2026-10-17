@@ -360,6 +360,50 @@ async fn scan_produces_validated_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn suggestion_refresh_conflicts_without_provider_work() {
+    let env = Env::new("refresh");
+    let app = env.service();
+    seed_duplicates(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let move_id = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["type"] == "move")
+        .and_then(|s| s["id"].as_str())
+        .expect("a move suggestion")
+        .to_string();
+
+    // This hermetic config has no provider configured: the re-request is
+    // refused with a conflict and the suggestion is left untouched.
+    let (status, v) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/suggestions/{move_id}/refresh"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(v["error"]["code"], "conflict");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no provider metadata"));
+
+    // An unknown id has no batch context either, and is also a conflict.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/suggestions/missing/refresh",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settings_writes_persist_and_affect_future_scans() {
     let env = Env::new("scan_settings");
     let app = env.service();

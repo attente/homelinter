@@ -200,6 +200,39 @@ impl Cache {
         Ok(())
     }
 
+    /// Overwrite a cache entry. Ordinary inserts are write-once, but an
+    /// explicit per-suggestion re-request must replace the value the user
+    /// rejected even if a stale in-flight request re-inserted it first.
+    pub fn replace(
+        &self,
+        key: &[u8; 32],
+        kind: &str,
+        provider_id: &str,
+        input_hash: &[u8; 32],
+        value: &str,
+    ) -> rusqlite::Result<()> {
+        let created_at = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO entries (cache_key, kind, provider, input_hash, value, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                 value = excluded.value,
+                 created_at = excluded.created_at",
+            params![key.as_slice(), kind, provider_id, input_hash.as_slice(), value, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one entry by key; a no-op when the key is absent. Used to
+    /// invalidate exactly the results of a per-suggestion re-request.
+    pub fn remove(&self, key: &[u8; 32]) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM entries WHERE cache_key = ?1",
+            params![key.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// Clear all cached results in a single transactional write. Never
     /// deletes the cache file.
     pub fn clear(&self) -> rusqlite::Result<usize> {
@@ -387,6 +420,29 @@ mod tests {
 
         // Paging beyond the end yields an empty slice, not an error.
         assert!(c.list(None, 5, 10).unwrap().is_empty());
+        drop(c);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replace_and_remove_override_write_once() {
+        let dir = tmp();
+        let c = Cache::open_dir(&dir);
+        let key = cache_key(KIND_DESCRIPTION, "description:ollama:m", &[4u8; 32], &[5u8; 32]);
+        c.put(&key, KIND_DESCRIPTION, "description:ollama:m", &[5u8; 32], "old")
+            .unwrap();
+        // `replace` overwrites the write-once value, as a re-request needs.
+        c.replace(&key, KIND_DESCRIPTION, "description:ollama:m", &[5u8; 32], "new")
+            .unwrap();
+        assert_eq!(
+            c.get(&key, "description:ollama:m").unwrap().as_deref(),
+            Some("new")
+        );
+        // Removing the entry clears it entirely.
+        c.remove(&key).unwrap();
+        assert!(c.get(&key, "description:ollama:m").unwrap().is_none());
+        // Removing an absent key is a no-op, not an error.
+        c.remove(&key).unwrap();
         drop(c);
         std::fs::remove_dir_all(&dir).ok();
     }

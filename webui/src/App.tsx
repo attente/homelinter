@@ -686,6 +686,26 @@ export default function App() {
     await doExport(ids);
   }, [batchIsStale, batchSize, doExport, pushToast, readSelection]);
 
+  // Per-suggestion metadata re-request: invalidate this suggestion's cached
+  // provider results and ask again, without re-running the scan. The
+  // service returns it marked pending and streams the resolved update.
+  const refreshMetadata = useCallback(
+    async (id: string) => {
+      try {
+        const updated = await api.refreshMetadata(id);
+        setSt((prev) => ({
+          ...prev,
+          suggestions: prev.suggestions.map((s) =>
+            s.id === id ? updated : s,
+          ),
+        }));
+      } catch (e: unknown) {
+        pushToast(`cannot re-request metadata: ${resolveApiError(e)}`);
+      }
+    },
+    [pushToast],
+  );
+
   const dismissPending = useCallback(() => {
     setSt((prev) => ({ ...prev, pendingAction: null }));
   }, []);
@@ -825,6 +845,7 @@ export default function App() {
           onClearSelection={clearSelection}
           onRun={() => void run()}
           onExport={() => void exportPlan()}
+          onRefreshMetadata={(id) => void refreshMetadata(id)}
         />
       </>
     );

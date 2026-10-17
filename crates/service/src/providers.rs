@@ -41,7 +41,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine as _};
-use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::header::HeaderValue;
@@ -52,7 +51,7 @@ use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
-use homelinter_analyze::Analysis;
+use homelinter_analyze::{Analysis, AnalyzedFile};
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
     GeocoderService, RawConfig, DEFAULT_GEOCODER_LANGUAGE, DEFAULT_MAX_CONTEXT,
@@ -60,6 +59,7 @@ use homelinter_model::config::{
 };
 use homelinter_model::format::{normalize_provider_text, FormatString, Placeholder, Segment};
 use homelinter_model::prompt::render_prompt_template;
+use homelinter_model::suggestion::SessionState;
 use homelinter_model::suggestion::{Suggestion, SuggestionStatus, SuggestionType};
 use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
@@ -95,6 +95,9 @@ impl ProviderKind {
 pub struct UnitRef {
     /// Scan epoch that produced the job; other epochs are stale.
     pub epoch: u64,
+    /// Per-unit re-request generation. A refresh bumps this so any request
+    /// from before the refresh is dropped instead of resolving it.
+    pub generation: u64,
     /// Index into `ProviderScanCtx.analysis.files`.
     pub index: usize,
     /// The unit's path, re-verified when the result is applied.
@@ -183,6 +186,9 @@ pub struct ProviderJob {
     /// Canonical request tuple for the cache key.
     pub input_hash: [u8; 32],
     pub input: ProviderInput,
+    /// Set by a per-suggestion re-request: skip the cache read and
+    /// overwrite the entry on success instead of the write-once insert.
+    pub force: bool,
 }
 
 /// Everything the worker needs to refresh one completed scan's suggestions
@@ -201,14 +207,22 @@ pub struct ProviderScanCtx {
     /// Outstanding provider requests per analyzed unit. A unit's suggestion
     /// stays `metadata_pending` until this count reaches zero.
     pub pending: BTreeMap<usize, u32>,
-    /// Unit indices whose suggestion was marked `metadata_pending` when the
-    /// scan published its batch. Its length is the denominator of the
-    /// metadata-progress display (suggestions that originally had provider
-    /// requests). Units without a suggestion are excluded.
+    /// Per-unit re-request generation, bumped by an explicit refresh so
+    /// in-flight requests from before it are dropped. Missing = 0.
+    pub generations: BTreeMap<usize, u64>,
+    /// Unit indices with a per-suggestion re-request in flight. A second
+    /// re-request for the same unit is rejected until its jobs resolve, so
+    /// two forced writes can never race over one cache entry.
+    pub refreshing: std::collections::BTreeSet<usize>,
+    /// Every unit index ever marked `metadata_pending`, whether or not its
+    /// requests have since resolved. Its length is the stable denominator
+    /// of the metadata-progress display, so a re-request does not inflate
+    /// the total.
+    pub total_units: std::collections::BTreeSet<usize>,
+    /// Unit indices with outstanding provider requests whose suggestion is
+    /// marked `metadata_pending`. `total_units.len() - pending_units.len()`
+    /// is the progress numerator. Units without a suggestion are excluded.
     pub pending_units: std::collections::BTreeSet<usize>,
-    /// Number of `pending_units` whose provider requests have all resolved
-    /// (the numerator of the metadata-progress display).
-    pub pending_done: usize,
 }
 
 /// Latest provider-derived metadata for one analyzed unit.
@@ -234,10 +248,36 @@ impl JobQueue {
         })
     }
 
-    /// Enqueue one job; never waits on the worker.
+    /// Enqueue one ordinary scan job at the back; never waits on the worker.
     pub fn enqueue(&self, job: ProviderJob) {
         self.jobs.lock().unwrap().push_back(job);
-        self.wake.notify_waiters();
+        self.wake.notify_one();
+    }
+
+    /// Put a user-requested refresh ahead of queued scan work. Preserve the
+    /// refresh's internal order while placing the whole group at the front.
+    pub fn enqueue_priority(&self, jobs: Vec<ProviderJob>) {
+        let mut queue = self.jobs.lock().unwrap();
+        for job in jobs.into_iter().rev() {
+            queue.push_front(job);
+        }
+        drop(queue);
+        self.wake.notify_one();
+    }
+
+    fn try_dequeue(&self) -> Option<ProviderJob> {
+        self.jobs.lock().unwrap().pop_front()
+    }
+
+    async fn dequeue_ready(&self) -> ProviderJob {
+        loop {
+            // notify_one stores a permit if an enqueue races this check.
+            let notified = self.wake.notified();
+            if let Some(job) = self.try_dequeue() {
+                return job;
+            }
+            notified.await;
+        }
     }
 
     pub fn queued(&self) -> usize {
@@ -247,22 +287,6 @@ impl JobQueue {
     pub fn is_empty(&self) -> bool {
         self.queued() == 0
     }
-
-    /// Wait until at least one job exists, then take the whole queue. The
-    /// `Notify` permit state makes an enqueue that lands between the
-    /// lock-check and the wait wake us on the next loop iteration.
-    async fn drain_ready(&self) -> Vec<ProviderJob> {
-        loop {
-            let notified = self.wake.notified();
-            {
-                let mut jobs = self.jobs.lock().unwrap();
-                if !jobs.is_empty() {
-                    return jobs.drain(..).collect();
-                }
-            }
-            notified.await;
-        }
-    }
 }
 
 /// Spawn the provider worker to run for the service's lifetime.
@@ -271,35 +295,77 @@ pub fn spawn(app: AppHandle) {
 }
 
 /// The background request loop. Up to `provider_concurrency` requests run
-/// at once (default `1`), paced per provider, cache-first,
-/// failure-tolerant, session-applying on success.
+/// at a time (default one), paced per provider, cache-first,
+/// failure-tolerant, session-applying on success. It pulls only as many jobs
+/// as it can run, so a priority refresh can overtake queued scan work as soon
+/// as an in-flight request frees a slot.
 pub async fn run_provider_worker(app: AppHandle) {
     let queue = app.provider_queue.clone();
-    let last_start: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+    let last_start = Arc::new(Mutex::new(BTreeMap::<String, Instant>::new()));
+    let mut running = tokio::task::JoinSet::new();
     // Tool availability for document-text defaults; detected once per
     // worker lifetime, exactly like the scan pipeline's ToolSet.
     let tools = ToolSet::detect();
     loop {
-        let jobs = queue.drain_ready().await;
-        // Re-read per batch so a config change takes effect without a
-        // service restart. A batch never exceeds `concurrency` in flight.
+        // Re-read so a config change takes effect without a service restart.
         let concurrency = provider_concurrency(&app).await;
-        let app = &app;
-        let tools = &tools;
-        let last_start = &last_start;
-        futures_util::stream::iter(jobs)
-            .for_each_concurrent(concurrency, |job| async move {
-                if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
-                    // The scan that produced this job has been superseded.
-                    return;
-                }
-                let value = process_provider_job(app, &job, tools, last_start).await;
-                // Both outcomes resolve the unit's pending request: success
-                // overlays the value, failure publishes the fallback.
-                resolve_provider_job(app, &job, value.as_deref()).await;
-            })
-            .await;
+        while running.len() < concurrency {
+            let Some(job) = queue.try_dequeue() else {
+                break;
+            };
+            spawn_provider_job(
+                &mut running,
+                app.clone(),
+                tools.clone(),
+                last_start.clone(),
+                job,
+            );
+        }
+
+        if running.is_empty() {
+            let job = queue.dequeue_ready().await;
+            spawn_provider_job(
+                &mut running,
+                app.clone(),
+                tools.clone(),
+                last_start.clone(),
+                job,
+            );
+            continue;
+        }
+
+        tokio::select! {
+            Some(_) = running.join_next() => {}
+            job = queue.dequeue_ready(), if running.len() < concurrency => {
+                spawn_provider_job(
+                    &mut running,
+                    app.clone(),
+                    tools.clone(),
+                    last_start.clone(),
+                    job,
+                );
+            }
+        }
     }
+}
+
+fn spawn_provider_job(
+    running: &mut tokio::task::JoinSet<()>,
+    app: AppHandle,
+    tools: ToolSet,
+    last_start: Arc<Mutex<BTreeMap<String, Instant>>>,
+    job: ProviderJob,
+) {
+    running.spawn(async move {
+        if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
+            // The scan that produced this job has been superseded.
+            return;
+        }
+        let value = process_provider_job(&app, &job, &tools, &last_start).await;
+        // Both outcomes resolve the unit's pending request: success overlays
+        // the value, failure publishes the fallback.
+        resolve_provider_job(&app, &job, value.as_deref()).await;
+    });
 }
 
 /// Run one provider job to completion: pace, cache-first fetch (extracting
@@ -316,7 +382,11 @@ async fn process_provider_job(
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
-    match cache_get(app, job).await {
+    match if job.force {
+        None
+    } else {
+        cache_get(app, job).await
+    } {
         Some(v) => Some(v),
         None => {
             // Cache miss: fetch the provider input first (document text
@@ -338,8 +408,13 @@ async fn process_provider_job(
                     if !vision_without_pixels(&job.input) {
                         // Geocode results already resolve the structured
                         // locality; the value is cached as-is and rendered
-                        // into `%l`.
-                        cache_put(app, &job, &v).await;
+                        // into `%l`. A forced re-request overwrites the
+                        // entry; ordinary inserts stay write-once.
+                        if job.force {
+                            cache_replace(app, &job, &v).await;
+                        } else {
+                            cache_put(app, &job, &v).await;
+                        }
                     }
                     Some(v)
                 }
@@ -523,6 +598,24 @@ async fn cache_put(app: &App, job: &ProviderJob, value: &str) {
         &job.input_hash,
     );
     let _ = cache.put(
+        &key,
+        job.kind.kind_tag(),
+        &job.settings.provider_id,
+        &job.input_hash,
+        value,
+    );
+}
+
+/// Force-overwrite a cached value for a per-suggestion re-request.
+async fn cache_replace(app: &App, job: &ProviderJob, value: &str) {
+    let cache = app.cache.lock().await;
+    let key = cache_key(
+        job.kind.kind_tag(),
+        &job.settings.provider_id,
+        &job.settings.settings_hash,
+        &job.input_hash,
+    );
+    let _ = cache.replace(
         &key,
         job.kind.kind_tag(),
         &job.settings.provider_id,
@@ -1402,6 +1495,11 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
         if ctx.epoch != job.unit.epoch {
             return false;
         }
+        // A per-suggestion re-request bumped the unit's generation; a
+        // request from before it must not resolve the current one.
+        if ctx.generations.get(&job.unit.index).copied().unwrap_or(0) != job.unit.generation {
+            return false;
+        }
         let Some(f) = ctx.analysis.files.get(job.unit.index) else {
             return false;
         };
@@ -1426,20 +1524,19 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             return false;
         }
         ctx.pending.remove(&job.unit.index);
-        // Count this unit toward the metadata-progress numerator only when
-        // its suggestion was one of those originally marked pending. Units
-        // that produced no suggestion are not part of the denominator.
-        if ctx.pending_units.remove(&job.unit.index) {
-            ctx.pending_done += 1;
-        }
+        // The re-request (if any) for this unit has now fully resolved, so a
+        // future re-request is allowed again. The generation check above
+        // guarantees this is the current generation.
+        ctx.refreshing.remove(&job.unit.index);
+        // This unit is no longer outstanding; the process numerator is
+        // `total_units - pending_units`, so it now counts as complete. Units
+        // that produced no suggestion are in neither set.
+        ctx.pending_units.remove(&job.unit.index);
     }
 
     // Snapshot the progress for the client update published after the
     // suggestion delta; taken before releasing the lock.
-    let (completed, meta_total) = match &sess.provider_ctx {
-        Some(ctx) => (ctx.pending_done, ctx.pending_units.len() + ctx.pending_done),
-        None => (0, 0),
-    };
+    let (completed, meta_total) = sess.metadata_progress();
 
     // Phase 2: the unit's last request resolved. Update its suggestion in
     // place by stable id.
@@ -1760,7 +1857,6 @@ pub async fn plan_provider_jobs(
     epoch: u64,
 ) -> Vec<ProviderJob> {
     let geo = geocoder_settings(cfg);
-    let mut jobs = Vec::new();
     // Redundant duplicates get exactly one delete suggestion and never a
     // move, so provider metadata (location, description, author) can never
     // reach a rendered destination for them. Skip them here so a scan does
@@ -1771,12 +1867,33 @@ pub async fn plan_provider_jobs(
         .iter()
         .flat_map(|g| g.redundant.iter().copied())
         .collect();
+    let mut jobs = Vec::new();
     for (i, f) in analysis.files.iter().enumerate() {
         if redundant.contains(&i) {
             continue;
         }
+        jobs.extend(plan_unit_jobs(geo.as_ref(), cfg, f, formats, epoch, i, 0));
+    }
+    jobs
+}
+
+/// Provider jobs for one analyzed unit, shared by the scan planner (a fresh
+/// scan plans every non-redundant unit) and a per-suggestion re-request (one
+/// unit). `generation` is the unit's re-request generation, `0` for a fresh
+/// scan.
+fn plan_unit_jobs(
+    geo: Option<&ProviderSettings>,
+    cfg: &RawConfig,
+    f: &AnalyzedFile,
+    formats: &BTreeMap<AssetKind, FormatString>,
+    epoch: u64,
+    index: usize,
+    generation: u64,
+) -> Vec<ProviderJob> {
+    let mut jobs = Vec::new();
+    {
         let Some(fmt) = formats.get(&f.kind) else {
-            continue;
+            return jobs;
         };
         let uses_location = fmt
             .segments()
@@ -1795,7 +1912,7 @@ pub async fn plan_provider_jobs(
             .iter()
             .any(|s| matches!(s, Segment::Placeholder(Placeholder::Author)));
         if uses_location {
-            if let (Some(g), Some(lat), Some(lon)) = (&geo, f.latitude, f.longitude) {
+            if let (Some(g), Some(lat), Some(lon)) = (geo, f.latitude, f.longitude) {
                 let lat_bytes = lat.to_le_bytes();
                 let lon_bytes = lon.to_le_bytes();
                 // A location is a property of the coordinate, not the file:
@@ -1808,7 +1925,8 @@ pub async fn plan_provider_jobs(
                     settings: g.clone(),
                     unit: UnitRef {
                         epoch,
-                        index: i,
+                        generation,
+                        index,
                         path: f.path.clone(),
                     },
                     input_hash,
@@ -1817,6 +1935,7 @@ pub async fn plan_provider_jobs(
                         longitude: lon,
                         language: g.language.clone(),
                     },
+                    force: false,
                 });
             }
         }
@@ -1860,7 +1979,8 @@ pub async fn plan_provider_jobs(
                     settings: desc,
                     unit: UnitRef {
                         epoch,
-                        index: i,
+                        generation,
+                        index,
                         path: f.path.clone(),
                     },
                     input_hash,
@@ -1870,6 +1990,7 @@ pub async fn plan_provider_jobs(
                         kind: f.kind,
                         images: Vec::new(),
                     },
+                    force: false,
                 });
             }
         }
@@ -1899,16 +2020,135 @@ pub async fn plan_provider_jobs(
                     settings: desc,
                     unit: UnitRef {
                         epoch,
-                        index: i,
+                        generation,
+                        index,
                         path: f.path.clone(),
                     },
                     input_hash,
                     input: ProviderInput::Author { text: None },
+                    force: false,
                 });
             }
         }
     }
     jobs
+}
+
+/// Invalidate the cached provider results for one suggestion's unit and
+/// re-enqueue its provider requests, without re-running the scan. The fresh
+/// jobs carry a bumped per-unit generation (so an in-flight request from
+/// before the refresh cannot resolve it), skip the cache read, and
+/// overwrite the cache on success. Returns the suggestion marked pending;
+/// the caller's events carry the eventual update. Errors (no batch, not a
+/// move, no provider work) are returned as messages for a 409.
+pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Suggestion, String> {
+    let mut sess = app.session.lock().await;
+    // Provider metadata only means something for a published, non-executing
+    // batch; guard the action the same way scan/execute/export are guarded.
+    if !matches!(sess.state, SessionState::Ready | SessionState::Done) {
+        return Err(
+            "provider metadata can only be re-requested when the batch is ready".to_string(),
+        );
+    }
+    let cfg = sess.config.clone();
+    let (index, generation, jobs) = {
+        let Some(ctx) = sess.provider_ctx.as_ref() else {
+            return Err("no scan batch is available to refresh".to_string());
+        };
+        let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
+            return Err(format!("no suggestion with id {id}"));
+        };
+        if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
+            return Err("provider metadata does not shape a delete suggestion".to_string());
+        }
+        let Some(index) = ctx
+            .analysis
+            .files
+            .iter()
+            .enumerate()
+            .find(|(_, f)| Suggestion::id_for_target(&f.path) == id)
+            .map(|(i, _)| i)
+        else {
+            return Err(format!("no suggestion with id {id}"));
+        };
+        // Single-flight: a second re-request while one is in flight would
+        // enqueue a second forced write, and two forced upserts have no
+        // ordering guarantee, so the loser could leave a superseded value
+        // in the cache. Reject it instead.
+        if ctx.refreshing.contains(&index) {
+            return Err(
+                "a metadata re-request is already in flight for this suggestion".to_string(),
+            );
+        }
+        let generation = ctx.generations.get(&index).copied().unwrap_or(0) + 1;
+        let jobs = plan_unit_jobs(
+            geocoder_settings(&cfg).as_ref(),
+            &cfg,
+            &ctx.analysis.files[index],
+            &ctx.formats,
+            ctx.epoch,
+            index,
+            generation,
+        );
+        if jobs.is_empty() {
+            return Err("no provider metadata is configured for this suggestion".to_string());
+        }
+        (index, generation, jobs)
+    };
+    // Supersede any in-flight request and drop the recorded values so a
+    // failed re-request degrades to the fallback instead of resurrecting
+    // the previous answer.
+    {
+        let ctx = sess.provider_ctx.as_mut().expect("checked above");
+        ctx.generations.insert(index, generation);
+        ctx.refreshing.insert(index);
+        ctx.meta.remove(&index);
+        ctx.pending.insert(index, jobs.len() as u32);
+        ctx.pending_units.insert(index);
+        ctx.total_units.insert(index);
+    }
+    let pos = sess
+        .suggestions
+        .iter()
+        .position(|s| s.id == id)
+        .expect("checked above");
+    let mut suggestion = sess.suggestions[pos].clone();
+    suggestion.metadata_pending = true;
+    sess.suggestions[pos] = suggestion.clone();
+    let (completed, total) = sess.metadata_progress();
+
+    // Keep the session lock held across cache invalidation, event
+    // publication, and enqueue. That makes them one atomic step relative to
+    // a new scan: a scan cannot replace the batch and then have this refresh
+    // publish an old id or enqueue epoch-stale jobs. Every operation here is
+    // local and non-blocking (no cache->session lock nesting exists).
+    {
+        let cache = app.cache.lock().await;
+        for job in &jobs {
+            let key = cache_key(
+                job.kind.kind_tag(),
+                &job.settings.provider_id,
+                &job.settings.settings_hash,
+                &job.input_hash,
+            );
+            let _ = cache.remove(&key);
+        }
+    }
+    app.events.publish(ServerEvent::SuggestionUpdated {
+        item: suggestion.clone(),
+    });
+    app.events
+        .publish(ServerEvent::MetadataProgress { completed, total });
+    let jobs = jobs
+        .into_iter()
+        .map(|mut job| {
+            job.force = true;
+            job
+        })
+        .collect();
+    app.provider_queue.enqueue_priority(jobs);
+    drop(sess);
+    Ok(suggestion)
 }
 
 /// Deterministic settings hash builder for cache keys. Any field change
@@ -2080,8 +2320,10 @@ mod tests {
             home: home.clone(),
             meta: Default::default(),
             pending: BTreeMap::from([(0, 1)]),
+            generations: Default::default(),
+            refreshing: Default::default(),
+            total_units: std::collections::BTreeSet::from([0]),
             pending_units: std::collections::BTreeSet::from([0]),
-            pending_done: 0,
         });
         sess.suggestions = vec![suggestion];
         sess.summary = Some(ScanSummary::default());
@@ -2154,6 +2396,7 @@ mod tests {
             },
             unit: UnitRef {
                 epoch,
+                generation: 0,
                 index: 0,
                 path: PathBuf::new(),
             },
@@ -2163,6 +2406,7 @@ mod tests {
                 longitude: 2.3522,
                 language: None,
             },
+            force: false,
         };
         let sess = app.session.lock().await;
         job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
@@ -2194,6 +2438,7 @@ mod tests {
             },
             unit: UnitRef {
                 epoch,
+                generation: 0,
                 index: 0,
                 path: PathBuf::new(),
             },
@@ -2204,6 +2449,7 @@ mod tests {
                 kind: AssetKind::Photo,
                 images: Vec::new(),
             },
+            force: false,
         };
         let sess = app.session.lock().await;
         job.unit.path = sess.provider_ctx.as_ref().unwrap().analysis.files[0]
@@ -2395,6 +2641,7 @@ mod tests {
         };
         let unit = UnitRef {
             epoch: 1,
+            generation: 0,
             index: 0,
             path: path.clone(),
         };
@@ -2409,6 +2656,7 @@ mod tests {
                 kind: AssetKind::Document,
                 images: Vec::new(),
             },
+            force: false,
         };
         assert_eq!(invoke(&job).await.unwrap(), "travel expenses".to_string());
 
@@ -2789,6 +3037,23 @@ mod tests {
         assert!(sess
             .executable_ids(&[sess.suggestions[0].id.clone()])
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_generation_result_is_dropped() {
+        let (app, epoch) = primed_app().await;
+        let mut job = geocode_job(&app, 9, epoch).await;
+        // A re-request generation the context has not reached: this request
+        // was superseded and must not resolve the current one.
+        job.unit.generation = 1;
+        let applied = resolve_provider_job(&app, &job, Some("paris")).await;
+        assert!(!applied);
+        let sess = app.session.lock().await;
+        assert!(sess.suggestions[0].metadata_pending);
+        // The pending counter is untouched, so the unit cannot resolve
+        // early off a stale request.
+        let ctx = sess.provider_ctx.as_ref().unwrap();
+        assert_eq!(ctx.pending.get(&0).copied(), Some(1));
     }
 
     #[tokio::test]
@@ -3247,6 +3512,107 @@ mod tests {
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
         assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn priority_refresh_jobs_overtake_queued_scan_jobs() {
+        let (app, epoch) = primed_app().await;
+        let mut scan_first = geocode_job(&app, 1, epoch).await;
+        scan_first.unit.generation = 0;
+        let mut scan_second = scan_first.clone();
+        scan_second.unit.generation = 1;
+        let mut refresh_first = scan_first.clone();
+        refresh_first.unit.generation = 10;
+        let mut refresh_second = scan_first.clone();
+        refresh_second.unit.generation = 11;
+
+        app.provider_queue.enqueue(scan_first);
+        app.provider_queue.enqueue(scan_second);
+        app.provider_queue
+            .enqueue_priority(vec![refresh_first, refresh_second]);
+
+        let generations: Vec<u64> = (0..4)
+            .map(|_| app.provider_queue.try_dequeue().unwrap().unit.generation)
+            .collect();
+        assert_eq!(generations, [10, 11, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn refresh_replans_from_config_and_bumps_generation() {
+        let (app, _epoch) = primed_app_with_format("Pictures/%s/%f").await;
+        // Hermetic: the primed app inherits the host config chain, so pin an
+        // explicit config with every provider disabled before testing the
+        // no-provider path.
+        let id = {
+            let mut sess = app.session.lock().await;
+            sess.config = toml::from_str("[description]\nenabled = false\n").unwrap();
+            sess.suggestions[0].id.clone()
+        };
+
+        // No provider configured: a re-request fails cleanly rather than
+        // silently enqueuing nothing (and never bumps the generation).
+        assert!(refresh_suggestion_metadata(&app, "missing").await.is_err());
+        let err = refresh_suggestion_metadata(&app, &id).await.unwrap_err();
+        assert!(err.contains("no provider metadata"), "{err}");
+
+        // Enable a description provider; the same suggestion now re-plans.
+        {
+            let mut sess = app.session.lock().await;
+            sess.config = toml::from_str("[description]\nenabled = true\n").unwrap();
+        }
+        let updated = refresh_suggestion_metadata(&app, &id).await.unwrap();
+        assert!(updated.metadata_pending);
+        let sess = app.session.lock().await;
+        let ctx = sess.provider_ctx.as_ref().unwrap();
+        assert_eq!(ctx.generations.get(&0).copied(), Some(1));
+        assert_eq!(ctx.pending.get(&0).copied(), Some(1));
+        assert!(ctx.pending_units.contains(&0));
+        assert!(ctx.total_units.contains(&0));
+        // The denominator stays one unit even after the re-request.
+        assert_eq!(sess.metadata_progress(), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn second_refresh_is_rejected_until_the_first_resolves() {
+        let (app, epoch) = primed_app_with_format("Pictures/%s/%f").await;
+        let id = {
+            let mut sess = app.session.lock().await;
+            sess.config = toml::from_str("[description]\nenabled = true\n").unwrap();
+            sess.suggestions[0].id.clone()
+        };
+
+        assert!(refresh_suggestion_metadata(&app, &id).await.is_ok());
+        // Single-flight: a second re-request while the first is in flight is
+        // refused, so two forced writes can never race over one entry.
+        let err = refresh_suggestion_metadata(&app, &id).await.unwrap_err();
+        assert!(err.contains("already in flight"), "{err}");
+
+        // Resolving the refreshed job clears the guard; a later re-request
+        // is accepted again.
+        let mut job = describe_job(&app, 1, epoch).await;
+        job.unit.generation = 1;
+        assert!(resolve_provider_job(&app, &job, Some("fresh subject")).await);
+        assert!(refresh_suggestion_metadata(&app, &id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn refresh_is_refused_while_not_ready() {
+        let (app, _epoch) = primed_app_with_format("Pictures/%s/%f").await;
+        let id = {
+            let mut sess = app.session.lock().await;
+            sess.config = toml::from_str("[description]\nenabled = true\n").unwrap();
+            sess.state = SessionState::Scanning;
+            sess.suggestions[0].id.clone()
+        };
+        let err = refresh_suggestion_metadata(&app, &id).await.unwrap_err();
+        assert!(err.contains("when the batch is ready"), "{err}");
+
+        // Back in a published state, the same request is accepted.
+        {
+            let mut sess = app.session.lock().await;
+            sess.state = SessionState::Ready;
+        }
+        assert!(refresh_suggestion_metadata(&app, &id).await.is_ok());
     }
 
     #[tokio::test]

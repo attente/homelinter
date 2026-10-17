@@ -35,6 +35,7 @@ interface BrowseProps {
   onClearSelection: () => void;
   onRun: () => void;
   onExport: () => void;
+  onRefreshMetadata: (id: string) => void;
 }
 
 // The service falls back to a bare "lat,lng" string when reverse geocoding
@@ -82,8 +83,35 @@ function metaRows(s: Suggestion): [string, unknown][] {
   return Object.entries(s.metadata ?? {}).filter(([k]) => k !== 'duplicate_of');
 }
 
-function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
-  const { suggestion, onClose } = props;
+/** Discard the cached provider metadata for one move suggestion and ask for
+ *  it again. Delete suggestions carry no provider metadata, so it is not
+ *  offered for them. */
+function RefreshMetadataButton(props: {
+  suggestion: Suggestion;
+  onRefresh: (id: string) => void;
+}) {
+  const { suggestion, onRefresh } = props;
+  if (suggestion.type !== 'move') return null;
+  const pending = suggestion.metadata_pending;
+  return (
+    <button
+      type="button"
+      className="meta-refresh-btn"
+      disabled={pending}
+      title="discard the cached provider results and ask again"
+      onClick={() => onRefresh(suggestion.id)}
+    >
+      {pending ? 're-requesting...' : 're-request metadata'}
+    </button>
+  );
+}
+
+function DetailPane(props: {
+  suggestion: Suggestion;
+  onClose: () => void;
+  onRefreshMetadata: (id: string) => void;
+}) {
+  const { suggestion, onClose, onRefreshMetadata } = props;
   const [tab, setTab] = useState<TabId>('preview');
 
   const m = suggestion.metadata ?? {};
@@ -207,6 +235,10 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
               {suggestion.rejection_reason}
             </p>
           )}
+          <RefreshMetadataButton
+            suggestion={suggestion}
+            onRefresh={onRefreshMetadata}
+          />
         </div>
       )}
 
@@ -223,16 +255,22 @@ function DetailPane(props: { suggestion: Suggestion; onClose: () => void }) {
       )}
 
       {active === 'metadata' && (
-        <table className="detail-table">
-          <tbody>
-            {rows.map(([key, value]) => (
-              <tr key={key}>
-                <th scope="row">{metaKeyLabel(key)}</th>
-                <td>{metaValueLabel(value)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="detail-body">
+          <table className="detail-table">
+            <tbody>
+              {rows.map(([key, value]) => (
+                <tr key={key}>
+                  <th scope="row">{metaKeyLabel(key)}</th>
+                  <td>{metaValueLabel(value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <RefreshMetadataButton
+            suggestion={suggestion}
+            onRefresh={onRefreshMetadata}
+          />
+        </div>
       )}
     </aside>
   );
@@ -280,7 +318,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport } = props;
+  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
 
@@ -414,6 +452,7 @@ export function Browse(props: BrowseProps) {
             key={openSuggestion.id}
             suggestion={openSuggestion}
             onClose={() => setOpenId(null)}
+            onRefreshMetadata={onRefreshMetadata}
           />
         )}
       </div>

@@ -352,8 +352,10 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
             home: home.clone(),
             meta: Default::default(),
             pending: pending.clone(),
+            generations: Default::default(),
+            refreshing: Default::default(),
+            total_units: pending_units.clone(),
             pending_units: pending_units.clone(),
-            pending_done: 0,
         });
         sess.suggestions = suggestions;
         let mut summary = sess.summary_of_batch();
