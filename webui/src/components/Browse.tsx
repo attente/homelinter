@@ -182,14 +182,21 @@ function PathRow(props: { label: string; value: string }) {
   return (
     <p className="detail-path">
       <span className="detail-label">{label} </span>
-      <button
-        type="button"
+      <span
         className="path-copy"
+        role="button"
+        tabIndex={0}
         title="copy path to clipboard"
         onClick={() => void copy()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            void copy();
+          }
+        }}
       >
         {value}
-      </button>
+      </span>
       <button
         type="button"
         className="path-copy-btn"
