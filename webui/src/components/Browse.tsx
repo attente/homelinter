@@ -16,6 +16,7 @@ import { rowText } from '../lib/format';
 import type { Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
+import { ExpandIcon } from './ExpandIcon';
 
 export interface FilterState {
   type: 'all' | 'move' | 'delete';
@@ -53,7 +54,9 @@ interface BrowseProps {
 // fails, so a bare decimal pair is not a place name.
 const COORDS_ONLY = /^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/;
 
-function previewKind(path: string): 'image' | 'video' | 'audio' | 'pdf' | 'text' | null {
+type PreviewKind = 'image' | 'video' | 'audio' | 'pdf' | 'text';
+
+function previewKind(path: string): PreviewKind | null {
   const ext = path.split('.').pop()?.toLowerCase();
   if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg'].includes(ext ?? '')) return 'image';
   if (['mp4', 'm4v', 'webm', 'mov'].includes(ext ?? '')) return 'video';
@@ -215,6 +218,35 @@ function PathRow(props: { label: string; value: string }) {
   );
 }
 
+/** The preview media for a suggestion, shared by the inline pane and the
+ *  full-screen modal. `enlarged` drops the pane-sized caps so the media fills
+ *  the modal. */
+function PreviewContent(props: {
+  suggestion: Suggestion;
+  kind: PreviewKind;
+  enlarged?: boolean;
+}) {
+  const { suggestion, kind, enlarged } = props;
+  const src = `/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`;
+  const cls = (base: string) => (enlarged ? `${base} preview-enlarged` : base);
+  switch (kind) {
+    case 'image':
+      return <img className={cls('file-preview-image')} src={src} alt="file preview" />;
+    case 'video':
+      return (
+        <video className={cls('file-preview-media')} controls preload="metadata" src={src} />
+      );
+    case 'audio':
+      return (
+        <audio className={cls('file-preview-audio')} controls preload="metadata" src={src} />
+      );
+    case 'pdf':
+      return <iframe className={cls('file-preview-pdf')} src={src} title="PDF preview" />;
+    case 'text':
+      return <iframe className={cls('file-preview-text')} src={src} title="text file preview" />;
+  }
+}
+
 /** Manual metadata editor: the three values that shape a move's destination
  *  (`%l`, `%s`/`%t`, `%a`). Saving replaces all three overrides for this
  *  content, and the service persists them keyed by content identity. The
@@ -298,6 +330,17 @@ function DetailPane(props: {
 }) {
   const { suggestion, onClose, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [tab, setTab] = useState<TabId>('preview');
+  const [expanded, setExpanded] = useState(false);
+  const kind = previewKind(suggestion.target);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expanded]);
 
   const m = suggestion.metadata ?? {};
   const lat = typeof m.latitude === 'number' ? m.latitude : null;
@@ -335,6 +378,17 @@ function DetailPane(props: {
           </button>
         ))}
         <span className="grow" />
+        {active === 'preview' && kind !== null && (
+          <button
+            type="button"
+            className="close-btn"
+            title="enlarge preview"
+            aria-label="enlarge preview"
+            onClick={() => setExpanded(true)}
+          >
+            <ExpandIcon />
+          </button>
+        )}
         <button
           type="button"
           className="close-btn"
@@ -348,43 +402,7 @@ function DetailPane(props: {
 
       {active === 'preview' && (
         <div className="detail-body">
-          {previewKind(suggestion.target) === 'image' && (
-            <img
-              className="file-preview-image"
-              src={`/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`}
-              alt="file preview"
-            />
-          )}
-          {previewKind(suggestion.target) === 'video' && (
-            <video
-              className="file-preview-media"
-              controls
-              preload="metadata"
-              src={`/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`}
-            />
-          )}
-          {previewKind(suggestion.target) === 'audio' && (
-            <audio
-              className="file-preview-audio"
-              controls
-              preload="metadata"
-              src={`/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`}
-            />
-          )}
-          {previewKind(suggestion.target) === 'pdf' && (
-            <iframe
-              className="file-preview-pdf"
-              src={`/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`}
-              title="PDF preview"
-            />
-          )}
-          {previewKind(suggestion.target) === 'text' && (
-            <iframe
-              className="file-preview-text"
-              src={`/api/v1/suggestions/${encodeURIComponent(suggestion.id)}/preview`}
-              title="text file preview"
-            />
-          )}
+          {kind !== null && <PreviewContent suggestion={suggestion} kind={kind} />}
           {suggestion.type === 'move' ? (
             <>
               <p className="detail-action">move</p>
@@ -447,6 +465,34 @@ function DetailPane(props: {
             onRefresh={onRefreshMetadata}
           />
           <RebuildButton suggestion={suggestion} onRebuild={onRebuild} />
+        </div>
+      )}
+
+      {expanded && kind !== null && (
+        <div
+          className="modal-backdrop preview-backdrop"
+          role="presentation"
+          onClick={() => setExpanded(false)}
+        >
+          <div
+            className="preview-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="file preview"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="close-btn preview-modal-close"
+              autoFocus
+              aria-label="close"
+              title="close"
+              onClick={() => setExpanded(false)}
+            >
+              <CloseIcon />
+            </button>
+            <PreviewContent suggestion={suggestion} kind={kind} enlarged />
+          </div>
         </div>
       )}
     </aside>
