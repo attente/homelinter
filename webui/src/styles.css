@@ -252,10 +252,29 @@ textarea:focus {
 }
 
 .browse-panes {
+  --detail-width: 360px;
   display: flex;
   gap: 12px;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* Drag handle between the list and the detail pane. The split is horizontal
+   on wide viewports only; it is hidden when the panes stack. */
+.pane-divider {
+  flex: 0 0 auto;
+  width: 6px;
+  margin: 0 -6px;
+  align-self: stretch;
+  border-radius: 3px;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-divider:hover,
+.pane-divider:focus-visible {
+  background: var(--line);
 }
 
 /* Monospace is reserved for machine-readable content: file paths, code,
@@ -340,8 +359,8 @@ textarea:focus {
 }
 
 .detail-pane {
-  flex: 0 0 360px;
-  max-width: 48%;
+  flex: 0 0 var(--detail-width);
+  max-width: 80%;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--bg2);
@@ -561,6 +580,10 @@ textarea:focus {
 @media (max-width: 720px) {
   .browse-panes {
     flex-direction: column;
+  }
+
+  .pane-divider {
+    display: none;
   }
 
   .detail-pane {

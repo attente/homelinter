@@ -1,4 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ALL_FILTER,
@@ -493,6 +498,11 @@ export function Browse(props: BrowseProps) {
   const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
+  const panesRef = useRef<HTMLDivElement | null>(null);
+  // The detail pane width is driven by a draggable divider and clamped so
+  // neither pane can be dragged below a usable minimum.
+  const [detailWidth, setDetailWidth] = useState(360);
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
   const openSuggestion = useMemo(
@@ -520,6 +530,37 @@ export function Browse(props: BrowseProps) {
     if (el.scrollHeight - el.scrollTop - el.clientHeight < ROW_HEIGHT * 12) {
       onLoadMore();
     }
+  };
+
+  const clampDetailWidth = (width: number) => {
+    const panes = panesRef.current;
+    const max = panes ? Math.max(320, panes.clientWidth - 320 - 12) : 720;
+    return Math.min(max, Math.max(280, width));
+  };
+
+  const onDividerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startWidth: detailWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onDividerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    // The pane sits on the right, so dragging left widens it.
+    const delta = e.clientX - drag.startX;
+    setDetailWidth(clampDetailWidth(drag.startWidth - delta));
+  };
+
+  const endDrag = () => {
+    dragRef.current = null;
+  };
+
+  const onDividerKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowLeft' ? 24 : -24;
+    setDetailWidth((w) => clampDetailWidth(w + step));
   };
 
   return (
@@ -581,7 +622,11 @@ export function Browse(props: BrowseProps) {
           </button>
         </div>
       </div>
-      <div className="browse-panes">
+      <div
+        className="browse-panes"
+        ref={panesRef}
+        style={{ '--detail-width': `${detailWidth}px` } as CSSProperties}
+      >
         <section className="list-pane" ref={scrollRef} onScroll={handleScroll}>
           {suggestions.length === 0 ? (
             <ul className="suggest-list">
@@ -620,14 +665,28 @@ export function Browse(props: BrowseProps) {
           )}
         </section>
         {openSuggestion && (
-          <DetailPane
-            key={openSuggestion.id}
-            suggestion={openSuggestion}
-            onClose={() => setOpenId(null)}
-            onRefreshMetadata={onRefreshMetadata}
-            onSetMetadata={onSetMetadata}
-            onRebuild={onRebuild}
-          />
+          <>
+            <div
+              className="pane-divider"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="resize preview pane"
+              tabIndex={0}
+              onPointerDown={onDividerDown}
+              onPointerMove={onDividerMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              onKeyDown={onDividerKey}
+            />
+            <DetailPane
+              key={openSuggestion.id}
+              suggestion={openSuggestion}
+              onClose={() => setOpenId(null)}
+              onRefreshMetadata={onRefreshMetadata}
+              onSetMetadata={onSetMetadata}
+              onRebuild={onRebuild}
+            />
+          </>
         )}
       </div>
     </main>
