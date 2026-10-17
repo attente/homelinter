@@ -13,6 +13,7 @@ mod http;
 pub mod pipeline;
 pub mod providers;
 pub mod session;
+mod svg_raster;
 mod video_frames;
 
 pub use http::router;

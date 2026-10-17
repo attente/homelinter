@@ -64,8 +64,9 @@ max_words = 4                   # maximum words in the generated description
 # escapes literal braces. The full path (with the filename) and any extracted
 # document text are always included.
 # prompt = ""
-# Longest side in px for photos sent to a vision backend; larger photos are
-# downscaled before the request. 0 = forward original bytes.
+# Longest side in px for photos and SVGs sent to a vision backend; larger
+# raster images are downscaled and SVGs are rendered at this size. 0 = no
+# photo downscaling; SVG rendering still has a hard safety cap.
 max_image_dimension = 1024
 # Cap on representative frames sampled from a video for the vision backend:
 # about one frame per second, evenly distributed across the clip, thinned to

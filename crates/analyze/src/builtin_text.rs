@@ -24,6 +24,7 @@
 //! all three.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 
 use quick_xml::events::Event;
@@ -55,6 +56,7 @@ pub fn extract_builtin_text(path: &Path, ext: &str, max_output_bytes: u64) -> Op
     let raw = match ext {
         "pdf" => pdf_text(path, budget)?,
         "docx" | "odt" | "epub" => container_text(path, ext, budget)?,
+        "svg" => svg_text(path, budget)?,
         _ => return None,
     };
     normalize(raw)
@@ -76,6 +78,87 @@ fn pdf_text(path: &Path, budget: usize) -> Option<String> {
         return None;
     }
     Some(text)
+}
+
+/// SVG text and accessible labels from the XML source. Text extraction is
+/// independent of rasterization, so labels remain available when rendering
+/// is unsupported or the description backend is text-only.
+fn svg_text(path: &Path, budget: usize) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_INPUT_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_INPUT_BYTES {
+        return None;
+    }
+    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut buf = Vec::new();
+    let mut sink = Sink::new(budget);
+    let mut capture_depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(el)) => {
+                if matches!(el.local_name().as_ref(), b"text" | b"title" | b"desc") {
+                    if capture_depth == 0 && !sink.out.is_empty() {
+                        sink.push(' ');
+                    }
+                    capture_depth += 1;
+                }
+                push_svg_labels(&el, reader.decoder(), &mut sink);
+            }
+            Ok(Event::Empty(el)) => push_svg_labels(&el, reader.decoder(), &mut sink),
+            Ok(Event::End(el)) => {
+                if matches!(el.local_name().as_ref(), b"text" | b"title" | b"desc") {
+                    capture_depth = capture_depth.saturating_sub(1);
+                    sink.push(' ');
+                }
+            }
+            Ok(Event::Text(text)) if capture_depth > 0 => {
+                if let Ok(value) = text.unescape() {
+                    sink.push_str(&value);
+                }
+            }
+            Ok(Event::CData(text)) if capture_depth > 0 => {
+                if let Ok(value) = reader.decoder().decode(text.as_ref()) {
+                    sink.push_str(&value);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        if sink.overflowed {
+            return None;
+        }
+        buf.clear();
+    }
+    normalize(sink.finish()?)
+}
+
+/// Append accessible SVG labels from an element's `aria-label` or editor
+/// `label` attribute.
+fn push_svg_labels(
+    element: &quick_xml::events::BytesStart<'_>,
+    decoder: quick_xml::Decoder,
+    sink: &mut Sink,
+) {
+    for attr in element.attributes().with_checks(false).flatten() {
+        let key = attr.key.local_name();
+        if matches!(key.as_ref(), b"aria-label" | b"label") {
+            if let Ok(value) = attr.decode_and_unescape_value(decoder) {
+                if !value.trim().is_empty() {
+                    if !sink.out.is_empty() {
+                        sink.push(' ');
+                    }
+                    sink.push_str(&value);
+                }
+            }
+        }
+    }
 }
 
 /// Office/e-book text from the zip container. One XML entry is buffered
@@ -689,6 +772,24 @@ mod tests {
             .position(|w| w == marker.as_bytes())
             .map(|p| p + 1)
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn svg_text_and_accessible_labels_are_extracted() {
+        let dir = tmp_dir("svg");
+        let path = dir.join("diagram.svg");
+        std::fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" aria-label="Claim diagram"><title>Claim title</title><desc>Overview &amp; details</desc><text>Claim <tspan>four</tspan></text><path aria-label="Evidence node"/></svg>"#,
+        )
+        .unwrap();
+        let text = extract(&path, "svg", 1 << 20).unwrap();
+        assert!(text.contains("Claim diagram"), "got: {text:?}");
+        assert!(text.contains("Claim title"), "got: {text:?}");
+        assert!(text.contains("Overview & details"), "got: {text:?}");
+        assert!(text.contains("Claim four"), "got: {text:?}");
+        assert!(text.contains("Evidence node"), "got: {text:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

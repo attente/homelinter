@@ -352,6 +352,13 @@ async fn process_provider_job(
     }
 }
 
+/// Whether a path has an SVG extension, matched without regard to case.
+fn is_svg_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+}
+
 /// Materialize the provider input for a job about to be invoked: extract
 /// plain document text for a description job that does not carry any yet.
 /// The extraction config (commands plus `[limits]`) is snapshotted from
@@ -395,6 +402,11 @@ async fn prepare_provider_job(app: &App, job: &ProviderJob, tools: &ToolSet) -> 
                     AssetKind::Video => crate::video_frames::extract_video_frames(
                         &path, max_dim, max_frames, &tools, timeout,
                     ),
+                    AssetKind::Photo if is_svg_path(&path) => {
+                        crate::svg_raster::rasterize_svg(&path, max_dim)
+                            .into_iter()
+                            .collect()
+                    }
                     _ => prepare_image_bytes(&path, max_dim).into_iter().collect(),
                 })
                 .await
@@ -1793,19 +1805,27 @@ pub async fn plan_provider_jobs(
                 // kinds stay text/filename-only.
                 let vision = matches!(f.kind, AssetKind::Photo | AssetKind::Video)
                     && desc.backend == "ollama";
+                let svg_vision = vision && f.kind == AssetKind::Photo && is_svg_path(&f.path);
                 // A description is a property of the content, not the name:
                 // the path is only a hint in the prompt, so the cache key is
                 // the content identity (the full hash when deduplication
                 // computed one, else the large-file fast-path fingerprint).
                 // Identical content at different paths therefore shares one
-                // entry. The vision/text bit keeps a cached text-only guess
-                // from ever being served for a vision job (and vice versa).
+                // entry. The mode marker keeps text-only and vision results
+                // separate, and gives SVG raster requests a fresh namespace
+                // distinct from legacy raw-SVG vision entries.
                 let content = f.content_hash().unwrap_or_else(|| {
                     sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()])
                 });
                 let input_hash = sha256(&[
                     b"describe",
-                    if vision { b"vision" } else { b"text" },
+                    if svg_vision {
+                        b"svg-vision-v1"
+                    } else if vision {
+                        b"vision"
+                    } else {
+                        b"text"
+                    },
                     &content,
                 ]);
                 jobs.push(ProviderJob {
@@ -3476,6 +3496,47 @@ mod tests {
             jobs[0].input,
             ProviderInput::Describe { vision: false, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn svg_photo_plans_a_distinct_vision_job() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [description.image]
+            enabled = true
+            service = "ollama"
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("svg-vision");
+        let svg = file_at(&dir, "claim.svg", AssetKind::Photo, None, None);
+        let analysis = Arc::new(Analysis {
+            files: vec![svg.clone()],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Images/%s.%e").unwrap(),
+        );
+        let jobs = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(
+            jobs[0].input,
+            ProviderInput::Describe {
+                vision: true,
+                kind: AssetKind::Photo,
+                ..
+            }
+        ));
+        // The SVG mode marker namespaces its cache entry away from both
+        // text-only and raster-photo vision results, so entries written by
+        // the previous raw-SVG payload behavior can never be reused.
+        let content = sha256(&[b"unhashed", svg.path.as_os_str().as_encoded_bytes()]);
+        let expected = sha256(&[b"describe", b"svg-vision-v1", &content]);
+        assert_eq!(jobs[0].input_hash, expected);
     }
 
     #[tokio::test]

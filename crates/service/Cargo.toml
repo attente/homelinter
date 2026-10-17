@@ -27,6 +27,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 http-body-util = "0.1"
 base64 = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+resvg = "0.48.1"
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
