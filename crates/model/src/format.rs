@@ -382,6 +382,68 @@ pub struct PlaceholderValues {
     pub asset_kind: AssetKind,
 }
 
+/// Convert provider text to printable ASCII before it becomes metadata.
+/// Compatibility decomposition transliterates accented and presentation
+/// forms; typographic quotes and dashes map to their keyboard equivalents,
+/// common symbols map to short ASCII names, and unsupported Unicode
+/// characters become spaces so they cannot join neighboring words. The
+/// returned string contains only characters from U+0020 through U+007E and
+/// has whitespace runs collapsed.
+pub fn normalize_provider_text(input: &str) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    for c in input.nfkd() {
+        if is_combining_mark(c) {
+            continue;
+        }
+        let replacement = match c {
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{2032}' => "'",
+            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' | '\u{2033}' => "\"",
+            '\u{2026}' => "...",
+            '\u{00a9}' => "(c)",
+            '\u{00ae}' => "(R)",
+            '\u{2122}' => "TM",
+            '\u{00a3}' => "GBP",
+            '\u{00a5}' => "JPY",
+            '\u{20ac}' => "EUR",
+            '\u{20b9}' => "INR",
+            '\u{2022}' | '\u{2023}' | '\u{2043}' => "-",
+            '\u{00b7}' | '\u{22c5}' => ".",
+            '\u{00d7}' => "x",
+            '\u{00f7}' => "/",
+            '\u{2190}' => "<-",
+            '\u{2192}' => "->",
+            '\u{2194}' => "<->",
+            '\u{2191}' => "up",
+            '\u{2193}' => "down",
+            '\u{2212}' => "-",
+            dash if is_unicode_dash(dash) => "-",
+            c if c.is_whitespace() => " ",
+            c if c.is_ascii_graphic() => {
+                if pending_space {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                out.push(c);
+                continue;
+            }
+            _ => " ",
+        };
+        for ch in replacement.chars() {
+            if ch.is_ascii_whitespace() {
+                pending_space = !out.is_empty();
+            } else {
+                if pending_space {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                out.push(ch);
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Lowercase (Unicode-aware) and normalize a metadata segment. Accented
 /// characters are decomposed (NFD) and their combining diacritical marks
 /// dropped, so they fall back to their basic ASCII equivalent (`café`
@@ -693,6 +755,17 @@ mod tests {
         assert!(FormatString::parse("~/Pictures/%f").is_err());
         assert!(FormatString::parse("Pictures/%Y/%f/").is_err());
         assert!(FormatString::parse("Pictures/100%").is_err());
+    }
+
+    #[test]
+    fn provider_text_is_ascii_and_normalizes_typographic_punctuation() {
+        assert_eq!(
+            normalize_provider_text(
+                "\u{201c}Cafe\u{301}\u{201d} \u{2014} \u{2018}it\u{2019}s\u{2019} \u{2026} \u{2122} \u{2022} \u{1f680}"
+            ),
+            "\"Cafe\" - 'it's' ... TM -"
+        );
+        assert_eq!(normalize_provider_text("\u{6771}\u{4eac}"), "");
     }
 
     #[test]
