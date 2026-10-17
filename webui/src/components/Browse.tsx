@@ -131,6 +131,76 @@ function RebuildButton(props: {
   );
 }
 
+/** Copy `value` to the clipboard, using the async Clipboard API when it is
+ *  available and falling back to a hidden textarea + `execCommand` otherwise
+ *  (for example a non-secure context). Resolves to whether the copy worked. */
+async function copyText(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+  try {
+    const el = document.createElement('textarea');
+    el.value = value;
+    el.style.position = 'fixed';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    el.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(el);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** One source/destination path in the preview. Both the path text and a
+ *  trailing button copy the full path to the clipboard; the button confirms
+ *  the copy for a moment. */
+function PathRow(props: { label: string; value: string }) {
+  const { label, value } = props;
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = async () => {
+    if (await copyText(value)) {
+      setCopied(true);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 1500);
+    }
+  };
+  return (
+    <p className="detail-path">
+      <span className="detail-label">{label} </span>
+      <button
+        type="button"
+        className="path-copy"
+        title="copy path to clipboard"
+        onClick={() => void copy()}
+      >
+        {value}
+      </button>
+      <button
+        type="button"
+        className="path-copy-btn"
+        title="copy path to clipboard"
+        onClick={() => void copy()}
+      >
+        {copied ? 'copied' : 'copy'}
+      </button>
+    </p>
+  );
+}
+
 /** Manual metadata editor: the three values that shape a move's destination
  *  (`%l`, `%s`/`%t`, `%a`). Saving replaces all three overrides for this
  *  content, and the service persists them keyed by content identity. The
@@ -304,27 +374,15 @@ function DetailPane(props: {
           {suggestion.type === 'move' ? (
             <>
               <p className="detail-action">move</p>
-              <p className="detail-path">
-                <span className="detail-label">from: </span>
-                {suggestion.target}
-              </p>
-              <p className="detail-path">
-                <span className="detail-label">to: </span>
-                {suggestion.new_path ?? '?'}
-              </p>
+              <PathRow label="from:" value={suggestion.target} />
+              <PathRow label="to:" value={suggestion.new_path ?? '?'} />
             </>
           ) : (
             <>
               <p className="detail-action">delete</p>
-              <p className="detail-path">
-                <span className="detail-label">target: </span>
-                {suggestion.target}
-              </p>
+              <PathRow label="target:" value={suggestion.target} />
               {typeof m.duplicate_of === 'string' && m.duplicate_of.length > 0 && (
-                <p className="detail-path">
-                  <span className="detail-label">original: </span>
-                  {m.duplicate_of}
-                </p>
+                <PathRow label="original:" value={m.duplicate_of} />
               )}
             </>
           )}

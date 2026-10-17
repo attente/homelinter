@@ -436,6 +436,46 @@ textarea:focus {
 .detail-path {
   margin: 0;
   word-break: break-all;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* The path text itself and the trailing button both copy the path. The path
+   looks like plain text but is a real button for keyboard access. */
+.path-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.path-copy:hover {
+  text-decoration: underline;
+}
+
+.path-copy-btn {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.path-copy-btn:hover {
+  color: var(--fg);
+  border-color: var(--dim);
 }
 
 .detail-label {
