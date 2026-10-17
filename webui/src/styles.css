@@ -503,6 +503,27 @@ textarea:focus {
   font-size: 12px;
 }
 
+/* Manual metadata editor under the metadata tab: one labeled field per
+   destination placeholder and a save action. */
+.meta-edit {
+  display: block;
+  margin: 12px 0 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.meta-edit .field {
+  margin-bottom: 10px;
+}
+
+.meta-edit input {
+  width: 100%;
+}
+
+.meta-save-btn {
+  font-size: 12px;
+}
+
 @media (max-width: 720px) {
   .browse-panes {
     flex-direction: column;

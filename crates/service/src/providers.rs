@@ -51,7 +51,7 @@ use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
-use homelinter_analyze::{Analysis, AnalyzedFile};
+use homelinter_analyze::{Analysis, AnalyzedFile, MetadataOverrides};
 use homelinter_model::asset_kind::{description_modality, AssetKind};
 use homelinter_model::config::{
     GeocoderService, RawConfig, DEFAULT_GEOCODER_LANGUAGE, DEFAULT_MAX_CONTEXT,
@@ -65,9 +65,13 @@ use homelinter_scan::SymlinkIndex;
 use homelinter_scan::ToolSet;
 use homelinter_suggest::rebuild_move_suggestion;
 
-use crate::cache::{cache_key, KIND_AUTHOR, KIND_DESCRIPTION, KIND_GEOCODE};
+use crate::cache::{
+    cache_key, FIELD_AUTHOR, FIELD_LOCATION, FIELD_SUBJECT, KIND_AUTHOR, KIND_DESCRIPTION,
+    KIND_GEOCODE,
+};
 use crate::events::{RejectedId, ServerEvent};
 use crate::pipeline::{App, AppHandle};
+use crate::session::Session;
 
 /// What kind of provider a job fetches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1534,21 +1538,12 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
         ctx.pending_units.remove(&job.unit.index);
     }
 
-    // Snapshot the progress for the client update published after the
-    // suggestion delta; taken before releasing the lock.
-    let (completed, meta_total) = sess.metadata_progress();
-
     // Phase 2: the unit's last request resolved. Update its suggestion in
     // place by stable id.
-    let (id, rebuilt) = {
+    let (id, rebuild) = {
         let ctx = sess.provider_ctx.as_ref().unwrap();
         let f = &ctx.analysis.files[job.unit.index];
-        let mut trial = f.clone();
-        if let Some(m) = ctx.meta.get(&job.unit.index) {
-            trial.location = m.location.clone().or(trial.location);
-            trial.subject = m.subject.clone().or(trial.subject);
-            trial.embedded_author = m.author.clone().or(trial.embedded_author);
-        }
+        let mut trial = trial_unit_file(ctx, job.unit.index);
         // A description provider failure should degrade to the authoritative
         // embedded title or the stable source filename stem rather than
         // leaving `%s` empty. This keeps `%s` useful without pretending that
@@ -1566,29 +1561,87 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
                 .or(trial.subject);
         }
         let fmt = ctx.formats.get(&trial.kind);
-        let rebuilt = rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks);
-        (Suggestion::id_for_target(&f.path), rebuilt)
+        (
+            Suggestion::id_for_target(&f.path),
+            rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks),
+        )
     };
-    let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
+    let Some(commit) = commit_unit_rebuild(&mut sess, &id, rebuild, true) else {
         return false;
     };
-    // A redundant duplicate's only top-level suggestion is a delete, and
-    // `plan_provider_jobs` never plans provider work for one. This is a
-    // defensive guard against the shared `id_for_target` space: a rebuilt
-    // move must never overwrite a delete. Leave the delete untouched and
-    // just clear any stray pending flag.
+    // Snapshot the progress for the client update published after the
+    // suggestion delta; taken before releasing the lock.
+    let (completed, meta_total) = sess.metadata_progress();
+    drop(sess);
+    match commit.updated {
+        Some(item) => app.events.publish(ServerEvent::SuggestionUpdated { item }),
+        None => app.events.publish(ServerEvent::SuggestionRemoved { id }),
+    }
+    app.events.publish(ServerEvent::MetadataProgress {
+        completed,
+        total: meta_total,
+    });
+    if !commit.rejected.is_empty() {
+        app.events.publish(ServerEvent::BatchValidated {
+            valid: false,
+            rejected: commit.rejected,
+        });
+    }
+    true
+}
+
+/// The trial view of one unit's file with the collected provider values
+/// overlaid. Persisted manual overrides live on the file itself and are
+/// preferred by `file_values`, so a provider value can never clobber a user
+/// edit.
+fn trial_unit_file(ctx: &ProviderScanCtx, index: usize) -> AnalyzedFile {
+    let f = &ctx.analysis.files[index];
+    let mut trial = f.clone();
+    if let Some(m) = ctx.meta.get(&index) {
+        trial.location = m.location.clone().or(trial.location);
+        trial.subject = m.subject.clone().or(trial.subject);
+        trial.embedded_author = m.author.clone().or(trial.embedded_author);
+    }
+    trial
+}
+
+/// What to publish after one unit's suggestion was rebuilt in place.
+struct RebuildCommit {
+    /// The final suggestion, or `None` when the rebuilt move no longer
+    /// applies (the file stays put) and was removed from the batch.
+    updated: Option<Suggestion>,
+    /// Suggestions newly rejected by the post-rebuild re-validation
+    /// (excluding the rebuilt one, which `updated` already carries).
+    rejected: Vec<RejectedId>,
+}
+
+/// Replace one unit's suggestion with a rebuilt move, re-validate the batch,
+/// and refresh the summary. Returns `None` when there is no suggestion with
+/// `id` or its only suggestion is a delete (the shared `id_for_target` space
+/// means a rebuilt move must never overwrite a delete); in the delete case
+/// any stray pending flag is cleared. Purely synchronous, so the caller
+/// decides what to publish after releasing the session lock.
+fn commit_unit_rebuild(
+    sess: &mut Session,
+    id: &str,
+    rebuild: Result<Option<Suggestion>, homelinter_suggest::SuggestError>,
+    clear_pending: bool,
+) -> Option<RebuildCommit> {
+    let pos = sess.suggestions.iter().position(|s| s.id == id)?;
     if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
         sess.suggestions[pos].metadata_pending = false;
-        return false;
+        return None;
     }
     // Newly rejected ids from re-validation after a rebuild, published as a
     // `batch.validated` event so clients can surface them.
     let mut newly_rejected: Vec<(String, String)> = Vec::new();
-    match rebuilt {
+    match rebuild {
         // Rebuild error: keep the published fallback, just clear the
         // pending flag.
         Err(_) => {
-            sess.suggestions[pos].metadata_pending = false;
+            if clear_pending {
+                sess.suggestions[pos].metadata_pending = false;
+            }
         }
         // The file now stays put: the move disappears from the batch.
         Ok(None) => {
@@ -1599,15 +1652,19 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
             s.selected = prior.selected;
             s.status = prior.status;
             s.rejection_reason = prior.rejection_reason.clone();
-            s.metadata_pending = false;
+            s.metadata_pending = if clear_pending {
+                false
+            } else {
+                prior.metadata_pending
+            };
             sess.suggestions[pos] = s;
             // The unit's metadata is now real: re-validate the batch so a
-            // destination that only collides once the provider value is
-            // applied is rejected with a reason, and a pending suggestion
-            // that would have lost a provisional collision stays pending.
-            // Still-pending suggestions stay deferred and validation is
-            // monotonic (it never un-rejects), so this is safe to run on
-            // the whole batch on every resolution.
+            // destination that only collides once the value is applied is
+            // rejected with a reason, and a pending suggestion that would
+            // have lost a provisional collision stays pending. Still-pending
+            // suggestions stay deferred and validation is monotonic (it
+            // never un-rejects), so this is safe to run on the whole batch
+            // on every commit.
             let was_rejected: std::collections::HashSet<String> = sess
                 .suggestions
                 .iter()
@@ -1616,10 +1673,10 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
                 .collect();
             newly_rejected = homelinter_suggest::validate_batch(&mut sess.suggestions, true)
                 .into_iter()
-                .filter(|id| !was_rejected.contains(id))
-                .filter_map(|id| {
-                    sess.suggestion_by_id(&id)
-                        .and_then(|s| s.rejection_reason.clone().map(|r| (id, r)))
+                .filter(|rid| !was_rejected.contains(rid))
+                .filter_map(|rid| {
+                    sess.suggestion_by_id(&rid)
+                        .and_then(|s| s.rejection_reason.clone().map(|r| (rid, r)))
                 })
                 .collect();
         }
@@ -1630,35 +1687,16 @@ pub async fn resolve_provider_job(app: &AppHandle, job: &ProviderJob, value: Opt
         summary.total_symlinks_indexed = prev.total_symlinks_indexed;
     }
     sess.summary = Some(summary);
-    // Publish only the one suggestion this resolution changed, so a large
-    // batch costs O(N) work per scan instead of re-cloning and
-    // re-broadcasting the whole list on every resolution. Take the final
-    // state by id because the re-validation above may have rejected it too.
-    let updated = sess.suggestion_by_id(&id).cloned();
-    // Other suggestions newly rejected by the re-validation are already
-    // carried by `batch.validated` (id + reason), so skip the changed id to
-    // avoid reporting it twice.
+    // Publish only the one suggestion this rebuild changed, so a large batch
+    // costs O(N) work per resolution instead of re-cloning and re-broadcasting
+    // the whole list.
+    let updated = sess.suggestion_by_id(id).cloned();
     let rejected: Vec<RejectedId> = newly_rejected
         .into_iter()
-        .filter(|(rid, _)| *rid != id)
-        .map(|(id, reason)| RejectedId { id, reason })
+        .filter(|(rid, _)| rid != id)
+        .map(|(rid, reason)| RejectedId { id: rid, reason })
         .collect();
-    drop(sess);
-    match updated {
-        Some(item) => app.events.publish(ServerEvent::SuggestionUpdated { item }),
-        None => app.events.publish(ServerEvent::SuggestionRemoved { id }),
-    }
-    app.events.publish(ServerEvent::MetadataProgress {
-        completed,
-        total: meta_total,
-    });
-    if !rejected.is_empty() {
-        app.events.publish(ServerEvent::BatchValidated {
-            valid: false,
-            rejected,
-        });
-    }
-    true
+    Some(RebuildCommit { updated, rejected })
 }
 
 /// Build the geocoder provider settings from the effective configuration.
@@ -1849,7 +1887,8 @@ pub fn description_settings_text(cfg: &RawConfig) -> Option<ProviderSettings> {
 /// kind, and the unit has no authoritative title (embedded metadata already
 /// supplies `%s`); an author job only when a document's format contains
 /// `%a` and no embedded author exists. A unit whose format never uses a
-/// placeholder never triggers a provider call.
+/// placeholder never triggers a provider call. A manually overridden field
+/// is never planned either: the user's value already answers it.
 pub async fn plan_provider_jobs(
     cfg: &RawConfig,
     analysis: &Analysis,
@@ -1875,6 +1914,35 @@ pub async fn plan_provider_jobs(
         jobs.extend(plan_unit_jobs(geo.as_ref(), cfg, f, formats, epoch, i, 0));
     }
     jobs
+}
+
+/// Content identity of a unit for the provider cache and manual metadata
+/// overrides: the full-content hash when deduplication computed one, else
+/// the large-file fast-path fingerprint, else a path-scoped fallback for a
+/// file that could not be read (which effectively makes its entries
+/// path-scoped rather than content-scoped).
+fn content_identity(f: &AnalyzedFile) -> [u8; 32] {
+    f.content_hash()
+        .unwrap_or_else(|| sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()]))
+}
+
+/// Apply persisted manual metadata overrides to the analyzed files, keyed by
+/// content identity, before suggestions are generated. An override wins over
+/// any embedded or provider-derived value, so user edits survive rescans and
+/// are never planned for a provider request.
+pub async fn apply_metadata_overrides(app: &AppHandle, files: &mut [AnalyzedFile]) {
+    let overrides = {
+        let cache = app.cache.lock().await;
+        cache.all_overrides().unwrap_or_default()
+    };
+    if overrides.is_empty() {
+        return;
+    }
+    for f in files.iter_mut() {
+        if let Some(o) = overrides.get(&content_identity(f)) {
+            f.overrides = o.clone();
+        }
+    }
 }
 
 /// Provider jobs for one analyzed unit, shared by the scan planner (a fresh
@@ -1911,7 +1979,7 @@ fn plan_unit_jobs(
             .segments()
             .iter()
             .any(|s| matches!(s, Segment::Placeholder(Placeholder::Author)));
-        if uses_location {
+        if uses_location && f.overrides.location.is_none() {
             if let (Some(g), Some(lat), Some(lon)) = (geo, f.latitude, f.longitude) {
                 let lat_bytes = lat.to_le_bytes();
                 let lon_bytes = lon.to_le_bytes();
@@ -1944,7 +2012,7 @@ fn plan_unit_jobs(
         // content (falling back to keywords). Other kinds only consult the
         // provider for `%s`; their `%t` uses embedded metadata or the stem.
         let wants_description = uses_subject || (f.kind == AssetKind::Document && uses_title);
-        if wants_description && f.authoritative_title().is_none() {
+        if wants_description && f.authoritative_title().is_none() && f.overrides.subject.is_none() {
             if let Some(desc) = description_settings(cfg, &f.kind) {
                 // Photos and videos (via an extracted frame) with an
                 // image-capable backend (ollama) get pixels analyzed; other
@@ -1960,9 +2028,7 @@ fn plan_unit_jobs(
                 // entry. The mode marker keeps text-only and vision results
                 // separate, and gives SVG raster requests a fresh namespace
                 // distinct from legacy raw-SVG vision entries.
-                let content = f.content_hash().unwrap_or_else(|| {
-                    sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()])
-                });
+                let content = content_identity(f);
                 let input_hash = sha256(&[
                     b"describe",
                     if svg_vision {
@@ -2001,6 +2067,7 @@ fn plan_unit_jobs(
         // from.
         if uses_author
             && f.kind == AssetKind::Document
+            && f.overrides.author.is_none()
             && f.embedded_author
                 .as_deref()
                 .map(str::trim)
@@ -2011,9 +2078,7 @@ fn plan_unit_jobs(
                 // The author answer is a property of the content, not the
                 // name, so the key follows the same content identity as the
                 // description (the path is only a hint in the request).
-                let content = f.content_hash().unwrap_or_else(|| {
-                    sha256(&[b"unhashed", f.path.as_os_str().as_encoded_bytes()])
-                });
+                let content = content_identity(f);
                 let input_hash = sha256(&[b"author", &content]);
                 jobs.push(ProviderJob {
                     kind: ProviderKind::Author,
@@ -2151,6 +2216,162 @@ pub async fn refresh_suggestion_metadata(app: &AppHandle, id: &str) -> Result<Su
     Ok(suggestion)
 }
 
+/// One user-supplied manual metadata edit. `PUT` replaces all three fields:
+/// `Some` sets (after normalization), while `None` (an omitted or null JSON
+/// field, or a blank/empty string) clears the override and falls back to the
+/// provider or embedded value.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct MetadataEdit {
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// Why a manual metadata edit was refused.
+#[derive(Debug)]
+pub enum EditMetadataError {
+    /// The action is not valid for the current session or suggestion.
+    Conflict(String),
+    /// A value is over the metadata cap or otherwise unusable.
+    Validation(String),
+}
+
+/// Normalize and validate one manual metadata value. An absent, blank, or
+/// normalization-empty value clears the override.
+fn normalize_manual_value(
+    value: &Option<String>,
+    field: &str,
+) -> Result<Option<String>, EditMetadataError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let normalized = normalize_provider_text(raw);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    validate_metadata_completion(&normalized)
+        .map_err(|e| EditMetadataError::Validation(format!("{field}: {e}")))?;
+    Ok(Some(normalized))
+}
+
+/// Persist a manual metadata edit for one move suggestion and rebuild it in
+/// place. The override is keyed by content identity, so identical content
+/// anywhere in the tree uses the same edit on later scans. Returns the
+/// rebuilt suggestion, or `None` when the edit makes the file stay put and
+/// the suggestion was removed. Errors (not ready, no batch, unknown id, a
+/// delete, or an invalid value) are returned for the API to map.
+pub async fn set_suggestion_metadata(
+    app: &AppHandle,
+    id: &str,
+    edit: MetadataEdit,
+) -> Result<Option<Suggestion>, EditMetadataError> {
+    let mut sess = app.session.lock().await;
+    if !matches!(sess.state, SessionState::Ready | SessionState::Done) {
+        return Err(EditMetadataError::Conflict(
+            "metadata can only be edited when the batch is ready".to_string(),
+        ));
+    }
+    let (index, content_key) = {
+        let Some(ctx) = sess.provider_ctx.as_ref() else {
+            return Err(EditMetadataError::Conflict(
+                "no scan batch is available to edit".to_string(),
+            ));
+        };
+        let Some(pos) = sess.suggestions.iter().position(|s| s.id == id) else {
+            return Err(EditMetadataError::Conflict(format!(
+                "no suggestion with id {id}"
+            )));
+        };
+        if sess.suggestions[pos].suggestion_type != SuggestionType::Move {
+            return Err(EditMetadataError::Conflict(
+                "metadata does not shape a delete suggestion".to_string(),
+            ));
+        }
+        let Some(index) = ctx
+            .analysis
+            .files
+            .iter()
+            .enumerate()
+            .find(|(_, f)| Suggestion::id_for_target(&f.path) == id)
+            .map(|(i, _)| i)
+        else {
+            return Err(EditMetadataError::Conflict(format!(
+                "no suggestion with id {id}"
+            )));
+        };
+        (index, content_identity(&ctx.analysis.files[index]))
+    };
+    let location = normalize_manual_value(&edit.location, "location")?;
+    let subject = normalize_manual_value(&edit.subject, "subject")?;
+    let author = normalize_manual_value(&edit.author, "author")?;
+    // Persist first, then rebuild from the in-memory override. The write and
+    // the rebuild happen under one session lock, so a scan cannot replace
+    // the batch between them (no cache->session lock nesting exists).
+    {
+        let cache = app.cache.lock().await;
+        for (field, value) in [
+            (FIELD_LOCATION, &location),
+            (FIELD_SUBJECT, &subject),
+            (FIELD_AUTHOR, &author),
+        ] {
+            let result = match value {
+                Some(v) => cache.override_set(&content_key, field, v),
+                None => cache.override_clear(&content_key, field),
+            };
+            result.map_err(|e| {
+                EditMetadataError::Conflict(format!("cannot persist metadata edit: {e}"))
+            })?;
+        }
+    }
+    {
+        let ctx = sess.provider_ctx.as_mut().expect("checked above");
+        Arc::make_mut(&mut ctx.analysis).files[index].overrides = MetadataOverrides {
+            location: location.clone(),
+            subject: subject.clone(),
+            author: author.clone(),
+        };
+    }
+    let (id, rebuild) = {
+        let ctx = sess.provider_ctx.as_ref().expect("checked above");
+        let trial = trial_unit_file(ctx, index);
+        let fmt = ctx.formats.get(&trial.kind);
+        (
+            Suggestion::id_for_target(&ctx.analysis.files[index].path),
+            rebuild_move_suggestion(&trial, fmt, &ctx.home, &ctx.symlinks),
+        )
+    };
+    // A still-pending unit keeps its flag: an in-flight request for a field
+    // the user did not override may rebuild the destination again.
+    let Some(commit) = commit_unit_rebuild(&mut sess, &id, rebuild, false) else {
+        return Err(EditMetadataError::Conflict(format!(
+            "no suggestion with id {id}"
+        )));
+    };
+    let (completed, total) = sess.metadata_progress();
+    let updated = commit.updated.clone();
+    drop(sess);
+    match &commit.updated {
+        Some(item) => app
+            .events
+            .publish(ServerEvent::SuggestionUpdated { item: item.clone() }),
+        None => app
+            .events
+            .publish(ServerEvent::SuggestionRemoved { id: id.clone() }),
+    }
+    app.events
+        .publish(ServerEvent::MetadataProgress { completed, total });
+    if !commit.rejected.is_empty() {
+        app.events.publish(ServerEvent::BatchValidated {
+            valid: false,
+            rejected: commit.rejected,
+        });
+    }
+    Ok(updated)
+}
+
 /// Deterministic settings hash builder for cache keys. Any field change
 /// yields a different hash, invalidating prior cached results.
 pub fn sha256(parts: &[&[u8]]) -> [u8; 32] {
@@ -2281,6 +2502,7 @@ mod tests {
             longitude: None,
             location: None,
             subject: None,
+            overrides: Default::default(),
             bitrate_kbps: None,
             duration_secs: None,
             page_count: None,
@@ -3432,6 +3654,7 @@ mod tests {
             longitude: lon,
             location: None,
             subject: None,
+            overrides: Default::default(),
             bitrate_kbps: None,
             duration_secs: None,
             page_count: None,
@@ -3512,6 +3735,62 @@ mod tests {
         assert_eq!(doc_jobs[0].kind, ProviderKind::Description);
         // Audio format uses neither placeholder: no jobs.
         assert!(jobs.iter().all(|j| j.unit.index != 3));
+    }
+
+    #[tokio::test]
+    async fn overridden_fields_are_not_planned() {
+        let cfg: RawConfig = toml::from_str(
+            r#"
+            [geocoder]
+            enabled = true
+            service = "custom"
+            endpoint = "http://geo.local"
+
+            [description]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let dir = tmp_dir("override-plan");
+        let mut photo = file_at(
+            &dir,
+            "IMG_0001.jpg",
+            AssetKind::Photo,
+            Some(48.8566),
+            Some(2.3522),
+        );
+        let mut doc = file_at(&dir, "a.pdf", AssetKind::Document, None, None);
+        // No override yet: the geocode and description jobs are planned.
+        let analysis = Arc::new(Analysis {
+            files: vec![photo.clone(), doc.clone()],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let mut formats = BTreeMap::new();
+        formats.insert(
+            AssetKind::Photo,
+            FormatString::parse("Pictures/%l/%f").unwrap(),
+        );
+        formats.insert(
+            AssetKind::Document,
+            FormatString::parse("Documents/%s/%f").unwrap(),
+        );
+        let before = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert_eq!(before.len(), 2);
+
+        // A manual override answers the field, so the provider is never
+        // asked for it.
+        photo.overrides.location = Some("Manual Place".into());
+        doc.overrides.subject = Some("Manual Subject".into());
+        let analysis = Arc::new(Analysis {
+            files: vec![photo, doc],
+            repos: Vec::new(),
+            groups: Vec::new(),
+            degraded_identity: false,
+        });
+        let after = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
+        assert!(after.is_empty(), "{after:?}");
     }
 
     #[tokio::test]
@@ -3613,6 +3892,109 @@ mod tests {
             sess.state = SessionState::Ready;
         }
         assert!(refresh_suggestion_metadata(&app, &id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn manual_metadata_edit_rebuilds_and_persists_by_content() {
+        let (app, _epoch) = primed_app_with_format("Pictures/%s/%f").await;
+        let id = { app.session.lock().await.suggestions[0].id.clone() };
+        let content_key = {
+            let sess = app.session.lock().await;
+            let f = &sess.provider_ctx.as_ref().unwrap().analysis.files[0];
+            content_identity(f)
+        };
+
+        let updated = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: Some("Kyoto, Japan".into()),
+                subject: Some("Manual Subject".into()),
+                author: Some("Manual Author".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            updated
+                .new_path
+                .as_deref()
+                .unwrap()
+                .contains("manual-subject"),
+            "new_path={:?}",
+            updated.new_path
+        );
+        let m = &updated.metadata;
+        assert_eq!(
+            m.get("title").and_then(|v| v.as_str()),
+            Some("Manual Subject")
+        );
+        assert_eq!(
+            m.get("location").and_then(|v| v.as_str()),
+            Some("Kyoto, Japan")
+        );
+        assert_eq!(
+            m.get("author").and_then(|v| v.as_str()),
+            Some("Manual Author")
+        );
+        // The unit still has an outstanding provider request, so the edit
+        // must not clear the pending flag for a field it did not answer.
+        assert!(updated.metadata_pending);
+        // Persisted keyed by content identity.
+        {
+            let cache = app.cache.lock().await;
+            let all = cache.all_overrides().unwrap();
+            let o = all.get(&content_key).unwrap();
+            assert_eq!(o.location.as_deref(), Some("Kyoto, Japan"));
+            assert_eq!(o.subject.as_deref(), Some("Manual Subject"));
+            assert_eq!(o.author.as_deref(), Some("Manual Author"));
+        }
+
+        // A blank field clears that override; the destination falls back.
+        let cleared = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: None,
+                subject: Some("   ".into()),
+                author: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!cleared
+            .new_path
+            .as_deref()
+            .unwrap()
+            .contains("manual-subject"));
+        {
+            let cache = app.cache.lock().await;
+            let all = cache.all_overrides().unwrap();
+            // Clearing every field removes the content's rows entirely.
+            assert!(!all.contains_key(&content_key));
+            assert_eq!(cache.override_count().unwrap(), 0);
+        }
+
+        // A delete suggestion (shared id_for_target space) has no editable
+        // metadata.
+        {
+            let mut sess = app.session.lock().await;
+            sess.suggestions[0].suggestion_type = SuggestionType::Delete;
+        }
+        let err = set_suggestion_metadata(
+            &app,
+            &id,
+            MetadataEdit {
+                location: None,
+                subject: Some("x".into()),
+                author: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, EditMetadataError::Conflict(_)));
     }
 
     #[tokio::test]

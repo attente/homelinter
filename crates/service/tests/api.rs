@@ -393,14 +393,73 @@ async fn suggestion_refresh_conflicts_without_provider_work() {
         .contains("no provider metadata"));
 
     // An unknown id has no batch context either, and is also a conflict.
+    let (status, _) = request(&app, "POST", "/api/v1/suggestions/missing/refresh", None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn suggestion_metadata_edit_persists_and_rebuilds() {
+    let env = Env::new("meta_edit");
+    let app = env.service();
+    seed_duplicates(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let move_id = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["type"] == "move")
+        .and_then(|s| s["id"].as_str())
+        .expect("a move suggestion")
+        .to_string();
+    let edit_path = format!("/api/v1/suggestions/{move_id}/metadata");
+
+    // Full replacement: the rebuilt suggestion reports the effective values
+    // so the edit form can prefill them.
+    let (status, v) = request(
+        &app,
+        "PUT",
+        &edit_path,
+        Some(json!({
+            "location": "Kyoto, Japan",
+            "subject": "Manual Subject",
+            "author": "Ada"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["item"]["metadata"]["title"], "Manual Subject");
+    assert_eq!(v["item"]["metadata"]["author"], "Ada");
+    assert_eq!(v["item"]["metadata"]["location"], "Kyoto, Japan");
+
+    // An over-cap value is refused with 422 and changes nothing.
+    let long = vec!["word"; 25].join(" ");
+    let (status, v) = request(&app, "PUT", &edit_path, Some(json!({ "subject": long }))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(v["error"]["code"], "validation_failed");
+    assert!(v["error"]["message"].as_str().unwrap().contains("subject"));
+
+    // An unknown id has no batch context either, and is a conflict.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/suggestions/missing/refresh",
-        None,
+        "PUT",
+        "/api/v1/suggestions/missing/metadata",
+        Some(json!({ "subject": "x" })),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+
+    // Clearing every field returns the suggestion to its embedded values.
+    let (status, v) = request(
+        &app,
+        "PUT",
+        &edit_path,
+        Some(json!({ "location": null, "subject": "", "author": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(v["item"]["metadata"]["title"], "Manual Subject");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

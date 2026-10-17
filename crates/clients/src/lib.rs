@@ -276,7 +276,30 @@ impl Client {
     /// marked pending under `{"item": ...}`.
     pub async fn refresh_metadata(&self, id: &str) -> Result<Value, ClientsError> {
         let (_, v) = self
-            .json(Method::POST, &format!("/api/v1/suggestions/{id}/refresh"), None)
+            .json(
+                Method::POST,
+                &format!("/api/v1/suggestions/{id}/refresh"),
+                None,
+            )
+            .await?;
+        Ok(v)
+    }
+
+    /// PUT /api/v1/suggestions/{id}/metadata: replace one move suggestion's
+    /// manual metadata overrides (location/subject/author; a null or blank
+    /// field clears it). Returns the rebuilt suggestion under
+    /// `{"item": ...}`, or `{"item": null}` when it no longer applies.
+    pub async fn set_suggestion_metadata(
+        &self,
+        id: &str,
+        body: Value,
+    ) -> Result<Value, ClientsError> {
+        let (_, v) = self
+            .json(
+                Method::PUT,
+                &format!("/api/v1/suggestions/{id}/metadata"),
+                Some(body),
+            )
             .await?;
         Ok(v)
     }

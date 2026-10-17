@@ -706,6 +706,36 @@ export default function App() {
     [pushToast],
   );
 
+  // Save a manual metadata edit. The service persists it keyed by content
+  // identity, so identical content picks it up on later scans; the returned
+  // suggestion replaces the row, or is dropped when the edit makes it stay
+  // put.
+  const setMetadata = useCallback(
+    async (
+      id: string,
+      edit: { location: string; subject: string; author: string },
+    ) => {
+      const value = (v: string) => (v.trim() === '' ? null : v);
+      try {
+        const updated = await api.setSuggestionMetadata(id, {
+          location: value(edit.location),
+          subject: value(edit.subject),
+          author: value(edit.author),
+        });
+        setSt((prev) => ({
+          ...prev,
+          suggestions: updated
+            ? prev.suggestions.map((s) => (s.id === id ? updated : s))
+            : prev.suggestions.filter((s) => s.id !== id),
+        }));
+        pushToast(updated ? 'metadata saved' : 'edit removed the suggestion');
+      } catch (e: unknown) {
+        pushToast(`cannot save metadata: ${resolveApiError(e)}`);
+      }
+    },
+    [pushToast],
+  );
+
   const dismissPending = useCallback(() => {
     setSt((prev) => ({ ...prev, pendingAction: null }));
   }, []);
@@ -846,6 +876,7 @@ export default function App() {
           onRun={() => void run()}
           onExport={() => void exportPlan()}
           onRefreshMetadata={(id) => void refreshMetadata(id)}
+          onSetMetadata={(id, edit) => void setMetadata(id, edit)}
         />
       </>
     );

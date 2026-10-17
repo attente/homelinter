@@ -126,6 +126,21 @@ export const api = {
     return res.item;
   },
 
+  /** Replace one move suggestion's manual metadata overrides
+   *  (location/subject/author; null or blank clears a field). Returns the
+   *  rebuilt suggestion, or null when the edit makes the file stay put and
+   *  the suggestion is removed. */
+  async setSuggestionMetadata(
+    id: string,
+    edit: { location: string | null; subject: string | null; author: string | null },
+  ): Promise<Suggestion | null> {
+    const res = await request<{ item: Suggestion | null }>(
+      `/suggestions/${encodeURIComponent(id)}/metadata`,
+      { method: "PUT", body: JSON.stringify(edit) },
+    );
+    return res.item;
+  },
+
   async selectionPut(ids: string[]): Promise<void> {
     await request<void>("/selection", {
       method: "PUT",

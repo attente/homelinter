@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ALL_FILTER,
@@ -36,6 +36,10 @@ interface BrowseProps {
   onRun: () => void;
   onExport: () => void;
   onRefreshMetadata: (id: string) => void;
+  onSetMetadata: (
+    id: string,
+    edit: { location: string; subject: string; author: string },
+  ) => void;
 }
 
 // The service falls back to a bare "lat,lng" string when reverse geocoding
@@ -106,12 +110,87 @@ function RefreshMetadataButton(props: {
   );
 }
 
+/** Manual metadata editor: the three values that shape a move's destination
+ *  (`%l`, `%s`/`%t`, `%a`). Saving replaces all three overrides for this
+ *  content, and the service persists them keyed by content identity. The
+ *  fields start from the effective metadata (a manual edit, a provider
+ *  value, or embedded metadata) so a re-request is a starting point, not a
+ *  reset. */
+function MetadataEditor(props: {
+  suggestion: Suggestion;
+  onSave: (
+    id: string,
+    edit: { location: string; subject: string; author: string },
+  ) => void;
+}) {
+  const { suggestion, onSave } = props;
+  const m = suggestion.metadata ?? {};
+  const effective = {
+    location: typeof m.location === 'string' ? m.location : '',
+    subject: typeof m.title === 'string' ? m.title : '',
+    author: typeof m.author === 'string' ? m.author : '',
+  };
+  const [location, setLocation] = useState(effective.location);
+  const [subject, setSubject] = useState(effective.subject);
+  const [author, setAuthor] = useState(effective.author);
+  // Reset the fields whenever the selected suggestion or its effective
+  // metadata changes (opening another row, a provider resolution, or a
+  // saved edit coming back from the service).
+  useEffect(() => {
+    setLocation(effective.location);
+    setSubject(effective.subject);
+    setAuthor(effective.author);
+  }, [suggestion.id, effective.location, effective.subject, effective.author]);
+
+  return (
+    <form
+      className="meta-edit"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave(suggestion.id, { location, subject, author });
+      }}
+    >
+      <label className="field">
+        <span className="field-label">Location (%l)</span>
+        <input
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          placeholder="leave blank to use geocoder or embedded GPS"
+        />
+      </label>
+      <label className="field">
+        <span className="field-label">Subject (%s, %t)</span>
+        <input
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          placeholder="leave blank to use embedded title or a description"
+        />
+      </label>
+      <label className="field">
+        <span className="field-label">Author (%a)</span>
+        <input
+          value={author}
+          onChange={(e) => setAuthor(e.target.value)}
+          placeholder="leave blank to use embedded or inferred author"
+        />
+      </label>
+      <button type="submit" className="meta-save-btn">
+        save metadata
+      </button>
+    </form>
+  );
+}
+
 function DetailPane(props: {
   suggestion: Suggestion;
   onClose: () => void;
   onRefreshMetadata: (id: string) => void;
+  onSetMetadata: (
+    id: string,
+    edit: { location: string; subject: string; author: string },
+  ) => void;
 }) {
-  const { suggestion, onClose, onRefreshMetadata } = props;
+  const { suggestion, onClose, onRefreshMetadata, onSetMetadata } = props;
   const [tab, setTab] = useState<TabId>('preview');
 
   const m = suggestion.metadata ?? {};
@@ -126,8 +205,9 @@ function DetailPane(props: {
   const rows = useMemo(() => metaRows(suggestion), [suggestion]);
 
   const tabs: TabId[] = ['preview'];
-  if (lat !== null && lon !== null) tabs.push('location');
-  if (rows.length > 0) tabs.push('metadata');
+  // A move always gets the metadata tab, even before any provider value
+  // arrives, so manual editing is always reachable.
+  if (suggestion.type === 'move' || rows.length > 0) tabs.push('metadata');
   const active: TabId = tabs.includes(tab) ? tab : 'preview';
 
   const mapSrc =
@@ -266,6 +346,7 @@ function DetailPane(props: {
               ))}
             </tbody>
           </table>
+          <MetadataEditor suggestion={suggestion} onSave={onSetMetadata} />
           <RefreshMetadataButton
             suggestion={suggestion}
             onRefresh={onRefreshMetadata}
@@ -318,7 +399,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata } = props;
+  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata, onSetMetadata } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
 
@@ -453,6 +534,7 @@ export function Browse(props: BrowseProps) {
             suggestion={openSuggestion}
             onClose={() => setOpenId(null)}
             onRefreshMetadata={onRefreshMetadata}
+            onSetMetadata={onSetMetadata}
           />
         )}
       </div>

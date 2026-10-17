@@ -7,11 +7,13 @@
 //! key construction and read/write primitives are the real contract they
 //! will use, and `DELETE /cache` operates on the real database.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rusqlite::{params, Connection, OpenFlags};
 
+use homelinter_analyze::MetadataOverrides;
 use homelinter_model::config::app_data_dir;
 
 /// Bumped whenever the key construction or value contract changes in a way
@@ -26,6 +28,12 @@ pub const KIND_GEOCODE: &str = "geocode";
 pub const KIND_DESCRIPTION: &str = "description";
 pub const KIND_AUTHOR: &str = "author";
 pub const KIND_FILENAME_ANALYSIS: &str = "filename_analysis";
+
+/// Manual-metadata override fields, keyed by content identity in the
+/// `metadata_overrides` table. They mirror `MetadataOverrides`.
+pub const FIELD_LOCATION: &str = "location";
+pub const FIELD_SUBJECT: &str = "subject";
+pub const FIELD_AUTHOR: &str = "author";
 
 pub struct Cache {
     conn: Connection,
@@ -136,7 +144,14 @@ impl Cache {
                 value TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS entries_kind_idx ON entries(kind);",
+            CREATE INDEX IF NOT EXISTS entries_kind_idx ON entries(kind);
+            CREATE TABLE IF NOT EXISTS metadata_overrides (
+                content_key BLOB NOT NULL,
+                field TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (content_key, field)
+            );",
         )?;
         let version: Option<String> = conn
             .query_row(
@@ -218,7 +233,14 @@ impl Cache {
              ON CONFLICT(cache_key) DO UPDATE SET
                  value = excluded.value,
                  created_at = excluded.created_at",
-            params![key.as_slice(), kind, provider_id, input_hash.as_slice(), value, created_at],
+            params![
+                key.as_slice(),
+                kind,
+                provider_id,
+                input_hash.as_slice(),
+                value,
+                created_at
+            ],
         )?;
         Ok(())
     }
@@ -231,6 +253,71 @@ impl Cache {
             params![key.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Persist one manual metadata field for a content identity, replacing
+    /// any existing value for the same `(content_key, field)`. Other fields
+    /// are untouched. Overrides are user data, not cache results, so
+    /// `clear` and the entry counters leave them alone.
+    pub fn override_set(
+        &self,
+        content_key: &[u8; 32],
+        field: &str,
+        value: &str,
+    ) -> rusqlite::Result<()> {
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO metadata_overrides (content_key, field, value, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(content_key, field) DO UPDATE SET
+                 value = excluded.value,
+                 updated_at = excluded.updated_at",
+            params![content_key.as_slice(), field, value, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Remove one manual metadata field for a content identity; a no-op when
+    /// the row is absent, so clearing an already-clear field is safe.
+    pub fn override_clear(&self, content_key: &[u8; 32], field: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM metadata_overrides WHERE content_key = ?1 AND field = ?2",
+            params![content_key.as_slice(), field],
+        )?;
+        Ok(())
+    }
+
+    /// Every persisted manual metadata override, keyed by content identity.
+    /// Loaded once per scan so a rescan applies user edits without a lookup
+    /// per file; the override set is small (one row per edited field).
+    pub fn all_overrides(&self) -> rusqlite::Result<BTreeMap<[u8; 32], MetadataOverrides>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_key, field, value FROM metadata_overrides")?;
+        let mut rows = stmt.query([])?;
+        let mut out: BTreeMap<[u8; 32], MetadataOverrides> = BTreeMap::new();
+        while let Some(row) = rows.next()? {
+            let key: Vec<u8> = row.get(0)?;
+            let Ok(key): Result<[u8; 32], _> = key.try_into() else {
+                continue;
+            };
+            let field: String = row.get(1)?;
+            let value: String = row.get(2)?;
+            let entry = out.entry(key).or_default();
+            match field.as_str() {
+                FIELD_LOCATION => entry.location = Some(value),
+                FIELD_SUBJECT => entry.subject = Some(value),
+                FIELD_AUTHOR => entry.author = Some(value),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Number of persisted manual metadata override rows.
+    pub fn override_count(&self) -> rusqlite::Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM metadata_overrides", [], |r| r.get(0))
     }
 
     /// Clear all cached results in a single transactional write. Never
@@ -308,10 +395,7 @@ impl Cache {
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = match kind {
-            Some(k) => stmt.query_map(
-                params![k, limit as i64, offset as i64],
-                row_to_entry,
-            )?,
+            Some(k) => stmt.query_map(params![k, limit as i64, offset as i64], row_to_entry)?,
             None => stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?,
         };
         rows.collect()
@@ -383,10 +467,26 @@ mod tests {
     fn list_filters_pages_and_reports_counts() {
         let dir = tmp();
         let c = Cache::open_dir(&dir);
-        let geo = cache_key(KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], &[1u8; 32]);
-        let desc = cache_key(KIND_DESCRIPTION, "description:ollama:mistral", &[2u8; 32], &[2u8; 32]);
-        c.put(&geo, KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], "Berlin")
-            .unwrap();
+        let geo = cache_key(
+            KIND_GEOCODE,
+            "nominatim:openstreetmap",
+            &[1u8; 32],
+            &[1u8; 32],
+        );
+        let desc = cache_key(
+            KIND_DESCRIPTION,
+            "description:ollama:mistral",
+            &[2u8; 32],
+            &[2u8; 32],
+        );
+        c.put(
+            &geo,
+            KIND_GEOCODE,
+            "nominatim:openstreetmap",
+            &[1u8; 32],
+            "Berlin",
+        )
+        .unwrap();
         c.put(
             &desc,
             KIND_DESCRIPTION,
@@ -428,12 +528,29 @@ mod tests {
     fn replace_and_remove_override_write_once() {
         let dir = tmp();
         let c = Cache::open_dir(&dir);
-        let key = cache_key(KIND_DESCRIPTION, "description:ollama:m", &[4u8; 32], &[5u8; 32]);
-        c.put(&key, KIND_DESCRIPTION, "description:ollama:m", &[5u8; 32], "old")
-            .unwrap();
+        let key = cache_key(
+            KIND_DESCRIPTION,
+            "description:ollama:m",
+            &[4u8; 32],
+            &[5u8; 32],
+        );
+        c.put(
+            &key,
+            KIND_DESCRIPTION,
+            "description:ollama:m",
+            &[5u8; 32],
+            "old",
+        )
+        .unwrap();
         // `replace` overwrites the write-once value, as a re-request needs.
-        c.replace(&key, KIND_DESCRIPTION, "description:ollama:m", &[5u8; 32], "new")
-            .unwrap();
+        c.replace(
+            &key,
+            KIND_DESCRIPTION,
+            "description:ollama:m",
+            &[5u8; 32],
+            "new",
+        )
+        .unwrap();
         assert_eq!(
             c.get(&key, "description:ollama:m").unwrap().as_deref(),
             Some("new")
@@ -443,6 +560,64 @@ mod tests {
         assert!(c.get(&key, "description:ollama:m").unwrap().is_none());
         // Removing an absent key is a no-op, not an error.
         c.remove(&key).unwrap();
+        drop(c);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn metadata_overrides_roundtrip_and_survive_clear() {
+        let dir = tmp();
+        let c = Cache::open_dir(&dir);
+        let key = [7u8; 32];
+        assert!(c.all_overrides().unwrap().is_empty());
+        c.override_set(&key, FIELD_LOCATION, "Kyoto, Japan")
+            .unwrap();
+        c.override_set(&key, FIELD_SUBJECT, "Sunset").unwrap();
+        c.override_set(&key, FIELD_AUTHOR, "Ada").unwrap();
+        let all = c.all_overrides().unwrap();
+        let o = all.get(&key).unwrap();
+        assert_eq!(o.location.as_deref(), Some("Kyoto, Japan"));
+        assert_eq!(o.subject.as_deref(), Some("Sunset"));
+        assert_eq!(o.author.as_deref(), Some("Ada"));
+        assert_eq!(c.override_count().unwrap(), 3);
+        // A second set replaces the value: user data is not write-once.
+        c.override_set(&key, FIELD_LOCATION, "Osaka, Japan")
+            .unwrap();
+        assert_eq!(
+            c.all_overrides()
+                .unwrap()
+                .get(&key)
+                .unwrap()
+                .location
+                .as_deref(),
+            Some("Osaka, Japan")
+        );
+        assert_eq!(c.override_count().unwrap(), 3);
+        // Clearing removes just the field; clearing an absent field is a
+        // no-op, not an error.
+        c.override_clear(&key, FIELD_AUTHOR).unwrap();
+        c.override_clear(&key, FIELD_AUTHOR).unwrap();
+        assert!(c
+            .all_overrides()
+            .unwrap()
+            .get(&key)
+            .unwrap()
+            .author
+            .is_none());
+        // Clearing the provider cache must not touch user overrides.
+        let ck = cache_key(KIND_DESCRIPTION, "p", &[1u8; 32], &[2u8; 32]);
+        c.put(&ck, KIND_DESCRIPTION, "p", &[2u8; 32], "v").unwrap();
+        c.clear().unwrap();
+        assert_eq!(c.override_count().unwrap(), 2);
+        assert_eq!(
+            c.all_overrides()
+                .unwrap()
+                .get(&key)
+                .unwrap()
+                .subject
+                .as_deref(),
+            Some("Sunset")
+        );
         drop(c);
         std::fs::remove_dir_all(&dir).ok();
     }

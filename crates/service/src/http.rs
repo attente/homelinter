@@ -12,7 +12,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
@@ -146,6 +146,10 @@ pub fn router(app: AppHandle) -> Router {
         .route("/api/v1/suggestions/{id}", get(suggestion_get))
         .route("/api/v1/suggestions/{id}/preview", get(suggestion_preview))
         .route("/api/v1/suggestions/{id}/refresh", post(suggestion_refresh))
+        .route(
+            "/api/v1/suggestions/{id}/metadata",
+            put(suggestion_metadata),
+        )
         .route("/api/v1/selection", get(selection_get).put(selection_put))
         .route("/api/v1/selection/add", post(selection_add))
         .route("/api/v1/selection/remove", post(selection_remove))
@@ -497,6 +501,26 @@ async fn suggestion_get(State(app): State<AppHandle>, AxumPath(id): AxumPath<Str
             ErrorCode::NotFound,
             format!("no suggestion with id {id}"),
         )),
+    }
+}
+
+/// Persist a manual metadata edit for one move suggestion (full replacement
+/// of location/subject/author) and rebuild it. Synchronous: the rebuilt
+/// suggestion (or `null` when it no longer applies) is returned directly,
+/// and an event carries the change to other clients.
+async fn suggestion_metadata(
+    State(app): State<AppHandle>,
+    AxumPath(id): AxumPath<String>,
+    Json(edit): Json<crate::providers::MetadataEdit>,
+) -> ApiResult {
+    match crate::providers::set_suggestion_metadata(&app, &id, edit).await {
+        Ok(item) => ok(json!({ "item": item })),
+        Err(crate::providers::EditMetadataError::Validation(message)) => {
+            Err(err(ErrorCode::ValidationFailed, message))
+        }
+        Err(crate::providers::EditMetadataError::Conflict(message)) => {
+            Err(err(ErrorCode::Conflict, message))
+        }
     }
 }
 

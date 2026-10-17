@@ -43,6 +43,28 @@ use homelinter_model::suggestion::Provenance;
 use homelinter_scan::{FileEntry, RepoEntry};
 use rayon::prelude::*;
 
+/// Persisted manual metadata edits for a file, keyed by its content
+/// identity in the cache (see "Cache Implementation" in DESIGN.md). When a
+/// field is set it wins over any embedded or provider-derived value for the
+/// matching placeholder, so a user edit is stable across scans and re-requests.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataOverrides {
+    /// Backing `%l`, replacing the reverse-geocoded locality.
+    pub location: Option<String>,
+    /// Backing `%s`/`%t`, replacing a provider description and any embedded
+    /// title.
+    pub subject: Option<String>,
+    /// Backing `%a`, replacing an embedded or inferred author.
+    pub author: Option<String>,
+}
+
+impl MetadataOverrides {
+    /// Whether no field is overridden. Equivalent to the default value.
+    pub fn is_empty(&self) -> bool {
+        self.location.is_none() && self.subject.is_none() && self.author.is_none()
+    }
+}
+
 /// A file with its analysis results.
 #[derive(Debug, Clone)]
 pub struct AnalyzedFile {
@@ -92,6 +114,9 @@ pub struct AnalyzedFile {
     /// Description/subject from a content provider, backing `%s`.
     /// Resolved asynchronously by the provider worker.
     pub subject: Option<String>,
+    /// Persisted manual metadata edits, keyed by content identity; each set
+    /// field wins over the embedded or provider-derived value.
+    pub overrides: MetadataOverrides,
     /// Informational embedded metadata surfaced in suggestion `metadata`.
     pub bitrate_kbps: Option<u32>,
     pub duration_secs: Option<u64>,
@@ -269,6 +294,7 @@ pub fn analyze(
                 longitude: meta.longitude,
                 location: None,
                 subject: None,
+                overrides: MetadataOverrides::default(),
                 bitrate_kbps: meta.bitrate_kbps,
                 duration_secs: meta.duration_secs,
                 page_count: meta.page_count,
@@ -293,10 +319,7 @@ pub fn analyze(
                 return None;
             }
             let meta = repo_analyzer.analyze(r);
-            progress(
-                "repos",
-                repos_progress.fetch_add(1, Ordering::Relaxed) + 1,
-            );
+            progress("repos", repos_progress.fetch_add(1, Ordering::Relaxed) + 1);
             Some((r.clone(), meta))
         })
         .collect();

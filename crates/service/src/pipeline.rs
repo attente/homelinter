@@ -216,7 +216,7 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         })
         .await
     };
-    let analysis = match analysis {
+    let mut analysis = match analysis {
         Ok(a) => Arc::new(a),
         Err(e) => return fail(app.clone(), format!("analysis task panicked: {e}")).await,
     };
@@ -228,6 +228,11 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         analysis.files.len() as u64,
         start,
     ));
+
+    // Manual metadata edits persisted by the user are keyed by content
+    // identity and applied before suggestion generation, so an override wins
+    // over embedded values and provider jobs skip overridden fields.
+    crate::providers::apply_metadata_overrides(&app, &mut Arc::make_mut(&mut analysis).files).await;
 
     // Phase 3: suggestion generation.
     let formats = match cfg.resolved_target_paths() {

@@ -280,8 +280,11 @@ fn build_move_suggestion(
         metadata.insert("page_count".into(), serde_json::Value::from(p));
     }
     // Location / EXIF facts surfaced for the SPA detail pane (preview,
-    // location-with-map, and metadata tabs). Only inserted when present.
-    if let Some(loc) = &f.location {
+    // location-with-map, and metadata tabs). Only inserted when present. A
+    // manual override replaces the provider or embedded value, so the pane
+    // shows the value that actually shaped the destination.
+    let effective_location = f.overrides.location.clone().or_else(|| f.location.clone());
+    if let Some(loc) = &effective_location {
         metadata.insert("location".into(), serde_json::Value::String(loc.clone()));
     }
     if let Some(lat) = f.latitude {
@@ -293,10 +296,25 @@ fn build_move_suggestion(
     if let Some(cam) = &f.camera_model {
         metadata.insert("camera".into(), serde_json::Value::String(cam.clone()));
     }
-    if let Some(t) = &f.embedded_title {
+    // The effective title/subject (override, else embedded title, else
+    // provider subject) is shown as `title`, so the edit form can prefill
+    // it and a provider description is visible even without embedded
+    // metadata.
+    let effective_title = f
+        .overrides
+        .subject
+        .clone()
+        .or_else(|| f.embedded_title.clone())
+        .or_else(|| f.subject.clone());
+    if let Some(t) = &effective_title {
         metadata.insert("title".into(), serde_json::Value::String(t.clone()));
     }
-    if let Some(a) = &f.embedded_author {
+    let effective_author = f
+        .overrides
+        .author
+        .clone()
+        .or_else(|| f.embedded_author.clone());
+    if let Some(a) = &effective_author {
         metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
     // Move suggestions carry no human-readable reason: the from/to paths
@@ -362,10 +380,22 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
     // extension is re-appended by `%e`; an authoritative embedded title is
     // used verbatim.
     let clean = |s: &str| strip_trailing_document_extension(s).to_owned();
-    let subject = f.subject.as_deref().and_then(meaningful).map(clean);
-    let title = f
-        .authoritative_title()
-        .map(str::to_owned)
+    // A manual override wins over both the provider value and any embedded
+    // title (it is the user's explicit choice), so it backs `%s` and `%t`
+    // alike. Absent an override, an authoritative embedded title still wins
+    // over a provider description.
+    let manual_subject = f
+        .overrides
+        .subject
+        .as_deref()
+        .and_then(meaningful)
+        .map(clean);
+    let provider_subject = f.subject.as_deref().and_then(meaningful).map(clean);
+    let subject = manual_subject.clone().or(provider_subject);
+    let authoritative_subject =
+        manual_subject.or_else(|| f.authoritative_title().map(str::to_owned));
+    let title = authoritative_subject
+        .clone()
         .or_else(|| subject.clone())
         .unwrap_or_else(|| clean(&stem));
     PlaceholderValues {
@@ -377,14 +407,18 @@ fn file_values(f: &AnalyzedFile) -> PlaceholderValues {
         minute,
         second,
         title: Some(title),
-        author: f.embedded_author.clone(),
+        author: f
+            .overrides
+            .author
+            .clone()
+            .or_else(|| f.embedded_author.clone()),
         location: f
+            .overrides
             .location
             .clone()
+            .or_else(|| f.location.clone())
             .or_else(|| coordinate_fallback(f.latitude, f.longitude)),
-        subject: f
-            .authoritative_title()
-            .map(str::to_owned)
+        subject: authoritative_subject
             .or(subject)
             .or_else(|| Some(clean(&stem))),
         camera: f.camera_model.clone(),
@@ -658,6 +692,7 @@ mod tests {
             longitude: None,
             location: None,
             subject: None,
+            overrides: Default::default(),
             bitrate_kbps: None,
             duration_secs: None,
             page_count: None,
@@ -676,6 +711,32 @@ mod tests {
             file_values(&f).subject.as_deref(),
             Some("Sunset over the River")
         );
+    }
+
+    #[test]
+    fn manual_override_beats_embedded_and_provider_values() {
+        let mut f = analyzed("/tmp/scan0001.jpg");
+        f.subject = Some("provider subject".into());
+        f.embedded_title = Some("Embedded Title".into());
+        f.location = Some("embedded place".into());
+        f.embedded_author = Some("Embedded Author".into());
+        f.overrides = homelinter_analyze::MetadataOverrides {
+            location: Some("Manual Place".into()),
+            subject: Some("Manual Subject".into()),
+            author: Some("Manual Author".into()),
+        };
+        let v = file_values(&f);
+        assert_eq!(v.location.as_deref(), Some("Manual Place"));
+        assert_eq!(v.subject.as_deref(), Some("Manual Subject"));
+        assert_eq!(v.title.as_deref(), Some("Manual Subject"));
+        assert_eq!(v.author.as_deref(), Some("Manual Author"));
+        // Clearing the subject override falls back to the authoritative
+        // embedded title, not the provider value.
+        f.overrides.subject = None;
+        assert_eq!(file_values(&f).subject.as_deref(), Some("Embedded Title"));
+        // Clearing location falls back to embedded GPS/location.
+        f.overrides.location = None;
+        assert_eq!(file_values(&f).location.as_deref(), Some("embedded place"));
     }
 
     #[test]
