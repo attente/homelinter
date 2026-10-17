@@ -2,7 +2,6 @@
 //! suggestion batch, selection, execution report retention, and failure
 //! record. Session state is never persisted across restarts.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use homelinter_model::config::RawConfig;
@@ -10,6 +9,7 @@ use homelinter_model::suggestion::{
     ExecutionReport, ScanSummary, SessionFailure, SessionState, Suggestion, SuggestionStatus,
 };
 use homelinter_suggest::validate_batch;
+use serde_json::Value as JsonValue;
 
 /// The identity of a validated execution batch: the normalized sorted ids,
 /// used for idempotent re-runs and stored-report lookup.
@@ -33,10 +33,15 @@ pub struct Session {
     /// Home directory used for the symlink index and relative destinations.
     pub home: PathBuf,
     pub platform: &'static str,
-    /// Effective merged configuration (config file chain + session-level
-    /// values that are not part of the config schema).
+    /// Effective current settings: the config-file chain folded with
+    /// launch-time CLI overrides and accumulated runtime writes. Settings
+    /// affect future scans only; a running scan keeps its snapshot.
     pub config: RawConfig,
     pub config_path: Option<PathBuf>,
+    /// Partial config documents written through `PUT /config` during this
+    /// process, accumulated so a runtime write wins over a launch-time CLI
+    /// override for the same key. Persisted to the config file as well.
+    pub runtime_overrides: JsonValue,
     /// Effective config hash, for change detection in `GET /session`.
     pub config_hash: String,
     /// Hash of the config snapshot the current suggestion batch was scanned
@@ -44,9 +49,6 @@ pub struct Session {
     /// against `config_hash` to flag a batch produced under an older
     /// configuration (see "Session Model" in DESIGN.md).
     pub batch_config_hash: Option<String>,
-    /// Per-scan `target_paths` overrides from the scan request.
-    pub scan_target_paths: BTreeMap<String, String>,
-    pub hidden: bool,
     /// Top-level suggestions in deterministic order.
     pub suggestions: Vec<Suggestion>,
     /// Most recent execution report, retained until the next
@@ -73,10 +75,9 @@ impl Session {
             platform: homelinter_model::config::platform_name(),
             config,
             config_path,
+            runtime_overrides: JsonValue::Object(Default::default()),
             config_hash,
             batch_config_hash: None,
-            scan_target_paths: BTreeMap::new(),
-            hidden: false,
             suggestions: Vec::new(),
             report: None,
             report_batch: None,

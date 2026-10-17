@@ -7,7 +7,6 @@ import type {
   ExecutionReport,
   ExecuteRequest,
   ExportResult,
-  ScanRequest,
   ScanSummary,
   Session,
   Suggestion,
@@ -86,10 +85,10 @@ export const api = {
     return request<Session>("/session");
   },
 
-  async startScan(body: ScanRequest): Promise<void> {
+  async startScan(): Promise<void> {
     await request<void>("/session/scan", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({}),
     });
   },
 

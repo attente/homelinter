@@ -243,7 +243,7 @@ export default function App() {
   }, [pushToast, resetSuggestions]);
 
   const startScan = useCallback(
-    async (values: ScanFormValues) => {
+    async (_values: ScanFormValues) => {
       const curState = stRef.current.session?.state;
       if (
         curState === "scanning" ||
@@ -266,17 +266,10 @@ export default function App() {
         runError: null,
       }));
       try {
-        const targetPaths: Record<string, string> = {};
-        for (const [kind, template] of Object.entries(values.targetPaths)) {
-          const t = template.trim();
-          if (t.length > 0) targetPaths[kind] = t;
-        }
-        await api.startScan({
-          root: values.root.length > 0 ? values.root : undefined,
-          hidden: values.hidden,
-          target_paths:
-            Object.keys(targetPaths).length > 0 ? targetPaths : undefined,
-        });
+        // Root, hidden, and destination paths are persisted by the scan
+        // form (PUT /config) before it calls onStart; the scan request
+        // itself carries no parameters.
+        await api.startScan();
       } catch (e: unknown) {
         pushToast(`scan failed to start: ${resolveApiError(e)}`);
         setSt((prev) => ({
@@ -756,15 +749,11 @@ export default function App() {
       />
     );
   } else if (st.showScanForm) {
-    const defaults = st.session?.scan_defaults;
     body = (
       <ScanForm
         key={st.session ? "session-loaded" : "booting"}
         defaultRoot={st.session?.scan_root ?? ""}
         defaultHome={st.session?.home ?? ""}
-        defaultHidden={defaults?.hidden ?? false}
-        defaultTargetPaths={defaults?.target_paths}
-        defaultExcludePaths={defaults?.default_exclude_paths}
         configHash={st.session?.config_hash ?? null}
         hasSuggestions={st.suggestionsTotal > 0}
         startDisabled={!canScan}

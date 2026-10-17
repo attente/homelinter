@@ -305,13 +305,19 @@ impl App {
     // ------------------------------------------------------------------
 
     async fn start_scan(&mut self) -> Result<(), String> {
-        let mut body = serde_json::json!({
-            "root": self.root,
-            "hidden": self.hidden,
+        // Root, hidden, and target paths are runtime settings, not per-scan
+        // parameters: persist the form's values, then scan against the
+        // service's current settings.
+        let mut settings = serde_json::json!({
+            "scan": { "root": self.root, "hidden": self.hidden },
         });
         if !self.target_paths.is_empty() {
-            body["target_paths"] = serde_json::json!(self.target_paths);
+            settings["target_paths"] = serde_json::json!(self.target_paths);
         }
+        self.client
+            .config_put(settings)
+            .await
+            .map_err(|e| format!("cannot save scan settings: {e}"))?;
         self.phase = Phase::Scan;
         self.state = "scanning".to_string();
         self.rows.clear();
@@ -322,7 +328,7 @@ impl App {
         self.metadata_completed = 0;
         self.metadata_total = 0;
         self.client
-            .start_scan(body)
+            .start_scan(serde_json::json!({}))
             .await
             .map_err(|e| format!("cannot start scan: {e}"))?;
         Ok(())
@@ -895,18 +901,16 @@ impl App {
                         self.toast = Some(e);
                     }
                 }
-                KeyCode::Char('C') => {
-                    match self.client.cache_clear().await {
-                        Ok(()) => {
-                            self.cache_offset = 0;
-                            self.toast = Some("cache cleared".to_string());
-                            if let Err(e) = self.load_cache().await {
-                                self.toast = Some(e);
-                            }
+                KeyCode::Char('C') => match self.client.cache_clear().await {
+                    Ok(()) => {
+                        self.cache_offset = 0;
+                        self.toast = Some("cache cleared".to_string());
+                        if let Err(e) = self.load_cache().await {
+                            self.toast = Some(e);
                         }
-                        Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
                     }
-                }
+                    Err(e) => self.toast = Some(format!("cache clear failed: {e}")),
+                },
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
                     self.phase = Phase::Config
                 }
@@ -1485,10 +1489,7 @@ impl App {
         }
         for r in &self.cache_entries {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{} ", r.kind),
-                    Style::new().fg(Color::Cyan).bold(),
-                ),
+                Span::styled(format!("{} ", r.kind), Style::new().fg(Color::Cyan).bold()),
                 Span::styled(
                     format!("{} ", r.created_at),
                     Style::new().fg(Color::DarkGray),
@@ -1760,12 +1761,7 @@ fn status_color(status: &str) -> Color {
 
 /// Run the TUI against an already-healthy embedded service, then return.
 /// The caller (driver) performs the graceful shutdown afterwards.
-pub async fn run(
-    client: &Client,
-    root: PathBuf,
-    hidden: bool,
-    target_paths: BTreeMap<String, String>,
-) -> Result<u8, String> {
+pub async fn run(client: &Client) -> Result<u8, String> {
     if !io::stdin().is_terminal() {
         return Err(
             "the tui requires a terminal; run a plain scan for a summary, or use --execute or --export to act without review"
@@ -1779,6 +1775,27 @@ pub async fn run(
             "the tui requires at least {MIN_COLS}x{MIN_ROWS}; the terminal is {cols}x{rows}"
         ));
     }
+
+    // Seed the scan form from the service's current settings; the form then
+    // writes them back through PUT /config when a scan is started.
+    let cfg = client
+        .config()
+        .await
+        .map_err(|e| format!("cannot read settings: {e}"))?;
+    let root = cfg["scan"]["root"]
+        .as_str()
+        .map(PathBuf::from)
+        .or_else(homelinter_model::path::home_dir)
+        .ok_or_else(|| "cannot determine the scan root".to_string())?;
+    let hidden = cfg["scan"]["hidden"].as_bool().unwrap_or(false);
+    let target_paths: BTreeMap<String, String> = cfg["target_paths"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
 
     enable_raw_mode().map_err(|e| format!("cannot enable raw mode: {e}"))?;
     let mut stdout = io::stdout();

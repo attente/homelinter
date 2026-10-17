@@ -8,7 +8,7 @@
 //! completed work items, so a long extraction or hashing pass shows live
 //! movement in clients instead of a frozen phase line.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use homelinter_model::suggestion::{
 };
 use homelinter_scan::{DiscoveryOptions, ToolSet};
 use homelinter_suggest::{generate_suggestions, GenerateInput};
+use serde_json::Value as JsonValue;
 
 use crate::audit::AuditEntry;
 use crate::events::{EventBus, RejectedId, ServerEvent};
@@ -52,11 +53,11 @@ pub struct App {
     /// Directory containing the built SPA (index.html + assets). None
     /// disables static file serving (API-only mode).
     pub web_dir: Option<PathBuf>,
-    /// Scan dialog defaults for the SPA (see `ServiceOptions::default_hidden`
-    /// and `ServiceOptions::default_target_paths`). Exposed as
-    /// `scan_defaults` in `GET /session`; never applied server-side.
-    pub default_hidden: bool,
-    pub default_target_paths: BTreeMap<String, String>,
+    /// Launch-time CLI overrides as a partial config document, retained so
+    /// runtime writes can be folded over them with the right precedence
+    /// (runtime wins). Never applied directly to scans; scans snapshot the
+    /// session's effective settings.
+    pub launch_overrides: JsonValue,
     /// Watch channel: a `POST /api/v1/shutdown` sends `true` here and the
     /// HTTP server shuts down gracefully.
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -114,18 +115,13 @@ fn phase_progress(phase: &'static str, scanned: u64, start: Instant) -> ServerEv
 
 /// Run the scan pipeline in the background. The caller has already checked
 /// the state machine under the session lock, set the session to
-/// `Scanning`, and snapshotted the configuration (`cfg`) and per-scan
-/// target-path overrides (`target_paths`) at that moment: every phase runs
-/// against that one snapshot, so a config save during a scan never changes
-/// the running work and the batch reflects a single committed configuration.
-pub async fn start_scan(
-    app: AppHandle,
-    root: PathBuf,
-    hidden: bool,
-    cfg: RawConfig,
-    target_paths: BTreeMap<String, String>,
-) {
+/// `Scanning`, and snapshotted the current effective settings (`cfg`) and
+/// the resolved scan root at that moment: every phase runs against that one
+/// snapshot, so a settings write during a scan never changes the running
+/// work and the batch reflects a single committed configuration.
+pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     let home = effective_home(&app);
+    let hidden = cfg.scan_hidden();
     let cancel_token = app.cancel.load(Ordering::SeqCst);
     // Provider results are gated by the epoch of the scan that enqueued
     // them; superseded scans' outstanding jobs are dropped without effect.
@@ -234,7 +230,7 @@ pub async fn start_scan(
     ));
 
     // Phase 3: suggestion generation.
-    let formats = match cfg.resolved_target_paths(&target_paths) {
+    let formats = match cfg.resolved_target_paths() {
         Ok(f) => f,
         Err(e) => {
             return fail(app.clone(), format!("invalid target_paths: {e}")).await;

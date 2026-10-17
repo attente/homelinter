@@ -279,7 +279,7 @@ fn noop_move_not_generated() {
 fn model_defaults_cover_kinds() {
     // The model ships per-kind defaults so every classified kind resolves.
     let cfg = RawConfig::default();
-    let defaults = cfg.resolved_target_paths(&BTreeMap::new()).unwrap();
+    let defaults = cfg.resolved_target_paths().unwrap();
     for kind in AssetKind::ALL {
         assert!(defaults.contains_key(&kind), "missing default for {kind:?}");
     }

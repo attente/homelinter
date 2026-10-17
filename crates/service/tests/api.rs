@@ -2,7 +2,6 @@
 //! selection and validation rules, real execution with idempotency,
 //! export, config, cache, audit, and an end-to-end HTTP + SSE + shutdown run.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -145,7 +144,7 @@ async fn wait_state(app: &AppHandle, want: &str) {
 }
 
 #[tokio::test]
-async fn session_reports_scan_dialog_defaults() {
+async fn launch_overrides_seed_scan_settings() {
     let env = Env::new("scan_defaults");
     let opts = ServiceOptions {
         cli_config: Some(env._config.clone()),
@@ -153,29 +152,37 @@ async fn session_reports_scan_dialog_defaults() {
         data_dir_override: Some(env.data.clone()),
         config_chain_override: Some(ConfigChain::default()),
         web_dir: None,
-        default_hidden: true,
-        default_target_paths: BTreeMap::from([(
-            "photo".to_string(),
-            "Pictures/%Y/%m/%f".to_string(),
-        )]),
+        initial_overrides: Some(json!({
+            "scan": { "root": env.home.to_string_lossy().into_owned(), "hidden": true },
+            "target_paths": { "photo": "Pictures/%Y/%m/%f" },
+        })),
     };
     let app = build_service(opts).unwrap().app;
-    let (status, v) = request(&app, "GET", "/api/v1/session", None).await;
+    // CLI flags are launch-time settings overrides, visible in the effective
+    // settings and editable through the API.
+    let (status, v) = request(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["scan_defaults"]["hidden"], true);
-    assert_eq!(
-        v["scan_defaults"]["target_paths"]["photo"],
-        "Pictures/%Y/%m/%f"
-    );
+    assert_eq!(v["scan"]["root"], env.home.to_string_lossy().as_ref());
+    assert_eq!(v["scan"]["hidden"], true);
+    assert_eq!(v["target_paths"]["photo"], "Pictures/%Y/%m/%f");
+    // The session no longer advertises per-scan dialog defaults.
+    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
+    assert!(sess.get("scan_defaults").is_none());
 }
 
 #[tokio::test]
-async fn session_scan_defaults_default_to_off() {
+async fn scan_settings_default_to_home_hidden_off() {
     let env = Env::new("scan_defaults_off");
     let app = env.service();
-    let (_, v) = request(&app, "GET", "/api/v1/session", None).await;
-    assert_eq!(v["scan_defaults"]["hidden"], false);
-    assert_eq!(v["scan_defaults"]["target_paths"], json!({}));
+    let (_, v) = request(&app, "GET", "/api/v1/config", None).await;
+    assert!(v["scan"]["root"].is_null());
+    assert_eq!(v["scan"]["hidden"], false);
+    assert_eq!(v["target_paths"], json!({}));
+    assert!(v["default_exclude_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x == "node_modules"));
 }
 
 /// Create two identical files with distinct mtimes; the older becomes the
@@ -203,13 +210,17 @@ fn seed_duplicates(home: &Path) -> (PathBuf, PathBuf) {
 }
 
 async fn scan_to_ready(app: &AppHandle, root: &Path) {
-    let (status, v) = request(
+    // The scan root is an ordinary runtime setting; persist it, then start
+    // a scan with no per-scan parameters.
+    let (status, _) = request(
         app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({ "root": root.to_string_lossy() })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "scan": { "root": root.to_string_lossy() } })),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = request(app, "POST", "/api/v1/session/scan", Some(json!({}))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(v["state"], "scanning");
     wait_state(app, "ready").await;
@@ -258,15 +269,15 @@ async fn health_and_session_start_idle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn path_validation_rules() {
+async fn settings_validation_rules() {
     let env = Env::new("paths");
     let app = env.service();
-    // Relative root -> 422.
+    // Relative scan root -> 422 through the settings API.
     let (status, v) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({ "root": "relative/x" })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "scan": { "root": "relative/x" } })),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -274,18 +285,18 @@ async fn path_validation_rules() {
     // Unknown asset kind in target_paths -> 422.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({ "root": env.home.to_string_lossy(), "target_paths": { "nope": "X/%f" } })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "target_paths": { "nope": "X/%f" } })),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     // Malformed template -> 422.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({ "root": env.home.to_string_lossy(), "target_paths": { "photo": "%" } })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "target_paths": { "photo": "%" } })),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -296,6 +307,8 @@ async fn path_validation_rules() {
     // Execute from idle conflicts.
     let (status, _) = request(&app, "POST", "/api/v1/execute", Some(json!({}))).await;
     assert_eq!(status, StatusCode::CONFLICT);
+    // Every rejected write left the session untouched.
+    assert_eq!(session_state(&app).await, "idle");
 }
 
 // ---------------------------------------------------------------------------
@@ -347,80 +360,89 @@ async fn scan_produces_validated_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scan_config_overlay_applies_for_one_scan_only() {
-    let env = Env::new("scan_overlay");
+async fn settings_writes_persist_and_affect_future_scans() {
+    let env = Env::new("scan_settings");
     let app = env.service();
     seed_duplicates(&env.home);
 
-    // Keep the effective configuration to verify the scan-only overlay
-    // does not persist, including the built-in exclusion defaults.
     let (_, initial_cfg) = request(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(initial_cfg["scan"]["default_exclusions"], json!(true));
     assert_eq!(initial_cfg["scan"]["exclude_paths"], json!([]));
-
-    // The session advertises the built-in exclusions for the scan form.
-    let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
-    assert!(sess["scan_defaults"]["default_exclude_paths"]
+    // Built-in exclusions are reported by the settings endpoint.
+    assert!(initial_cfg["default_exclude_paths"]
         .as_array()
         .unwrap()
         .iter()
         .any(|v| v == "node_modules"));
 
-    // Overlay excluding the Downloads tree: the duplicates are not found.
+    // Persist an exclusion of the Downloads tree, then scan under it.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
+        "PUT",
+        "/api/v1/config",
         Some(json!({
-            "root": env.home.to_string_lossy(),
-            "config": { "scan": { "exclude_paths": ["Downloads"] } },
+            "scan": {
+                "root": env.home.to_string_lossy(),
+                "exclude_paths": ["Downloads"],
+            },
         })),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(&app, "POST", "/api/v1/session/scan", Some(json!({}))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     wait_state(&app, "ready").await;
     let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
     assert_eq!(sess["suggestions_total"], 0);
 
-    // The overlay was not persisted: the effective config is unchanged.
+    // The setting persisted: the effective config still shows it.
     let (_, cfg) = request(&app, "GET", "/api/v1/config", None).await;
-    assert_eq!(
-        cfg["scan"]["exclude_paths"],
-        initial_cfg["scan"]["exclude_paths"]
-    );
+    assert_eq!(cfg["scan"]["exclude_paths"], json!(["Downloads"]));
 
-    // A scan without the overlay finds the duplicates again.
-    scan_to_ready(&app, &env.home).await;
+    // Null resets the setting; the next scan finds the duplicates again.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "scan": { "exclude_paths": null } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, cfg) = request(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(cfg["scan"]["exclude_paths"], json!([]));
+    let (status, _) = request(&app, "POST", "/api/v1/session/scan", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "ready").await;
     let (_, sess) = request(&app, "GET", "/api/v1/session", None).await;
     assert!(sess["suggestions_total"].as_u64().unwrap() >= 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scan_config_overlay_validated_before_state_change() {
-    let env = Env::new("scan_overlay_bad");
+async fn invalid_settings_write_leaves_session_untouched() {
+    let env = Env::new("scan_settings_bad");
     let app = env.service();
     seed_duplicates(&env.home);
 
-    // Session-scoped scan keys stay rejected through the overlay.
+    // Relative scan root is rejected as a setting.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({
-            "root": env.home.to_string_lossy(),
-            "config": { "scan": { "root": "/tmp" } },
-        })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "scan": { "root": "relative/x" } })),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    // Non-table overlay.
+    // Unknown section key.
     let (status, _) = request(
         &app,
-        "POST",
-        "/api/v1/session/scan",
-        Some(json!({ "root": env.home.to_string_lossy(), "config": 5 })),
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "geocoder": { "bogus": 1 } })),
     )
     .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Non-table document.
+    let (status, _) = request(&app, "PUT", "/api/v1/config", Some(json!(5))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     // Nothing changed: the session is still idle and a normal scan works.
@@ -558,9 +580,20 @@ async fn cache_list_contract() {
 
     {
         let cache = app.cache.lock().await;
-        let geo = cache_key(KIND_GEOCODE, "nominatim:openstreetmap", &[1u8; 32], &[2u8; 32]);
+        let geo = cache_key(
+            KIND_GEOCODE,
+            "nominatim:openstreetmap",
+            &[1u8; 32],
+            &[2u8; 32],
+        );
         cache
-            .put(&geo, KIND_GEOCODE, "nominatim:openstreetmap", &[2u8; 32], "Berlin")
+            .put(
+                &geo,
+                KIND_GEOCODE,
+                "nominatim:openstreetmap",
+                &[2u8; 32],
+                "Berlin",
+            )
             .unwrap();
         let desc = cache_key(
             KIND_DESCRIPTION,
@@ -618,8 +651,10 @@ async fn config_put_null_deletes_and_get_reports_defaults() {
     // GET /config carries the built-in target-path defaults and the
     // geocoder contact field.
     let (_, v) = request(&app, "GET", "/api/v1/config", None).await;
-    assert_eq!(v["target_path_defaults"]["photo"],
-        "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e");
+    assert_eq!(
+        v["target_path_defaults"]["photo"],
+        "Images/%Y-%m-%d-%H-%M-%S-%l-%s.%e"
+    );
     assert_eq!(v["target_path_defaults"]["archive"], "Archives/%Y/%m/%f");
     assert_eq!(v["geocoder"]["user_agent_contact"], serde_json::Value::Null);
 

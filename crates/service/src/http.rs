@@ -5,7 +5,6 @@
 //! normalized host path; relative paths, `~`, and environment-variable
 //! references are rejected with 422.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -19,13 +18,11 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{
-    config_hash, effective_config_json, merge_and_validate_config_chain,
-    merge_and_write_config_chain, overlay_scan_config, platform_name, DEFAULT_EXCLUDE_PATHS,
+    config_hash, deep_merge_json, effective_config_json, fold_config_overrides,
+    merge_and_validate_config_chain, merge_and_write_config_chain, platform_name,
 };
 use homelinter_model::error::{ApiError, ErrorCode};
-use homelinter_model::format::FormatString;
 use homelinter_model::path;
 use homelinter_model::suggestion::{ExecutionReport, SessionState, Suggestion, SuggestionStatus};
 
@@ -64,20 +61,7 @@ fn err(code: ErrorCode, message: impl Into<String>) -> (StatusCode, Json<Value>)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]
-struct ScanBody {
-    #[serde(default)]
-    root: Option<String>,
-    #[serde(default)]
-    hidden: bool,
-    #[serde(default)]
-    target_paths: BTreeMap<String, String>,
-    /// Optional per-scan configuration overlay: a partial configuration
-    /// document with the same shape and merge semantics as `PUT /config`.
-    /// It is merged over the effective configuration for this scan only and
-    /// never persisted.
-    #[serde(default)]
-    config: Option<Value>,
-}
+struct ScanBody {}
 
 #[derive(Debug, Deserialize)]
 struct IdsBody {
@@ -366,41 +350,15 @@ async fn cancel(State(app): State<AppHandle>) -> ApiResult {
 // Session & scan
 // ---------------------------------------------------------------------------
 
-async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) -> ApiResult {
-    // Validate per-scan target_paths first (unknown kind or invalid
-    // template -> 422 before any state change).
-    for (kind, template) in &body.target_paths {
-        AssetKind::from_name(kind)
-            .ok_or_else(|| api_err(ApiError::validation(format!("unknown asset kind '{kind}'"))))?;
-        FormatString::parse(template).map_err(|e| {
-            api_err(ApiError::validation(format!(
-                "invalid target_paths.{kind}: {e}"
-            )))
-        })?;
-    }
-
+async fn session_scan(State(app): State<AppHandle>, Json(_body): Json<ScanBody>) -> ApiResult {
     let home = effective_home(&app);
-    let root: PathBuf = match body.root {
-        Some(r) => {
-            let p = PathBuf::from(&r);
-            path::require_absolute_normalized(&p).map_err(|_| {
-                api_err(ApiError::validation(format!(
-                    "root must be an absolute normalized path: {r}"
-                )))
-            })?;
-            p
-        }
-        None => home.clone(),
-    };
 
-    // Snapshot the configuration and the per-scan target-path overrides at
+    // Snapshot the current effective settings and resolve the scan root at
     // the moment the scan is accepted; every pipeline phase runs against
-    // this one snapshot, so a config save during the scan never changes the
-    // running work (see "Session Model" in DESIGN.md). The optional
-    // per-scan config overlay is applied to the snapshot here, before any
-    // state change, so an invalid overlay is a 422 that leaves the session
-    // untouched.
-    let (cfg, target_paths) = {
+    // this one snapshot, so a settings write during the scan never changes
+    // the running work (see "Session Model" in DESIGN.md). Root, hidden,
+    // and target paths are ordinary settings, not request parameters.
+    let (root, cfg) = {
         let mut sess = app.session.lock().await;
         if sess.state.in_progress() {
             return Err(err(
@@ -408,14 +366,13 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
                 "a scan or execution is already in progress",
             ));
         }
-        let cfg = match &body.config {
-            Some(overlay) => overlay_scan_config(&sess.config, overlay).map_err(api_err)?,
-            None => sess.config.clone(),
+        let cfg = sess.config.clone();
+        let root = match cfg.scan_root() {
+            Some(r) => PathBuf::from(r),
+            None => home.clone(),
         };
         sess.state = SessionState::Scanning;
         sess.scan_root = Some(root.clone());
-        sess.hidden = body.hidden;
-        sess.scan_target_paths = body.target_paths.clone();
         // The new scan replaces the session: previous suggestions,
         // selection, and the execution report are discarded.
         sess.suggestions.clear();
@@ -426,18 +383,12 @@ async fn session_scan(State(app): State<AppHandle>, Json(body): Json<ScanBody>) 
         sess.failure = None;
         sess.degraded_identity = false;
         sess.warnings.clear();
-        (cfg, sess.scan_target_paths.clone())
+        (root, cfg)
     };
     app.events
         .publish(ServerEvent::State(SessionState::Scanning));
 
-    tokio::spawn(start_scan(
-        app.clone(),
-        root,
-        body.hidden,
-        cfg,
-        target_paths,
-    ));
+    tokio::spawn(start_scan(app.clone(), root, cfg));
     accepted(json!({ "state": "scanning" }))
 }
 
@@ -458,11 +409,6 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         "metadata_progress": {
             "completed": metadata_completed,
             "total": metadata_total,
-        },
-        "scan_defaults": {
-            "hidden": app.default_hidden,
-            "target_paths": app.default_target_paths,
-            "default_exclude_paths": DEFAULT_EXCLUDE_PATHS,
         },
     });
     if let Some(f) = &sess.failure {
@@ -941,6 +887,7 @@ async fn config_put(State(app): State<AppHandle>, Json(body): Json<Value>) -> Ap
             "configuration must be a table",
         ));
     }
+    let submitted = body.clone();
     let cli = app.cli_config.clone();
     let chain = app.config_chain.clone();
     let loaded = tokio::task::spawn_blocking(move || {
@@ -951,7 +898,13 @@ async fn config_put(State(app): State<AppHandle>, Json(body): Json<Value>) -> Ap
     .map_err(api_err)?;
     let cfg = {
         let mut sess = app.session.lock().await;
-        sess.config = loaded.raw;
+        // Accumulate the write so it wins over a launch-time CLI override
+        // for the same key, then fold file < launch < runtime.
+        deep_merge_json(&mut sess.runtime_overrides, submitted);
+        let effective =
+            fold_config_overrides(&loaded.raw, &app.launch_overrides, &sess.runtime_overrides)
+                .map_err(api_err)?;
+        sess.config = effective;
         sess.config_path = loaded.config_path;
         sess.config_hash = config_hash(&sess.config);
         effective_config_json(&sess.config, sess.config_path.as_deref())
@@ -969,6 +922,7 @@ async fn config_validate(State(app): State<AppHandle>, Json(body): Json<Value>) 
             "configuration must be a table",
         ));
     }
+    let submitted = body.clone();
     let cli = app.cli_config.clone();
     let chain = app.config_chain.clone();
     let raw = tokio::task::spawn_blocking(move || {
@@ -977,7 +931,16 @@ async fn config_validate(State(app): State<AppHandle>, Json(body): Json<Value>) 
     .await
     .map_err(|e| err(ErrorCode::Internal, format!("config task panicked: {e}")))?
     .map_err(api_err)?;
-    ok(json!({ "valid": true, "config": effective_config_json(&raw, None) }))
+    // Preview the fully folded effective settings: file < launch < runtime,
+    // including the candidate write.
+    let mut runtime = {
+        let sess = app.session.lock().await;
+        sess.runtime_overrides.clone()
+    };
+    deep_merge_json(&mut runtime, submitted);
+    let effective =
+        fold_config_overrides(&raw, &app.launch_overrides, &runtime).map_err(api_err)?;
+    ok(json!({ "valid": true, "config": effective_config_json(&effective, None) }))
 }
 
 // ---------------------------------------------------------------------------
@@ -995,12 +958,9 @@ async fn cache_list(State(app): State<AppHandle>, Query(q): Query<CacheQuery>) -
         .into_iter()
         .map(|(kind, count)| json!({ "kind": kind, "count": count }))
         .collect::<Vec<Value>>();
-    let entries = cache.list(q.kind.as_deref(), offset, limit).map_err(|e| {
-        err(
-            ErrorCode::Internal,
-            format!("cannot read cache: {e}"),
-        )
-    })?;
+    let entries = cache
+        .list(q.kind.as_deref(), offset, limit)
+        .map_err(|e| err(ErrorCode::Internal, format!("cannot read cache: {e}")))?;
     ok(json!({
         "total": total,
         "offset": offset,

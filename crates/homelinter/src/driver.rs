@@ -1,8 +1,9 @@
 //! Session drivers: the managed (ephemeral) flow and the standalone `web`
 //! flow share one service-spawning routine.
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use homelinter_clients::{Client, ClientsError};
@@ -194,29 +195,53 @@ async fn shutdown_instance(inst: Instance) {
 }
 
 // ---------------------------------------------------------------------------
+// Launch-time settings overrides
+// ---------------------------------------------------------------------------
+
+/// Build a partial config document from CLI flags. These seed the service's
+/// initial effective settings; they are folded over the config-file chain
+/// and a later runtime write wins over them for the same key.
+fn launch_overrides(
+    root: Option<&PathBuf>,
+    hidden: bool,
+    target_paths: &BTreeMap<String, String>,
+    cwd: &Path,
+) -> Result<Value, String> {
+    let mut doc = serde_json::Map::new();
+    let mut scan = serde_json::Map::new();
+    if let Some(p) = root {
+        let abs = to_absolute(p, cwd).map_err(|e| format!("invalid --root: {e}"))?;
+        scan.insert("root".into(), json!(abs.to_string_lossy()));
+    }
+    if hidden {
+        scan.insert("hidden".into(), json!(true));
+    }
+    if !scan.is_empty() {
+        doc.insert("scan".into(), Value::Object(scan));
+    }
+    if !target_paths.is_empty() {
+        doc.insert("target_paths".into(), json!(target_paths));
+    }
+    Ok(Value::Object(doc))
+}
+
+// ---------------------------------------------------------------------------
 // Web (standalone service)
 // ---------------------------------------------------------------------------
 
 pub async fn web(opts: WebOptions) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-    let root = match &opts.root {
-        Some(p) => to_absolute(p, &cwd).map_err(|e| format!("invalid --root: {e}"))?,
-        None => homelinter_model::path::home_dir()
-            .ok_or_else(|| "cannot determine the home directory".to_string())?,
-    };
-    // The web command pre-seeds the session's default scan root with the
-    // service home; scans may still override it per request. `--hidden`
-    // and `--target-path` pre-fill the SPA scan dialog via `scan_defaults`
-    // in GET /session; the SPA still sends hidden/target_paths per scan.
+    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
+    // `--root`, `--hidden`, and `--target-path` are runtime settings: they
+    // seed the service's initial settings and are editable through the API.
     let inst = spawn(
         homelinter_service::ServiceOptions {
             cli_config: opts.config,
-            home_override: Some(root),
+            home_override: None,
             data_dir_override: None,
             config_chain_override: None,
             web_dir: resolve_web_dir(),
-            default_hidden: opts.hidden,
-            default_target_paths: opts.target_paths,
+            initial_overrides: Some(overrides),
         },
         opts.port,
     )?;
@@ -268,12 +293,7 @@ fn port_of(client: &Client) -> u16 {
 pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-
-    let root = match &opts.root {
-        Some(p) => to_absolute(p, &cwd).map_err(|e| format!("invalid --root: {e}"))?,
-        None => homelinter_model::path::home_dir()
-            .ok_or_else(|| "cannot determine the home directory".to_string())?,
-    };
+    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
 
     let inst = spawn(
         homelinter_service::ServiceOptions {
@@ -281,6 +301,7 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
             home_override: None,
             data_dir_override: None,
             web_dir: None,
+            initial_overrides: Some(overrides),
             ..Default::default()
         },
         None,
@@ -303,7 +324,7 @@ pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
 
     // The TUI owns the terminal from here on; it returns once the user
     // quits, and any in-flight operation has been cancelled or finished.
-    let code = tui::run(&client, root, opts.hidden, opts.target_paths).await?;
+    let code = tui::run(&client).await?;
     shutdown_instance(inst).await;
     Ok(code)
 }
@@ -321,12 +342,7 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     }
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-
-    let root = match &opts.root {
-        Some(p) => to_absolute(p, &cwd).map_err(|e| format!("invalid --root: {e}"))?,
-        None => homelinter_model::path::home_dir()
-            .ok_or_else(|| "cannot determine the home directory".to_string())?,
-    };
+    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
 
     let inst = spawn(
         homelinter_service::ServiceOptions {
@@ -334,12 +350,25 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
             home_override: None,
             data_dir_override: None,
             web_dir: None,
+            initial_overrides: Some(overrides),
             ..Default::default()
         },
         None,
     )?;
     let client = inst.client.clone();
     wait_health(&client, Duration::from_secs(10)).await?;
+
+    // The effective scan root for the progress note comes from the
+    // service's current settings, not from a request parameter.
+    let cfg = client
+        .config()
+        .await
+        .map_err(|e| format!("cannot read settings: {e}"))?;
+    let root = cfg["scan"]["root"]
+        .as_str()
+        .map(PathBuf::from)
+        .or_else(homelinter_model::path::home_dir)
+        .ok_or_else(|| "cannot determine the scan root".to_string())?;
 
     // The effective output format: --format wins over the config file.
     let format = match opts.format {
@@ -364,15 +393,10 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     if verbosity >= 0 {
         output::note(&format!("scanning {}", root.display()));
     }
-    let mut scan_body = json!({
-        "root": root.to_string_lossy(),
-        "hidden": opts.hidden,
-    });
-    if !opts.target_paths.is_empty() {
-        scan_body["target_paths"] = json!(opts.target_paths);
-    }
+    // Scans run against the service's current settings; the request carries
+    // no per-scan parameters.
     client
-        .start_scan(scan_body)
+        .start_scan(json!({}))
         .await
         .map_err(|e| format!("cannot start scan: {e}"))?;
     let _sess = wait_for(&client, &["ready", "done"], Duration::from_secs(1800)).await?;

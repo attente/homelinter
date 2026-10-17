@@ -138,8 +138,8 @@ pub fn app_data_dir() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 // Raw schema sections. Every field is optional at the section level; the
 // derived defaults carry the documented fallback where the config file is
-// silent. Section-level structs deny unknown fields so invalid keys (such as
-// the session-scoped `scan.root` and `scan.hidden`) are rejected.
+// silent. Section-level structs deny unknown fields so invalid keys are
+// rejected.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +479,16 @@ pub struct ScanConfig {
     pub default_exclusions: Option<bool>,
     #[serde(default)]
     pub hidden_definition: Option<HiddenDefinition>,
+    /// Absolute, normalized filesystem root the scan covers. Absent means
+    /// the effective home directory. Runtime-mutable: this is an ordinary
+    /// setting, not a per-scan parameter.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Whether hidden entries are included in discovery. Absent means
+    /// `false`. Runtime-mutable: an ordinary setting, not a per-scan
+    /// parameter.
+    #[serde(default)]
+    pub hidden: Option<bool>,
 }
 
 impl ScanConfig {
@@ -607,6 +617,17 @@ impl RawConfig {
             .unwrap_or(HiddenDefinition::Explorer)
     }
 
+    /// The configured scan root, when one is set. Callers fall back to the
+    /// effective home directory when this is `None`.
+    pub fn scan_root(&self) -> Option<&str> {
+        self.scan.root.as_deref()
+    }
+
+    /// Whether hidden entries are scanned (default `false`).
+    pub fn scan_hidden(&self) -> bool {
+        self.scan.hidden.unwrap_or(false)
+    }
+
     pub fn provider_timeout(&self) -> u64 {
         self.limits
             .provider_timeout_seconds
@@ -640,17 +661,16 @@ impl RawConfig {
     }
 
     /// The resolved set of per-kind destination format strings honoring
-    /// precedence: per-scan overrides, config, then defaults.
+    /// precedence: config, then defaults. `target_paths` is a runtime
+    /// setting; there are no per-scan overrides.
     pub fn resolved_target_paths(
         &self,
-        overrides: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<asset_kind::AssetKind, FormatString>, ApiError> {
         let mut out = BTreeMap::new();
-        let mut seen: Vec<String> = Vec::new();
         for kind in asset_kind::AssetKind::ALL {
-            let template = overrides
+            let template = self
+                .target_paths
                 .get(kind.name())
-                .or_else(|| self.target_paths.get(kind.name()))
                 .map(String::as_str)
                 .unwrap_or_else(|| kind.default_format());
             let fs = FormatString::parse(template).map_err(|e| {
@@ -660,16 +680,7 @@ impl RawConfig {
                 ))
             })?;
             out.insert(kind, fs);
-            seen.push(kind.name().to_string());
         }
-        // Reject overrides that name an unknown kind (checked by caller too,
-        // but keep this function total).
-        for k in overrides.keys() {
-            if asset_kind::AssetKind::from_name(k).is_none() {
-                return Err(ApiError::validation(format!("unknown asset kind '{k}'")));
-            }
-        }
-        let _ = seen;
         Ok(out)
     }
 }
@@ -1086,6 +1097,15 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         }
     }
 
+    // scan.root: an absolute, normalized path with no `~` or
+    // environment-variable references, so it can be used verbatim as the
+    // discovery root.
+    if let Some(root) = raw.scan.root.as_deref() {
+        if let Err(e) = crate::path::require_absolute_normalized(std::path::Path::new(root)) {
+            fields.push(("scan.root".into(), e.body.message));
+        }
+    }
+
     // limits: timeouts and output caps must be positive so limits are never
     // infinite by configuration.
     if raw.limits.provider_timeout_seconds == Some(0) {
@@ -1113,8 +1133,7 @@ pub fn validate_config(raw: &RawConfig) -> Result<(), ApiError> {
         ));
     }
 
-    // Cache: `scan.root` and `scan.hidden` are not valid keys; deny
-    // unknown fields on ScanConfig already rejects them at parse time.
+    // Cache: no structural rules beyond the parse-time field checks.
 
     if fields.is_empty() {
         Ok(())
@@ -1333,13 +1352,17 @@ pub fn merge_and_validate_config_chain(
     Ok(raw)
 }
 
-/// Apply a partial per-scan configuration overlay (the `config` member of
-/// `POST /session/scan`) on top of the effective configuration. The overlay
-/// uses the same shape and merge semantics as `PUT /config` - tables merge
-/// by key, scalars and arrays replace, `null` deletes the key so the
-/// built-in default applies - but nothing is persisted: the result is the
-/// configuration snapshot for that one scan only.
-pub fn overlay_scan_config(base: &RawConfig, overlay: &JsonValue) -> Result<RawConfig, ApiError> {
+/// Apply a partial configuration override document on top of a base
+/// configuration. Used for the launch-time fold of CLI options over the
+/// config-file chain: the overlay uses the same shape and merge semantics
+/// as `PUT /config` - tables merge by key, scalars and arrays replace,
+/// `null` deletes the key so the built-in default applies - but nothing is
+/// persisted by this call. The resulting config is validated before it is
+/// returned.
+pub fn apply_config_overrides(
+    base: &RawConfig,
+    overlay: &JsonValue,
+) -> Result<RawConfig, ApiError> {
     if !overlay.is_object() {
         return Err(ApiError::validation("configuration must be a table"));
     }
@@ -1350,6 +1373,19 @@ pub fn overlay_scan_config(base: &RawConfig, overlay: &JsonValue) -> Result<RawC
         .map_err(|e| ApiError::validation(format!("invalid configuration: {e}")))?;
     validate_config(&raw)?;
     Ok(raw)
+}
+
+/// Fold launch-time CLI overrides and accumulated runtime-settings writes
+/// over a base config-file chain. Precedence is base < launch < runtime, so
+/// a runtime write wins over a launch flag for the same key while launch
+/// flags keep overriding untouched file values.
+pub fn fold_config_overrides(
+    base: &RawConfig,
+    launch: &JsonValue,
+    runtime: &JsonValue,
+) -> Result<RawConfig, ApiError> {
+    let launched = apply_config_overrides(base, launch)?;
+    apply_config_overrides(&launched, runtime)
 }
 
 /// Lossy JSON -> TOML conversion for the PUT / config persistence path
@@ -1485,6 +1521,8 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
     out.insert(
         "scan".into(),
         serde_json::json!({
+            "root": raw.scan.root,
+            "hidden": raw.scan_hidden(),
             "exclude_paths": raw.scan.exclude_paths,
             "exclude_extensions": raw.scan.exclude_extensions,
             "default_exclusions": raw.scan.default_exclusions_enabled(),
@@ -1494,6 +1532,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
                 HiddenDefinition::Dotfiles => "dotfiles",
             },
         }),
+    );
+    out.insert(
+        "default_exclude_paths".into(),
+        serde_json::to_value(DEFAULT_EXCLUDE_PATHS).unwrap_or(JsonValue::Null),
     );
     out.insert(
         "output".into(),
@@ -1572,7 +1614,10 @@ mod tests {
             DEFAULT_LARGE_FILE_THRESHOLD
         );
         assert_eq!(rc.provider_timeout(), DEFAULT_PROVIDER_TIMEOUT_SECONDS);
-        assert_eq!(rc.provider_concurrency(), DEFAULT_PROVIDER_CONCURRENCY as usize);
+        assert_eq!(
+            rc.provider_concurrency(),
+            DEFAULT_PROVIDER_CONCURRENCY as usize
+        );
         assert_eq!(rc.description.base_effective().max_words, DEFAULT_MAX_WORDS);
         assert_eq!(rc.output_format(), OutputFormat::Pretty);
         assert_eq!(rc.hidden_definition(), HiddenDefinition::Explorer);
@@ -1623,7 +1668,10 @@ mod tests {
         // `!name` cancels only the built-in, not a positive pattern for the
         // same directory.
         let rc = parse("[scan]\nexclude_paths = [\"build\", \"!build\"]\n").unwrap();
-        assert!(rc.scan.effective_exclude_paths().contains(&"build".to_string()));
+        assert!(rc
+            .scan
+            .effective_exclude_paths()
+            .contains(&"build".to_string()));
 
         // An exception naming a non-built-in is a structural error.
         assert!(parse("[scan]\nexclude_paths = [\"!buidl\"]\n").is_err());
@@ -1639,9 +1687,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_scan_root_and_hidden() {
-        assert!(parse("[scan]\nroot = \"/x\"\n").is_err());
-        assert!(parse("[scan]\nhidden = true\n").is_err());
+    fn accepts_and_validates_scan_root_and_hidden() {
+        // Root and hidden are ordinary settings, not rejected keys.
+        let rc = parse("[scan]\nroot = \"/home/user\"\nhidden = true\n").unwrap();
+        assert_eq!(rc.scan_root(), Some("/home/user"));
+        assert!(rc.scan_hidden());
+        // Absent hidden defaults to false.
+        assert!(!parse("").unwrap().scan_hidden());
+        // Root must be absolute, normalized, and free of `~`/env refs.
+        assert!(parse("[scan]\nroot = \"relative/x\"\n").is_err());
+        assert!(parse("[scan]\nroot = \"/a/../b\"\n").is_err());
+        assert!(parse("[scan]\nroot = \"~/Pictures\"\n").is_err());
     }
 
     #[test]
@@ -1935,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_scan_config_overrides_and_resets() {
+    fn apply_config_overrides_overrides_and_resets() {
         let mut base = RawConfig::default();
         base.geocoder.enabled = true;
         base.geocoder.language = Some("fr".into());
@@ -1949,18 +2005,19 @@ mod tests {
                 "service": "custom",
                 "endpoint": "http://geo.local",
                 "language": null,
-                "api_key": "per-scan-key",
+                "api_key": "launch-key",
             },
-            "scan": { "exclude_paths": ["new/**"] },
+            "scan": { "exclude_paths": ["new/**"], "hidden": true },
             "target_paths": { "photo": null, "audio": "Music/%f" },
             "limits": { "tool_timeout_seconds": 7 },
         });
-        let raw = overlay_scan_config(&base, &overlay).unwrap();
+        let raw = apply_config_overrides(&base, &overlay).unwrap();
         assert_eq!(raw.geocoder_service(), GeocoderService::Custom);
         assert_eq!(raw.geocoder.language, None);
-        assert_eq!(raw.geocoder.api_key.as_deref(), Some("per-scan-key"));
+        assert_eq!(raw.geocoder.api_key.as_deref(), Some("launch-key"));
         assert!(raw.geocoder.enabled);
         assert_eq!(raw.scan.exclude_paths, vec!["new/**"]);
+        assert!(raw.scan_hidden());
         assert!(!raw.target_paths.contains_key("photo"));
         assert_eq!(
             raw.target_paths.get("audio").map(String::as_str),
@@ -1972,20 +2029,26 @@ mod tests {
     }
 
     #[test]
-    fn overlay_scan_config_rejects_bad_documents() {
+    fn apply_config_overrides_rejects_bad_documents() {
         let base = RawConfig::default();
         // Non-table overlay.
-        assert!(overlay_scan_config(&base, &serde_json::json!(5)).is_err());
-        // Session-scoped keys stay rejected.
+        assert!(apply_config_overrides(&base, &serde_json::json!(5)).is_err());
+        // A relative scan root is invalid as a setting.
         assert!(
-            overlay_scan_config(&base, &serde_json::json!({ "scan": { "root": "/x" } })).is_err()
+            apply_config_overrides(&base, &serde_json::json!({ "scan": { "root": "/x" } })).is_ok()
         );
+        assert!(apply_config_overrides(
+            &base,
+            &serde_json::json!({ "scan": { "root": "relative/x" } })
+        )
+        .is_err());
         // Unknown keys are rejected by the section schemas.
         assert!(
-            overlay_scan_config(&base, &serde_json::json!({ "geocoder": { "bogus": 1 } })).is_err()
+            apply_config_overrides(&base, &serde_json::json!({ "geocoder": { "bogus": 1 } }))
+                .is_err()
         );
         // Invalid target-path template.
-        assert!(overlay_scan_config(
+        assert!(apply_config_overrides(
             &base,
             &serde_json::json!({ "target_paths": { "photo": "no placeholders" } })
         )
@@ -2035,14 +2098,16 @@ mod tests {
     #[test]
     fn resolved_target_paths_precedence() {
         let rc = parse("target_paths = { photo = \"Pics/%Y/%f\" }").unwrap();
-        let overrides = BTreeMap::from([("photo".to_string(), "Gallery/%f".to_string())]);
-        let resolved = rc.resolved_target_paths(&overrides).unwrap();
-        assert_eq!(resolved[&AssetKind::Photo].raw(), "Gallery/%f");
+        let resolved = rc.resolved_target_paths().unwrap();
+        assert_eq!(resolved[&AssetKind::Photo].raw(), "Pics/%Y/%f");
         assert_eq!(
             resolved[&AssetKind::Audio].raw(),
             AssetKind::Audio.default_format()
         );
-        let no_override = rc.resolved_target_paths(&BTreeMap::new()).unwrap();
-        assert_eq!(no_override[&AssetKind::Photo].raw(), "Pics/%Y/%f");
+        let defaults = RawConfig::default().resolved_target_paths().unwrap();
+        assert_eq!(
+            defaults[&AssetKind::Photo].raw(),
+            AssetKind::Photo.default_format()
+        );
     }
 }

@@ -37,9 +37,10 @@ const EXTRACTION_DEFAULTS: Array<[string, string]> = [
 
 // The configuration-backed sections of this form are live editors of the
 // service's persistent configuration: every change is sent to PUT /config
-// (debounced, merged, validated server-side) and mirrored everywhere. Only
-// the session-scoped scan parameters - root, hidden, target_paths - travel
-// with the scan request itself.
+// (debounced, merged, validated server-side) and mirrored everywhere. Scan
+// root, hidden-file inclusion, and destination paths are ordinary settings
+// too; they are persisted together with the scan when the form is submitted,
+// and the scan request itself carries no parameters.
 //
 // Dirty tracking: fields the user has touched are protected from external
 // re-seeds until their pending save lands. A per-field touch counter lets a
@@ -421,10 +422,6 @@ interface ScanFormProps {
   defaultRoot: string;
   /** Effective home directory; the path an empty scan root falls back to. */
   defaultHome?: string;
-  defaultHidden?: boolean;
-  defaultTargetPaths?: Record<string, string>;
-  /** Built-in directory exclusions, rendered as per-directory toggles. */
-  defaultExcludePaths?: string[];
   /** Hash of the service's live configuration; a change re-seeds untouched fields. */
   configHash: string | null;
   hasSuggestions: boolean;
@@ -437,9 +434,6 @@ export function ScanForm(props: ScanFormProps) {
   const {
     defaultRoot,
     defaultHome,
-    defaultHidden,
-    defaultTargetPaths,
-    defaultExcludePaths,
     configHash,
     hasSuggestions,
     startDisabled,
@@ -447,11 +441,11 @@ export function ScanForm(props: ScanFormProps) {
     onResume,
   } = props;
   const [root, setRoot] = useState(defaultRoot);
-  const [hidden, setHidden] = useState(defaultHidden ?? false);
+  const [hidden, setHidden] = useState(false);
   const [paths, setPaths] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     for (const [kind] of KINDS) {
-      init[kind] = defaultTargetPaths?.[kind] ?? "";
+      init[kind] = "";
     }
     return init;
   });
@@ -469,6 +463,11 @@ export function ScanForm(props: ScanFormProps) {
   const docRef = useRef<Json | null>(null);
   formRef.current = form;
   docRef.current = doc;
+  // Scan settings seed once from the effective config; later edits are kept.
+  const scanSeededRef = useRef(false);
+  const rootTouchedRef = useRef(false);
+  const hiddenTouchedRef = useRef(false);
+  const pathsTouchedRef = useRef<Set<string>>(new Set());
 
   const markDirty = (keys: string[]) => {
     for (const k of keys) {
@@ -637,6 +636,20 @@ export function ScanForm(props: ScanFormProps) {
     try {
       const c = await api.config();
       setDoc(c);
+      if (!scanSeededRef.current) {
+        scanSeededRef.current = true;
+        const scan = obj(c.scan);
+        if (!rootTouchedRef.current) setRoot(str(scan.root));
+        if (!hiddenTouchedRef.current) setHidden(scan.hidden === true);
+        const tp = obj(c.target_paths);
+        setPaths((prev) => {
+          const next = { ...prev };
+          for (const [kind] of KINDS) {
+            if (!pathsTouchedRef.current.has(kind)) next[kind] = str(tp[kind]);
+          }
+          return next;
+        });
+      }
       setForm((f) =>
         f ? reseedForm(f, formFromDoc(c), dirtyRef.current) : formFromDoc(c),
       );
@@ -663,8 +676,10 @@ export function ScanForm(props: ScanFormProps) {
     [flush],
   );
 
-  const setPath = (kind: string, value: string) =>
+  const setPath = (kind: string, value: string) => {
+    pathsTouchedRef.current.add(kind);
     setPaths((prev) => ({ ...prev, [kind]: value }));
+  };
 
   const patch = (p: Partial<OverrideState>) => {
     setForm((f) => (f ? { ...f, ...p } : f));
@@ -705,6 +720,9 @@ export function ScanForm(props: ScanFormProps) {
   };
 
   const pathDefaults = obj(doc?.target_path_defaults) as Record<string, string>;
+  const builtinExclusions = Array.isArray(doc?.default_exclude_paths)
+    ? (doc!.default_exclude_paths as unknown[]).map(String)
+    : [];
   const configWarnings = Object.entries(obj(doc?.warnings));
   const exclusions = form
     ? splitExclusions(form.excludePaths)
@@ -720,8 +738,28 @@ export function ScanForm(props: ScanFormProps) {
       const t = (paths[kind] ?? "").trim();
       if (t.length > 0) targetPaths[kind] = t;
     }
+    // Scan root, hidden inclusion, and destination paths are ordinary
+    // settings: persist them before scanning (null clears one back to its
+    // default), then start a scan against the service's current settings.
+    const rootTrim = root.trim();
+    const targetPatch: Json = {};
+    for (const [kind] of KINDS) {
+      const t = (paths[kind] ?? "").trim();
+      targetPatch[kind] = t.length > 0 ? t : null;
+    }
+    try {
+      await api.configPut({
+        scan: { root: rootTrim.length > 0 ? rootTrim : null, hidden },
+        target_paths: targetPatch,
+      });
+    } catch (e: unknown) {
+      setSaveNote(
+        `saving scan settings failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
     onStart({
-      root: root.trim(),
+      root: rootTrim,
       hidden,
       targetPaths: paths,
     });
@@ -764,11 +802,14 @@ export function ScanForm(props: ScanFormProps) {
         }}
       >
         <label className="field">
-          <span>Scan root (absolute path; empty = home; per scan)</span>
+          <span>Scan root (absolute path; empty = home)</span>
           <input
             type="text"
             value={root}
-            onChange={(e) => setRoot(e.target.value)}
+            onChange={(e) => {
+              rootTouchedRef.current = true;
+              setRoot(e.target.value);
+            }}
             placeholder={defaultHome || "/home/you"}
           />
         </label>
@@ -776,18 +817,19 @@ export function ScanForm(props: ScanFormProps) {
           <input
             type="checkbox"
             checked={hidden}
-            onChange={(e) => setHidden(e.target.checked)}
+            onChange={(e) => {
+              hiddenTouchedRef.current = true;
+              setHidden(e.target.checked);
+            }}
           />
-          <span>Include hidden files and directories (per scan)</span>
+          <span>Include hidden files and directories</span>
         </label>
 
         <details
           className="scan-paths"
-          open={Object.values(defaultTargetPaths ?? {}).some(
-            (v) => v.length > 0,
-          )}
+          open={Object.values(paths).some((v) => v.trim().length > 0)}
         >
-          <summary>Destination paths (optional; per scan)</summary>
+          <summary>Destination paths (optional)</summary>
           <p className="hint">
             Destination format string per asset kind, relative to home or
             absolute; must contain a placeholder. Empty uses the configured
@@ -837,10 +879,9 @@ export function ScanForm(props: ScanFormProps) {
                   Also exclude common dependency, cache, and build directories
                 </span>
               </label>
-              {defaultExcludePaths !== undefined &&
-                defaultExcludePaths.length > 0 && (
-                  <div className="field-grid">
-                    {defaultExcludePaths.map((name) => {
+              {builtinExclusions.length > 0 && (
+                <div className="field-grid">
+                  {builtinExclusions.map((name) => {
                       const active =
                         form.defaultExclusions &&
                         !exclusions.exceptions.has(name);

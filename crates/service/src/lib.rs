@@ -18,15 +18,15 @@ mod video_frames;
 
 pub use http::router;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex};
 
-use homelinter_model::config::{load_config_chain, ConfigChain};
+use homelinter_model::config::{fold_config_overrides, load_config_chain, ConfigChain};
 use homelinter_model::error::ApiError;
+use serde_json::Value as JsonValue;
 
 use crate::events::EventBus;
 use crate::pipeline::App;
@@ -49,12 +49,10 @@ pub struct ServiceOptions {
     /// Directory containing the built SPA (index.html + assets). When set,
     /// the HTTP server also serves static files and the SPA index fallback.
     pub web_dir: Option<PathBuf>,
-    /// Scan dialog defaults surfaced to the SPA via `GET /session`
-    /// (`scan_defaults`): the `web` command pre-fills the scan form with
-    /// them. They are never applied server-side; the SPA sends `hidden` and
-    /// `target_paths` per scan request as today.
-    pub default_hidden: bool,
-    pub default_target_paths: BTreeMap<String, String>,
+    /// Launch-time CLI overrides as a partial config document. Folded over
+    /// the config-file chain to seed the initial effective settings; a
+    /// runtime write through `PUT /config` wins over them for the same key.
+    pub initial_overrides: Option<JsonValue>,
 }
 
 /// A fully wired service instance ready to serve HTTP.
@@ -79,6 +77,15 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         .clone()
         .unwrap_or_else(ConfigChain::host);
     let loaded = load_config_chain(&chain, opts.cli_config.as_deref())?;
+    let launch_overrides = opts
+        .initial_overrides
+        .clone()
+        .unwrap_or_else(|| JsonValue::Object(Default::default()));
+    let effective = fold_config_overrides(
+        &loaded.raw,
+        &launch_overrides,
+        &JsonValue::Object(Default::default()),
+    )?;
 
     let data_dir = opts
         .data_dir_override
@@ -92,7 +99,7 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         ))
     })?;
 
-    let session = session::Session::new(home.clone(), loaded.raw, loaded.config_path);
+    let session = session::Session::new(home.clone(), effective, loaded.config_path);
     let cache = cache::Cache::open_dir(&data_dir);
     let audit = audit::AuditLog::open(data_dir.join("audit.ndjson"));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -111,8 +118,7 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         config_chain: chain,
         home_override: opts.home_override,
         web_dir: opts.web_dir,
-        default_hidden: opts.default_hidden,
-        default_target_paths: opts.default_target_paths,
+        launch_overrides,
         shutdown_tx,
     });
 

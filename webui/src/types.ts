@@ -19,13 +19,6 @@ export interface ApiErrorBody {
   };
 }
 
-export interface ScanDefaults {
-  hidden: boolean;
-  target_paths: Record<string, string>;
-  /** Built-in directory exclusions, surfaced so the scan form can list them. */
-  default_exclude_paths?: string[];
-}
-
 export interface Session {
   state: SessionState;
   scan_root: string | null;
@@ -37,7 +30,6 @@ export interface Session {
   selection_count: number;
   metadata_progress?: MetadataProgress;
   failure?: ApiErrorBody['error'] | null;
-  scan_defaults?: ScanDefaults;
   [key: string]: unknown;
 }
 
@@ -163,15 +155,6 @@ export interface CacheList {
 
 export interface ExecuteRequest {
   ids?: string[];
-}
-
-export interface ScanRequest {
-  root?: string;
-  hidden: boolean;
-  target_paths?: Record<string, string>;
-  /** Partial per-scan config overlay; merged over the effective config
-   *  for this scan only (never persisted). */
-  config?: Record<string, unknown>;
 }
 
 export type SseEventName =
