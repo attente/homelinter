@@ -249,14 +249,16 @@ pub fn copy_tree_verified(src: &Path, dst: &Path) -> Result<(), String> {
         } else if ft.is_file() {
             copy_file_verified(&child_src, &child_dst)?;
         } else if ft.is_symlink() {
+            // Recreate from the raw target so relative and absolute links
+            // stay exactly as recorded and links to missing targets are
+            // still reproduced (the copy never follows them).
             let raw = std::fs::read_link(&child_src)
                 .map_err(|e| format!("cannot read link {}: {e}", child_src.display()))?;
-            let raw_str = raw.to_string_lossy().into_owned();
-            replace_symlink(&child_dst, &raw_str, raw.is_relative()).map_err(|e| {
+            create_symlink(&child_dst, &raw).map_err(|e| {
                 format!(
                     "cannot recreate contained symlink {} -> {}: {e}",
                     child_src.display(),
-                    raw_str
+                    raw.display()
                 )
             })?;
         } else {
@@ -331,6 +333,42 @@ fn verify_tree_completeness(src: &Path, copy: &Path) -> Result<(), String> {
             unexpected.join(", ")
         }
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Symlink creation (never follows)
+// ---------------------------------------------------------------------------
+
+/// Create a new symlink at `link_path` pointing at `target` verbatim, as
+/// used when reproducing contained links in a fresh tree copy. Fails if
+/// `link_path` already exists; never follows `target`.
+pub fn create_symlink(link_path: &Path, target: &Path) -> Result<(), String> {
+    if path_exists(link_path) {
+        return Err(format!(
+            "refusing to create link over existing path: {}",
+            link_path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link_path).map_err(|e| {
+            format!(
+                "cannot create symlink {} -> {}: {e}",
+                link_path.display(),
+                target.display()
+            )
+        })?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // Junction/reparse-point creation needs Windows APIs that the
+        // scaffold does not yet bind; report unsupported rather than guess.
+        Err(format!(
+            "symlink creation is not implemented on this platform: {}",
+            link_path.display()
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +472,57 @@ mod tests {
         let err = verify_tree_completeness(&src, &copy).unwrap_err();
         assert!(err.contains("1 missing entries"), "{err}");
         assert!(err.contains("nested/b.bin"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_copy_recreates_symlinks_without_following() {
+        let root = tmpdir("links");
+        let src = root.join("src");
+        let copy = root.join("copy");
+        build_tree(&src);
+        std::os::unix::fs::symlink("a.bin", src.join("rel-link")).unwrap();
+        std::os::unix::fs::symlink("/does/not/exist/at/all", src.join("abs-link")).unwrap();
+        std::os::unix::fs::symlink("nested", src.join("dir-link")).unwrap();
+
+        copy_tree_verified(&src, &copy).unwrap();
+        verify_tree_completeness(&src, &copy).unwrap();
+
+        for (name, want) in [
+            ("rel-link", "a.bin"),
+            ("abs-link", "/does/not/exist/at/all"),
+            ("dir-link", "nested"),
+        ] {
+            let meta = std::fs::symlink_metadata(copy.join(name)).unwrap();
+            assert!(meta.file_type().is_symlink(), "{name} is not a symlink");
+            assert_eq!(
+                std::fs::read_link(copy.join(name)).unwrap().as_os_str(),
+                want
+            );
+            assert_eq!(
+                std::fs::read_link(src.join(name)).unwrap().as_os_str(),
+                want
+            );
+        }
+        // A link to a directory must not be expanded into a real directory.
+        assert!(std::fs::symlink_metadata(copy.join("dir-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_symlink_refuses_to_overwrite() {
+        let root = tmpdir("create-link");
+        let existing = root.join("existing");
+        std::fs::write(&existing, b"x").unwrap();
+        let err = create_symlink(&existing, Path::new("elsewhere")).unwrap_err();
+        assert!(
+            err.contains("refusing to create link over existing path"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"x");
     }
 
     #[test]
