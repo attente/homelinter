@@ -733,6 +733,114 @@ async fn export_script_contract() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// Two photos with the same name and modification time resolve to the same
+/// time- and name-based destination; the scan's full-batch validation
+/// rejects both. A third, uniquely named photo stays pending.
+fn seed_photo_collision(home: &Path) -> (PathBuf, PathBuf) {
+    let a = home.join("Downloads/a/same.jpg");
+    let b = home.join("Downloads/b/same.jpg");
+    std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+    std::fs::write(&a, b"first-photo-bytes").unwrap();
+    std::fs::write(&b, b"second-photo-bytes").unwrap();
+    let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let times = std::fs::FileTimes::new().set_modified(when);
+    std::fs::File::open(&a).unwrap().set_times(times).unwrap();
+    std::fs::File::open(&b).unwrap().set_times(times).unwrap();
+
+    let unique = home.join("Downloads/c/unique.jpg");
+    std::fs::create_dir_all(unique.parent().unwrap()).unwrap();
+    std::fs::write(&unique, b"unique-photo-bytes").unwrap();
+    let later = std::time::UNIX_EPOCH + Duration::from_secs(1_700_001_000);
+    std::fs::File::open(&unique)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(later))
+        .unwrap();
+    (a, b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn export_refuses_rejected_and_non_executable_subsets() {
+    let env = Env::new("export-reject");
+    let app = env.service();
+    seed_photo_collision(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    // The colliding pair was rejected by full-batch validation at scan time.
+    let rejected_ids = suggestion_ids(&app, "rejected").await;
+    assert_eq!(rejected_ids.len(), 2, "expected the colliding pair");
+    let (status, headers, body) = request_text(
+        &app,
+        "POST",
+        "/api/v1/export",
+        Some(json!({ "ids": rejected_ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!headers.contains_key("x-homelinter-count"));
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["error"]["code"], "validation_failed");
+    let rejected = body["error"]["details"]["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 2);
+    for entry in rejected {
+        assert!(entry["reason"]
+            .as_str()
+            .unwrap()
+            .contains("destination_collision"));
+    }
+
+    // A rejected suggestion stays refused even when exported alone: a
+    // narrowed subset never re-admits it.
+    let (status, _, _) = request_text(
+        &app,
+        "POST",
+        "/api/v1/export",
+        Some(json!({ "ids": [rejected_ids[0]] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The unrelated pending move exports normally.
+    let pending = suggestion_ids(&app, "pending").await;
+    assert_eq!(pending.len(), 1, "expected the unique photo's move");
+    let (status, headers, script) = request_text(
+        &app,
+        "POST",
+        "/api/v1/export",
+        Some(json!({ "ids": pending })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-homelinter-count"], "1");
+    assert!(script.contains("#!/bin/sh"));
+
+    // Once executed, the same suggestion is no longer exportable.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/execute",
+        Some(json!({ "ids": pending })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/export",
+        Some(json!({ "ids": pending })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let reason = body["error"]["details"]["rejected"][0]["reason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("not exportable in status executed"),
+        "{reason}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_clear_and_config_put() {
     let env = Env::new("conf");

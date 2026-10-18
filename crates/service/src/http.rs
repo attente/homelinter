@@ -5,6 +5,7 @@
 //! normalized host path; relative paths, `~`, and environment-variable
 //! references are rejected with 422.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -869,7 +870,7 @@ async fn execution_get(State(app): State<AppHandle>) -> ApiResult {
 
 async fn export_script(State(app): State<AppHandle>, Json(body): Json<ExportBody>) -> Response {
     let platform = platform_name();
-    let executable: Vec<Suggestion> = {
+    let requested: Vec<Suggestion> = {
         let sess = app.session.lock().await;
         if !matches!(sess.state, SessionState::Ready | SessionState::Done) {
             return err(
@@ -898,9 +899,51 @@ async fn export_script(State(app): State<AppHandle>, Json(body): Json<ExportBody
         request_ids
             .iter()
             .filter_map(|id| sess.suggestion_by_id(id).cloned())
-            .filter(exportable)
             .collect()
     };
+
+    // Re-validate the exact requested subset on a clone: export must not
+    // silently shrink the caller's selection when a suggestion is rejected
+    // or no longer executable. Session state is left untouched.
+    let mut requested = requested;
+    homelinter_suggest::validate_batch(&mut requested, true);
+    let mut refused: Vec<(String, String)> = Vec::new();
+    for s in &requested {
+        if s.status == SuggestionStatus::Rejected {
+            refused.push((
+                s.id.clone(),
+                s.rejection_reason
+                    .clone()
+                    .unwrap_or_else(|| "rejected".to_string()),
+            ));
+        } else if !exportable(s) {
+            let reason = if s.metadata_pending {
+                "metadata is still resolving; retry when it settles".to_string()
+            } else {
+                format!("not exportable in status {}", status_str(s))
+            };
+            refused.push((s.id.clone(), reason));
+        }
+    }
+    if !refused.is_empty() {
+        let rejected: Vec<Value> = refused
+            .iter()
+            .map(|(id, reason)| json!({ "id": id, "reason": reason }))
+            .collect();
+        let details = BTreeMap::from([("rejected".to_string(), Value::Array(rejected))]);
+        let message = format!(
+            "export refused: {} of {} requested suggestions cannot be exported",
+            refused.len(),
+            requested.len()
+        );
+        return api_err(ApiError::with_details(
+            ErrorCode::ValidationFailed,
+            message,
+            details,
+        ))
+        .into_response();
+    }
+    let executable = requested;
 
     let script = match homelinter_execute::export_script(&executable, platform) {
         Ok(s) => s,
