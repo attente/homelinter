@@ -247,8 +247,8 @@ export const api = {
       throw new ApiError(res.status, code, message);
     }
     const text = await res.text();
-    const platformHeader = res.headers.get("x-script-platform");
-    const countHeader = res.headers.get("x-script-count");
+    const platformHeader = res.headers.get("x-homelinter-platform");
+    const countHeader = res.headers.get("x-homelinter-count");
     return {
       platform: platformHeader ?? "unknown",
       count: countHeader ? Number(countHeader) : 0,
