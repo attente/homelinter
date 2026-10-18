@@ -158,7 +158,7 @@ fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
     };
 
     // --- Preflight: the source must still be the analyzed object. ---
-    preflight_source(src, s)?;
+    preflight_source(src, s, ContentCheck::Optional)?;
 
     // --- Destination must not exist. ---
     if fsops::path_exists(dst) {
@@ -209,23 +209,12 @@ fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
 fn run_delete(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
     let src = s.target_path();
 
-    // --- Preflight: identity of the object itself. ---
-    preflight_source(src, s)?;
-
-    // A delete removes the file only after the duplicate relationship is
-    // re-confirmed: re-hash the full content and compare to the recorded
-    // full-content hash captured during analysis.
-    let now =
-        hash::hash_file_full(src).map_err(|e| format!("cannot hash {}: {e}", src.display()))?;
-    match s.provenance.full_hash {
-        Some(recorded) if recorded == now => {}
-        Some(_) => {
-            return Err("content changed since analysis; delete refused (re-analyze)".into());
-        }
-        None => {
-            return Err("no recorded full-content hash; delete refused (re-analyze)".into());
-        }
-    }
+    // --- Preflight: identity of the object itself, plus the re-confirmed
+    // duplicate relationship. A delete removes the file only after its full
+    // content is re-hashed and matched against the recorded full-content
+    // hash captured during analysis; this is the only hash pass, so the
+    // preflight does it and no second pass follows. ---
+    preflight_source(src, s, ContentCheck::Required)?;
 
     std::fs::remove_file(src).map_err(|e| format!("cannot delete {}: {e}", src.display()))?;
 
@@ -292,12 +281,22 @@ fn validate_link_before_repair(link_path: &Path, dep: &DependentOperation) -> Re
 // Shared preflight
 // ---------------------------------------------------------------------------
 
+/// What the preflight does about full content.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentCheck {
+    /// Re-hash only when analysis recorded a full-content hash (moves).
+    Optional,
+    /// A full-content hash is mandatory and must match (duplicate deletes).
+    Required,
+}
+
 /// Re-stat the source immediately before execution and compare identity and
 /// size to the analysis-time provenance. On Unix the identity is
 /// (st_dev, st_ino). Only mtime drift is tolerated and only when full
-/// content identity is confirmed; moves re-verify by re-hash, deletes by
-/// design require the recorded full-content hash.
-fn preflight_source(src: &Path, s: &Suggestion) -> Result<(), String> {
+/// content identity is confirmed; moves re-verify by re-hash when one was
+/// recorded, deletes always require the recorded full-content hash. This is
+/// the single content-hash pass per operation.
+fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -316,10 +315,10 @@ fn preflight_source(src: &Path, s: &Suggestion) -> Result<(), String> {
             return Err("source size changed since analysis; re-analysis required".into());
         }
         // If only mtime moved and full content hash is available, allow the
-        // operation; delete re-hashes anyway, and move verification re-hashes
-        // full content on cross-filesystem paths.
-        if let Some(recorded) = &p.full_hash {
-            if meta.len() == p.size {
+        // operation; delete always requires it, and move verification
+        // re-hashes full content on cross-filesystem paths.
+        match (&p.full_hash, check) {
+            (Some(recorded), _) => {
                 let now = hash::hash_file_full(src)
                     .map_err(|e| format!("cannot hash {}: {e}", src.display()))?;
                 if now != *recorded {
@@ -328,6 +327,10 @@ fn preflight_source(src: &Path, s: &Suggestion) -> Result<(), String> {
                     );
                 }
             }
+            (None, ContentCheck::Required) => {
+                return Err("no recorded full-content hash; delete refused (re-analyze)".into());
+            }
+            (None, ContentCheck::Optional) => {}
         }
         Ok(())
     }
