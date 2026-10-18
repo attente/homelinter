@@ -138,8 +138,10 @@ fn metadata_preservation_warning_is_surfaced() {
     filetime::set_file_mtime(&keeper, filetime::FileTime::from_system_time(old)).unwrap();
 
     let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
-    let mut opts = AnalyzeOptions::default();
-    opts.extractors = vec![Box::new(TitleFor(newer.clone()))];
+    let opts = AnalyzeOptions {
+        extractors: vec![Box::new(TitleFor(newer.clone()))],
+        ..AnalyzeOptions::default()
+    };
     let analysis = analyze(&scan.files, &scan.repos, &opts, &|| false, &|_, _| {});
 
     // Suppressed group, but the reason is reported instead of dropped.
