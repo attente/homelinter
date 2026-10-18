@@ -5,10 +5,12 @@
 //! source or destination state rather than overwriting, performs moves with
 //! no-clobber semantics, re-verifies content hashes before deletes that
 //! have one on record, and runs dependent symlink repairs only after their
-//! parent succeeds. Cross-filesystem moves degrade to the same shape as the
-//! native verified copy protocol using host utilities; the native executor
-//! remains authoritative for safety, and a script can never weaken it
-//! because it only ever runs the validated plan.
+//! parent succeeds. A cross-filesystem move is refused at run time and
+//! pointed at the native executor: a shell script cannot reproduce the
+//! verified copy, hash check, no-replace publish, and source-removal
+//! protocol safely, so exporting one would weaken safety. The native
+//! executor remains authoritative, and a script can never do more than the
+//! validated plan.
 
 use std::path::Path;
 
@@ -84,9 +86,10 @@ fn export_posix_move(s: &Suggestion, out: &mut String) -> Result<(), String> {
         "[ ! -e {dst_q} ] || abort \"destination exists: {dst_q}\"\n"
     ));
     out.push_str(&format!("mkdir -p {parent_q}\n"));
-    // Same-filesystem guard: when the source and destination are on
-    // different filesystems `mv` would copy then delete, which is exactly
-    // the verified-copy protocol the native executor follows.
+    // Same-filesystem guard: `mv` across filesystems degrades to a plain
+    // copy and delete without verification. The native executor's verified
+    // copy protocol cannot be reproduced safely in a shell script, so the
+    // export refuses that case at run time instead of risking data loss.
     out.push_str(&format!(
         "if [ \"$(stat -c %d {src} 2>/dev/null || stat -f %d {src})\" = \"$(stat -c %d {parent_q} 2>/dev/null || stat -f %d {parent_q})\" ]; then\n"
     ));
@@ -97,11 +100,9 @@ fn export_posix_move(s: &Suggestion, out: &mut String) -> Result<(), String> {
         "  [ ! -e {src} ] || abort \"source remains: {src}\"\n"
     ));
     out.push_str("else\n");
-    out.push_str(&format!("  cp -a {src} {dst_q}.homelinter-partial\n"));
     out.push_str(&format!(
-        "  mv -n {dst_q}.homelinter-partial {dst_q} || abort \"publish failed: {dst_q}\"\n"
+        "  abort \"cross-filesystem move is not supported in an exported script; run homelinter to execute it: {src} -> {dst_q}\"\n"
     ));
-    out.push_str(&format!("  rm -rf {src}\n"));
     out.push_str("fi\n");
     Ok(())
 }
@@ -267,6 +268,15 @@ mod tests {
         assert!(script.contains("abort"));
         assert!(script.contains("'/home/alice/O'\\''Reilly/a.pdf'"));
         assert!(script.contains("mv -n"));
+    }
+
+    #[test]
+    fn posix_export_refuses_cross_fs_moves_at_run_time() {
+        let s = mv_suggestion();
+        let script = export_script(std::slice::from_ref(&s), "linux").unwrap();
+        assert!(script.contains("cross-filesystem move is not supported"));
+        assert!(!script.contains("cp -a"), "no unverified copy fallback");
+        assert!(!script.contains(".homelinter-partial"), "no partial copy");
     }
 
     #[test]
