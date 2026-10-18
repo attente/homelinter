@@ -10,6 +10,11 @@ members = [
   "crates/clients",
   "crates/homelinter",
 ]
+# The desktop shell is a separate workspace: it needs WebKit/GTK on Linux and
+# is only built on macOS in CI. Excluding it keeps `cargo build`, `cargo test`,
+# and `cargo test --workspace` on a Linux development host free of those
+# system libraries. Build it from `crates/desktop` with the Tauri CLI.
+exclude = ["crates/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The SPA and API are served by the in-process service on loopback. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+
+  <!-- macOS privacy prompts when the scan reaches protected folders. -->
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>homelinter needs access to scan and organize files in your Desktop folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>homelinter needs access to scan and organize files in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>homelinter needs access to scan and organize files in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>homelinter needs access to scan and organize files on removable volumes you select.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>homelinter needs access to scan and organize files on network volumes you select.</string>
+
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (c) homelinter contributors</string>
+</dict>
+</plist>

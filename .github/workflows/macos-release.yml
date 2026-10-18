@@ -1,0 +1,139 @@
+name: macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # You do not need a physical Mac. This runner builds the universal .app/.dmg
+    # on Apple hardware. It signs and notarizes only when all six Apple secrets
+    # are configured; otherwise it produces an unsigned build.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Detect signing configuration
+        id: signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eo pipefail
+          count=0
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [ -n "${!name}" ]; then
+              count=$((count + 1))
+            fi
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "mode=unsigned" >> "$GITHUB_OUTPUT"
+            echo "No Apple signing secrets found. Building an unsigned DMG."
+          elif [ "$count" -eq 6 ]; then
+            echo "mode=signed" >> "$GITHUB_OUTPUT"
+            echo "All Apple signing secrets found. Building a signed and notarized DMG."
+          else
+            echo "::error::Set all six APPLE_* secrets for a signed build, or none of them for an unsigned build."
+            exit 1
+          fi
+
+      - name: Build unsigned DMG
+        if: steps.signing.outputs.mode == 'unsigned'
+        working-directory: crates/desktop
+        run: |
+          pnpm dlx @tauri-apps/cli@2.11.1 build --target universal-apple-darwin
+
+      - name: Build, sign, notarize, and staple
+        if: steps.signing.outputs.mode == 'signed'
+        working-directory: crates/desktop
+        env:
+          # Developer ID Application certificate (.p12, base64 encoded).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # App-specific password for the Apple ID that owns the team.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          pnpm dlx @tauri-apps/cli@2.11.1 build --target universal-apple-darwin
+
+      - name: Write install notes
+        shell: bash
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          if [ "$MODE" = "unsigned" ]; then
+            printf '%s\n' \
+              'homelinter for macOS (unsigned build)' \
+              '' \
+              '1. Open the DMG and drag homelinter to Applications.' \
+              '2. Because this build is not signed or notarized, macOS blocks the first launch.' \
+              '   Open System Settings > Privacy & Security, scroll to Security, and click "Open Anyway" for homelinter.' \
+              '   On macOS 14 and earlier, you can instead Control-click the app and choose Open.' \
+              '3. Confirm the prompt.' \
+              '' \
+              'If System Settings has no Open Anyway button, run this in Terminal:' \
+              '  xattr -dr com.apple.quarantine /Applications/homelinter.app' \
+              '' \
+              'This approves only this app. It does not disable Gatekeeper.' \
+              > INSTALL-macOS.txt
+          else
+            printf '%s\n' \
+              'homelinter for macOS (signed and notarized build)' \
+              '' \
+              'Open the DMG, drag homelinter to Applications, and launch it.' \
+              > INSTALL-macOS.txt
+          fi
+
+      - name: Report the build mode
+        run: |
+          echo "macOS build mode: ${{ steps.signing.outputs.mode }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the disk image and install notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: homelinter-macos-universal-${{ steps.signing.outputs.mode }}
+          path: |
+            crates/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            INSTALL-macOS.txt
+          if-no-files-found: error
+
+      - name: Attach the disk image and install notes to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            crates/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            INSTALL-macOS.txt

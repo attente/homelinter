@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "homelinter",
+  "version": "0.1.0",
+  "identifier": "app.homelinter.desktop",
+  "build": {
+    "beforeBuildCommand": "cd \"$(git rev-parse --show-toplevel)/webui\" && pnpm install --frozen-lockfile && pnpm build",
+    "beforeDevCommand": "cd \"$(git rev-parse --show-toplevel)/webui\" && pnpm install --frozen-lockfile && pnpm build",
+    "frontendDist": "../../../webui/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Utility",
+    "shortDescription": "Find, organize, deduplicate, and archive files in your home directory.",
+    "longDescription": "homelinter scans your home directory, suggests safe moves and duplicate deletions, and executes the plan you approve. The service and the SPA run inside this app.",
+    "copyright": "Copyright (c) homelinter contributors",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "../../../webui/dist": "webui"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist",
+      "dmg": {
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        },
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        }
+      }
+    }
+  }
+}

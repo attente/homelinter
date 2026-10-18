@@ -58,6 +58,10 @@ pub struct ServiceOptions {
 /// A fully wired service instance ready to serve HTTP.
 pub struct Built {
     pub app: Arc<App>,
+    /// Sender side of the shutdown watch: embedded launchers signal graceful
+    /// shutdown by setting it to `true` (the standalone `web` driver instead
+    /// waits for `POST /api/v1/shutdown`).
+    pub shutdown_tx: watch::Sender<bool>,
     /// Receiver side of the shutdown watch: `serve` awaits its change.
     pub shutdown_rx: watch::Receiver<bool>,
     pub home: PathBuf,
@@ -119,11 +123,12 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         home_override: opts.home_override,
         web_dir: opts.web_dir,
         launch_overrides,
-        shutdown_tx,
+        shutdown_tx: shutdown_tx.clone(),
     });
 
     Ok(Built {
         app,
+        shutdown_tx,
         shutdown_rx,
         home,
         data_dir,

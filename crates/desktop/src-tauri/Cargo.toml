@@ -1,0 +1,27 @@
+[package]
+name = "homelinter-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Native macOS shell for the homelinter SPA and service"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3" }
+
+[dependencies]
+homelinter-clients = { path = "../../clients" }
+homelinter-service = { path = "../../service" }
+# 2.12 raised the MSRV to Rust 1.90; the workspace toolchain is 1.85.
+tauri = { version = "=2.11.1" }
+# Pin transitively shared Tauri crates whose newer releases require Rust 1.90.
+tauri-utils = { version = "=2.9.3" }
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
+# Pin an MSRV-unaware transitive dependency of `zip`: 0.1.12 uses the
+# unstable `unbounded_shifts` feature, which Rust 1.85 cannot compile.
+deflate64 = "=0.1.10"
+
+[workspace]
+# Keep resolution MSRV-aware so a fresh lockfile does not pick Tauri
+# transitive releases that need a newer compiler than rust-toolchain.toml.
+resolver = "3"
