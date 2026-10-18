@@ -182,24 +182,23 @@ fn export_powershell_move(s: &Suggestion, out: &mut String) -> Result<(), String
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let src = ps_quote(&s.target);
+    let dst_q = ps_quote(dst);
+    let parent_q = ps_quote(&parent);
     if !s.reason.is_empty() {
         out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
     }
     out.push_str(&format!(
-        "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'source missing: {src}' }}\n",
-        src = s.target
+        "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'source missing: {src}' }}\n"
     ));
     out.push_str(&format!(
-        "if (Test-Path -LiteralPath '{dst}') {{ Abort 'destination exists: {dst}' }}\n",
-        dst = dst
+        "if (Test-Path -LiteralPath '{dst_q}') {{ Abort 'destination exists: {dst_q}' }}\n"
     ));
     out.push_str(&format!(
-        "New-Item -ItemType Directory -Force -Path '{parent}' | Out-Null\n",
-        parent = parent
+        "New-Item -ItemType Directory -Force -Path '{parent_q}' | Out-Null\n"
     ));
     out.push_str(&format!(
-        "Move-Item -LiteralPath '{src}' -Destination '{dst}'\n",
-        src = s.target
+        "Move-Item -LiteralPath '{src}' -Destination '{dst_q}'\n"
     ));
     Ok(())
 }
@@ -212,31 +211,32 @@ fn export_powershell_delete(s: &Suggestion, out: &mut String) -> Result<(), Stri
         ));
     };
     let expected = hex::encode(hash_hex);
+    let src = ps_quote(&s.target);
     if !s.reason.is_empty() {
         out.push_str(&format!("# {}\n", s.reason.replace('\n', " ")));
     }
     out.push_str(&format!(
-        "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'delete target missing: {src}' }}\n",
-        src = s.target
+        "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'delete target missing: {src}' }}\n"
     ));
     out.push_str(&format!(
-        "$h = (Get-FileHash -Algorithm SHA256 -LiteralPath '{src}').Hash.ToLower()\n",
-        src = s.target
+        "$h = (Get-FileHash -Algorithm SHA256 -LiteralPath '{src}').Hash.ToLower()\n"
     ));
     out.push_str(&format!(
-        "if ($h -ne '{expected}') {{ Abort 'content changed since analysis: {src}' }}\n",
-        src = s.target
+        "if ($h -ne '{expected}') {{ Abort 'content changed since analysis: {src}' }}\n"
     ));
-    out.push_str(&format!(
-        "Remove-Item -LiteralPath '{src}'\n",
-        src = s.target
-    ));
+    out.push_str(&format!("Remove-Item -LiteralPath '{src}'\n"));
     Ok(())
 }
 
 /// Single-quote a path for POSIX shells: `'` becomes `'\''`.
 fn shell_quote(p: &str) -> String {
     format!("'{}'", p.replace('\'', "'\\''"))
+}
+
+/// Escape a path for a single-quoted PowerShell string: `'` becomes `''`.
+/// Callers wrap the result in single quotes.
+fn ps_quote(p: &str) -> String {
+    p.replace('\'', "''")
 }
 
 #[cfg(test)]
@@ -297,6 +297,17 @@ mod tests {
         assert!(script.contains("command -v sha256sum"));
         assert!(script.contains("shasum -a 256"));
         assert!(script.contains(&hex::encode([0xab; 32])));
+    }
+
+    #[test]
+    fn windows_export_escapes_single_quotes() {
+        let mut s = mv_suggestion();
+        s.target = "/home/O'Brien/a.pdf".into();
+        s.new_path = Some("/home/O'Brien/Documents/a.pdf".into());
+        let script = export_script(std::slice::from_ref(&s), "windows").unwrap();
+        assert!(script.contains("'/home/O''Brien/a.pdf'"));
+        assert!(script.contains("'/home/O''Brien/Documents/a.pdf'"));
+        assert!(!script.contains("'/home/O'Brien/"));
     }
 
     #[test]
