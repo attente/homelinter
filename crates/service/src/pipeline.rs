@@ -565,7 +565,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
             .iter()
             .skip(1)
             .any(|o| o.status == OperationStatus::Failed);
-        if parent_ok && dependent_failed {
+        if entry.result == ExecutionStatus::Partial || (parent_ok && dependent_failed) {
             report.partial = true;
         }
 

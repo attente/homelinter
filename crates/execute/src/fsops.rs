@@ -123,8 +123,10 @@ pub fn same_filesystem(a: &Path, b: &Path) -> Result<bool, String> {
 ///
 /// At every interruption point either the intact source or a complete
 /// verified destination exists. The temporary path is reported (not
-/// silently removed) when a step fails after the copy was started.
-pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
+/// silently removed) when a step fails after the copy was started; a
+/// failure to remove the source after the publish is a `Partial` outcome,
+/// because the destination is already complete and verified.
+pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<MoveOutcome, String> {
     let meta =
         std::fs::metadata(src).map_err(|e| format!("cannot stat source {}: {e}", src.display()))?;
 
@@ -143,14 +145,14 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
         // The verified copy is in place at its final name; only now is the
         // source tree removed. A failure here is reported as partial
         // completion: destination is complete, leftover source remains.
-        std::fs::remove_dir_all(src).map_err(|e| {
-            format!(
+        if let Err(e) = std::fs::remove_dir_all(src) {
+            return Ok(MoveOutcome::Partial(format!(
                 "copy verified and published at {} but removing source {} failed: {e}",
                 dst.display(),
                 src.display()
-            )
-        })?;
-        Ok(())
+            )));
+        }
+        Ok(MoveOutcome::Complete)
     } else {
         let tmp = temp_sibling(dst, "file")?;
         copy_file_verified(src, &tmp)?;
@@ -158,15 +160,25 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
         // Make the published name durable in its directory before the
         // source is removed.
         fsync_dir(&parent_dir(dst))?;
-        std::fs::remove_file(src).map_err(|e| {
-            format!(
+        if let Err(e) = std::fs::remove_file(src) {
+            return Ok(MoveOutcome::Partial(format!(
                 "copy verified and published at {} but removing source {} failed: {e}",
                 dst.display(),
                 src.display()
-            )
-        })?;
-        Ok(())
+            )));
+        }
+        Ok(MoveOutcome::Complete)
     }
+}
+
+/// How much of a cross-filesystem move completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveOutcome {
+    /// The copy is published and the source is gone.
+    Complete,
+    /// The copy is verified and published, but the source could not be
+    /// removed (the destination is complete; the leftover source remains).
+    Partial(String),
 }
 
 /// The directory that holds `dst`, or `.` for a bare file name.
@@ -597,6 +609,35 @@ mod tests {
         fsync_dir(&root).unwrap();
         let err = fsync_dir(&root.join("missing")).unwrap_err();
         assert!(err.contains("cannot open directory"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_fs_move_reports_partial_when_source_cleanup_fails() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = tmpdir("partial");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("keep.bin"), b"payload").unwrap();
+
+        // Root ignores the permission bits, so the failure cannot be induced.
+        if std::fs::metadata("/").unwrap().uid() == 0 {
+            return;
+        }
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = cross_fs_move(&src, &dst).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let MoveOutcome::Partial(detail) = outcome else {
+            panic!("expected a partial move, got {outcome:?}");
+        };
+        assert!(detail.contains("removing source"), "{detail}");
+        // The verified destination is complete; the source is still there.
+        assert_eq!(std::fs::read(dst.join("keep.bin")).unwrap(), b"payload");
+        assert!(src.exists());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

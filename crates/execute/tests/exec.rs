@@ -439,7 +439,8 @@ fn repair_refused_when_link_changed() {
     let report = execute_batch(&mut items, &base, true);
     // Parent succeeded, dependent failed -> partial.
     assert!(report.partial);
-    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Partial);
+    assert_eq!(items[0].status, SuggestionStatus::Partial);
     let repair_op = &report.entries[0].operations[1];
     assert_eq!(repair_op.status, OperationStatus::Failed);
     // The link still points at `other`, untouched.

@@ -45,12 +45,13 @@ export type SuggestionStatus =
   | 'pending'
   | 'rejected'
   | 'executed'
+  | 'partial'
   | 'failed'
   | 'skipped';
 
 export type OperationKind = 'move' | 'delete' | 'repair_symlink';
 export type OperationStatus = 'completed' | 'failed' | 'skipped';
-export type EntryResult = 'executed' | 'failed' | 'skipped';
+export type EntryResult = 'executed' | 'partial' | 'failed' | 'skipped';
 
 export interface DependentOperation {
   type: string;

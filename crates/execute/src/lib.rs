@@ -60,38 +60,15 @@ pub fn execute_batch(
         if s.status != SuggestionStatus::Pending {
             continue;
         }
-        let mut entry = execute_one(s, &relocated);
-        // Classify the entry from its operations: a failed parent is a
-        // failure; a completed parent with one or more failed dependent
-        // repairs is partial (executed, flag raised); nothing attempted is
-        // skipped.
-        let parent_failed = entry
-            .operations
-            .iter()
-            .any(|o| o.status == OperationStatus::Failed);
-        let anything_done = entry
-            .operations
-            .iter()
-            .any(|o| o.status == OperationStatus::Completed);
-        if parent_failed && !anything_done {
-            entry.result = ExecutionStatus::Failed;
-        } else if !anything_done {
-            entry.result = ExecutionStatus::Skipped;
-        } else {
-            entry.result = ExecutionStatus::Executed;
-            let dependent_failed = entry
-                .operations
-                .iter()
-                .skip(1)
-                .any(|o| o.status == OperationStatus::Failed);
-            if dependent_failed {
-                report.partial = true;
-            }
+        let entry = execute_one(s, &relocated);
+        if entry.result == ExecutionStatus::Partial {
+            report.partial = true;
         }
         // Mirror the outcome onto the suggestion's own status for the
         // session model.
         s.status = match entry.result {
             ExecutionStatus::Executed => SuggestionStatus::Executed,
+            ExecutionStatus::Partial => SuggestionStatus::Partial,
             ExecutionStatus::Failed => SuggestionStatus::Failed,
             ExecutionStatus::Skipped => SuggestionStatus::Skipped,
         };
@@ -119,10 +96,9 @@ fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Re
     };
 
     match parent {
-        Ok(mut ops) => {
+        Ok(ParentOutcome::Complete(mut ops)) => {
             entry.operations.append(&mut ops);
             // Dependents run only when the parent succeeded.
-
             let parent_ok = entry
                 .operations
                 .iter()
@@ -136,6 +112,27 @@ fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Re
                     .operations
                     .extend(skipped_repairs(s, "parent operation did not complete"));
             }
+            let repair_failed = entry
+                .operations
+                .iter()
+                .skip(1)
+                .any(|o| o.status == OperationStatus::Failed);
+            entry.result = if repair_failed {
+                ExecutionStatus::Partial
+            } else {
+                ExecutionStatus::Executed
+            };
+        }
+        Ok(ParentOutcome::Partial(mut ops)) => {
+            entry.operations.append(&mut ops);
+            // The destination is complete but the unit is not; repairing
+            // links would point at the new path while the old one still
+            // exists, so repairs stay undone until a re-scan.
+            entry.operations.extend(skipped_repairs(
+                s,
+                "parent operation partially completed; source cleanup failed",
+            ));
+            entry.result = ExecutionStatus::Partial;
         }
         Err(e) => {
             entry.operations.push(OperationOutcome {
@@ -154,6 +151,7 @@ fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Re
             entry
                 .operations
                 .extend(skipped_repairs(s, &format!("parent operation failed: {e}")));
+            entry.result = ExecutionStatus::Failed;
         }
     }
     entry
@@ -178,7 +176,15 @@ fn skipped_repairs(s: &Suggestion, detail: &str) -> Vec<OperationOutcome> {
 // Moves
 // ---------------------------------------------------------------------------
 
-fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
+/// A completed parent operation, or one that finished its destructive work
+/// but could not finish its whole unit.
+enum ParentOutcome {
+    Complete(Vec<OperationOutcome>),
+    /// The move's copy is verified and published; source cleanup failed.
+    Partial(Vec<OperationOutcome>),
+}
+
+fn run_move(s: &Suggestion) -> Result<ParentOutcome, String> {
     let src = s.target_path();
     let Some(dst) = s.new_path_path() else {
         return Err("move suggestion missing new_path".into());
@@ -216,17 +222,35 @@ fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
             ));
         }
     } else {
-        // Cross-filesystem: verified copy-and-delete protocol.
-        fsops::cross_fs_move(src, dst)?;
+        // Cross-filesystem: verified copy-and-delete protocol. A published
+        // copy whose source could not be removed is a partial completion.
+        return match fsops::cross_fs_move(src, dst)? {
+            fsops::MoveOutcome::Complete => Ok(ParentOutcome::Complete(vec![OperationOutcome {
+                operation: OperationKind::Move,
+                source: Some(src.to_string_lossy().into_owned()),
+                destination: Some(dst.to_string_lossy().into_owned()),
+                status: OperationStatus::Completed,
+                detail: None,
+            }])),
+            fsops::MoveOutcome::Partial(detail) => {
+                Ok(ParentOutcome::Partial(vec![OperationOutcome {
+                    operation: OperationKind::Move,
+                    source: Some(src.to_string_lossy().into_owned()),
+                    destination: Some(dst.to_string_lossy().into_owned()),
+                    status: OperationStatus::Completed,
+                    detail: Some(detail),
+                }]))
+            }
+        };
     }
 
-    Ok(vec![OperationOutcome {
+    Ok(ParentOutcome::Complete(vec![OperationOutcome {
         operation: OperationKind::Move,
         source: Some(src.to_string_lossy().into_owned()),
         destination: Some(dst.to_string_lossy().into_owned()),
         status: OperationStatus::Completed,
         detail: None,
-    }])
+    }]))
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +260,7 @@ fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
 fn run_delete(
     s: &Suggestion,
     relocated: &BTreeMap<PathBuf, PathBuf>,
-) -> Result<Vec<OperationOutcome>, String> {
+) -> Result<ParentOutcome, String> {
     let src = s.target_path();
 
     // --- Preflight: identity of the object itself, plus the re-confirmed
@@ -254,13 +278,13 @@ fn run_delete(
 
     std::fs::remove_file(src).map_err(|e| format!("cannot delete {}: {e}", src.display()))?;
 
-    Ok(vec![OperationOutcome {
+    Ok(ParentOutcome::Complete(vec![OperationOutcome {
         operation: OperationKind::Delete,
         source: Some(src.to_string_lossy().into_owned()),
         destination: None,
         status: OperationStatus::Completed,
         detail: None,
-    }])
+    }]))
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +463,7 @@ pub fn status_from_report(items: &mut [Suggestion], report: &ExecutionReport) {
         if let Some(entry) = by_id.get(s.id.as_str()) {
             s.status = match entry.result {
                 ExecutionStatus::Executed => SuggestionStatus::Executed,
+                ExecutionStatus::Partial => SuggestionStatus::Partial,
                 ExecutionStatus::Failed => SuggestionStatus::Failed,
                 ExecutionStatus::Skipped => SuggestionStatus::Skipped,
             };

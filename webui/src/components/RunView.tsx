@@ -12,7 +12,7 @@ interface RunViewProps {
   onDone: () => void;
 }
 
-const TOTAL_RESULTS: EntryResult[] = ['executed', 'failed', 'skipped'];
+const TOTAL_RESULTS: EntryResult[] = ['executed', 'partial', 'failed', 'skipped'];
 
 export function RunView(props: RunViewProps) {
   const { state, progress, log, report, error, cancelDisabled, onCancel, onDone } = props;
@@ -47,7 +47,11 @@ export function RunView(props: RunViewProps) {
       {report && (
         <section className="report">
           <h2>Run finished</h2>
-          {report.partial && <p className="note warn">partial: some dependent repairs failed</p>}
+          {report.partial && (
+            <p className="note warn">
+              partial: some operations completed without finishing source cleanup or dependent repairs
+            </p>
+          )}
           {error && <p className="error">{error}</p>}
           <RunReport report={report} onDone={onDone} />
         </section>
@@ -58,7 +62,12 @@ export function RunView(props: RunViewProps) {
 }
 
 function RunReport({ report, onDone }: { report: ExecutionReport; onDone: () => void }) {
-  const counts: Record<EntryResult, number> = { executed: 0, failed: 0, skipped: 0 };
+  const counts: Record<EntryResult, number> = {
+    executed: 0,
+    partial: 0,
+    failed: 0,
+    skipped: 0,
+  };
   for (const e of report.entries) {
     counts[e.result] += 1;
   }

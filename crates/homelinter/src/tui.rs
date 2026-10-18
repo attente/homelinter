@@ -1007,7 +1007,9 @@ impl App {
                 };
             }
             KeyCode::Char('u') => {
-                let choices = ["", "pending", "rejected", "executed", "failed", "skipped"];
+                let choices = [
+                    "", "pending", "rejected", "executed", "partial", "failed", "skipped",
+                ];
                 let current = self.filter.status.as_deref().unwrap_or("");
                 let pos = choices.iter().position(|c| *c == current).unwrap_or(0);
                 self.filter.status = {
@@ -1799,6 +1801,7 @@ fn detail_text(r: &Row) -> Text<'static> {
 fn status_color(status: &str) -> Color {
     match status {
         "executed" => Color::Green,
+        "partial" => Color::Yellow,
         "failed" => Color::Red,
         "skipped" => Color::Yellow,
         "rejected" => Color::Red,

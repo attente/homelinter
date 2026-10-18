@@ -74,7 +74,8 @@ describe('filter', () => {
   it('cycles values with wraparound', () => {
     expect(cycleNext(TYPE_CYCLE, 'all')).toBe('move');
     expect(cycleNext(TYPE_CYCLE, 'delete')).toBe('all');
-    expect(cycleNext(STATUS_CYCLE, 'executed')).toBe('failed');
+    expect(cycleNext(STATUS_CYCLE, 'executed')).toBe('partial');
+    expect(cycleNext(STATUS_CYCLE, 'partial')).toBe('failed');
     expect(cycleNext(STATUS_CYCLE, 'skipped')).toBe('all');
     expect(cycleNext(MANUAL_CYCLE, 'all')).toBe('manual');
     expect(cycleNext(MANUAL_CYCLE, 'manual')).toBe('all');
@@ -214,10 +215,18 @@ describe('format', () => {
       { suggestion_id: 's-1', result: 'executed', operations: [] },
       { suggestion_id: 's-2', result: 'failed', operations: [] },
       { suggestion_id: 's-3', result: 'skipped', operations: [] },
+      { suggestion_id: 's-4', result: 'partial', operations: [] },
     ];
-    expect(countsOf(entries)).toEqual({ executed: 1, failed: 1, skipped: 1 });
-    expect(countsSummary(countsOf(entries)).includes('executed=1')).toBe(true);
-    expect(countsSummary({ executed: 0, failed: 0, skipped: 0 })).toBe('no entries executed');
+    expect(countsOf(entries)).toEqual({
+      executed: 1,
+      partial: 1,
+      failed: 1,
+      skipped: 1,
+    });
+    expect(countsSummary(countsOf(entries)).includes('partial=1')).toBe(true);
+    expect(countsSummary({ executed: 0, partial: 0, failed: 0, skipped: 0 })).toBe(
+      'no entries executed',
+    );
     expect(entryLine({ suggestion_id: 's-9', result: 'executed', operations: [] })).toBe('[executed] s-9');
   });
 });

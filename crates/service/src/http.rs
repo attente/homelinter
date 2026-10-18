@@ -450,6 +450,7 @@ fn status_str(s: &Suggestion) -> &'static str {
         SuggestionStatus::Pending => "pending",
         SuggestionStatus::Rejected => "rejected",
         SuggestionStatus::Executed => "executed",
+        SuggestionStatus::Partial => "partial",
         SuggestionStatus::Failed => "failed",
         SuggestionStatus::Skipped => "skipped",
     }
@@ -1213,6 +1214,7 @@ mod tests {
         for status in [
             SuggestionStatus::Rejected,
             SuggestionStatus::Executed,
+            SuggestionStatus::Partial,
             SuggestionStatus::Failed,
             SuggestionStatus::Skipped,
         ] {

@@ -69,6 +69,10 @@ pub enum SuggestionStatus {
     Pending,
     Rejected,
     Executed,
+    /// The parent operation completed but its unit is incomplete (for
+    /// example a verified cross-filesystem copy whose source could not be
+    /// removed). Never re-executed automatically.
+    Partial,
     Failed,
     Skipped,
 }
@@ -233,6 +237,10 @@ pub struct ReportEntry {
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionStatus {
     Executed,
+    /// The parent operation completed, but the unit did not fully finish:
+    /// a dependent repair failed, or a verified cross-filesystem copy was
+    /// published while the source removal failed.
+    Partial,
     Failed,
     Skipped,
 }

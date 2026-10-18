@@ -95,15 +95,20 @@ export function head(s: string, max: number): string {
 
 export interface ReportCounts {
   executed: number;
- failed: number; skipped: number;
+  partial: number;
+  failed: number;
+  skipped: number;
 }
 
 export function countsOf(entries: ReportEntry[]): ReportCounts {
-  const counts: ReportCounts = { executed: 0, failed: 0, skipped: 0 };
+  const counts: ReportCounts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   for (const e of entries) {
     switch (e.result) {
       case 'executed':
         counts.executed += 1;
+        break;
+      case 'partial':
+        counts.partial += 1;
         break;
       case 'failed':
         counts.failed += 1;
@@ -119,6 +124,7 @@ export function countsOf(entries: ReportEntry[]): ReportCounts {
 export function countsSummary(counts: ReportCounts): string {
   const parts: string[] = [];
   if (counts.executed > 0) parts.push(`executed=${counts.executed}`);
+  if (counts.partial > 0) parts.push(`partial=${counts.partial}`);
   if (counts.failed > 0) parts.push(`failed=${counts.failed}`);
   if (counts.skipped > 0) parts.push(`skipped=${counts.skipped}`);
   return parts.join('  ') || 'no entries executed';

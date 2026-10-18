@@ -15,6 +15,7 @@ export const STATUS_CYCLE: ReadonlyArray<'all' | SuggestionStatus> = [
   'pending',
   'rejected',
   'executed',
+  'partial',
   'failed',
   'skipped',
 ];
