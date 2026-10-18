@@ -131,11 +131,15 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
     if meta.is_dir() {
         let tmp = temp_sibling(dst, "dir")?;
         copy_tree_verified(src, &tmp)?;
+        // fsync the copied files (done per file) and the directory entries
+        // of every copied directory before verification and publish.
+        fsync_tree_dirs(&tmp)?;
         // Structural completeness: the copy's relative path set must match
         // the source's exactly before anything is published or deleted.
         verify_tree_completeness(src, &tmp)?;
         // Publish: the temporary directory becomes the destination.
         rename_no_replace(&tmp, dst)?;
+        fsync_dir(&parent_dir(dst))?;
         // The verified copy is in place at its final name; only now is the
         // source tree removed. A failure here is reported as partial
         // completion: destination is complete, leftover source remains.
@@ -151,6 +155,9 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
         let tmp = temp_sibling(dst, "file")?;
         copy_file_verified(src, &tmp)?;
         rename_no_replace(&tmp, dst)?;
+        // Make the published name durable in its directory before the
+        // source is removed.
+        fsync_dir(&parent_dir(dst))?;
         std::fs::remove_file(src).map_err(|e| {
             format!(
                 "copy verified and published at {} but removing source {} failed: {e}",
@@ -160,6 +167,63 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
         })?;
         Ok(())
     }
+}
+
+/// The directory that holds `dst`, or `.` for a bare file name.
+fn parent_dir(dst: &Path) -> PathBuf {
+    match dst.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// fsync a directory so the names created in it are durable. Directory
+/// handles cannot be synced on Windows, and filesystems that reject the
+/// operation with `InvalidInput` or `Unsupported` simply do not offer it,
+/// so those cases succeed as a platform limitation; any other error is
+/// reported.
+fn fsync_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let handle = std::fs::File::open(dir)
+            .map_err(|e| format!("cannot open directory {} for fsync: {e}", dir.display()))?;
+        match handle.sync_all() {
+            Ok(()) => Ok(()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(format!("fsync failed on directory {}: {e}", dir.display())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// fsync every directory in a copied tree, deepest first. Symlinks are
+/// never followed.
+fn fsync_tree_dirs(root: &Path) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("cannot read {}: {e}", root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read entry of {}: {e}", root.display()))?;
+        let child = root.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|e| format!("cannot stat {}: {e}", child.display()))?
+            .is_dir()
+        {
+            fsync_tree_dirs(&child)?;
+        }
+    }
+    fsync_dir(root)
 }
 
 /// Build a unique temporary path next to `dst` (same directory means same
@@ -523,6 +587,16 @@ mod tests {
             "{err}"
         );
         assert_eq!(std::fs::read(&existing).unwrap(), b"x");
+    }
+
+    #[test]
+    fn fsync_helpers_sync_directories_and_report_missing_ones() {
+        let root = tmpdir("fsync");
+        build_tree(&root);
+        fsync_tree_dirs(&root).unwrap();
+        fsync_dir(&root).unwrap();
+        let err = fsync_dir(&root.join("missing")).unwrap_err();
+        assert!(err.contains("cannot open directory"), "{err}");
     }
 
     #[test]
