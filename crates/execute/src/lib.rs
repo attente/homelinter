@@ -120,15 +120,9 @@ fn execute_one(s: &mut Suggestion) -> ReportEntry {
                     entry.operations.push(repair_symlink(dep));
                 }
             } else {
-                for dep in &s.dependent_operations {
-                    entry.operations.push(OperationOutcome {
-                        operation: OperationKind::RepairSymlink,
-                        source: Some(dep.link_path.clone()),
-                        destination: Some(dep.replacement_target.clone()),
-                        status: OperationStatus::Skipped,
-                        detail: Some("parent operation did not complete".into()),
-                    });
-                }
+                entry
+                    .operations
+                    .extend(skipped_repairs(s, "parent operation did not complete"));
             }
         }
         Err(e) => {
@@ -140,11 +134,32 @@ fn execute_one(s: &mut Suggestion) -> ReportEntry {
                 source: Some(s.target.clone()),
                 destination: s.new_path.clone(),
                 status: OperationStatus::Failed,
-                detail: Some(e),
+                detail: Some(e.clone()),
             });
+            // A failed parent leaves every dependent repair undone. Report
+            // them as skipped so the client sees the whole plan's outcome
+            // rather than silently losing the repairs.
+            entry
+                .operations
+                .extend(skipped_repairs(s, &format!("parent operation failed: {e}")));
         }
     }
     entry
+}
+
+/// Dependent repairs that are not attempted, reported as skipped with the
+/// reason so the whole plan's outcome stays visible to clients.
+fn skipped_repairs(s: &Suggestion, detail: &str) -> Vec<OperationOutcome> {
+    s.dependent_operations
+        .iter()
+        .map(|dep| OperationOutcome {
+            operation: OperationKind::RepairSymlink,
+            source: Some(dep.link_path.clone()),
+            destination: Some(dep.replacement_target.clone()),
+            status: OperationStatus::Skipped,
+            detail: Some(detail.into()),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

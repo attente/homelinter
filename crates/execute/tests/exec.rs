@@ -4,8 +4,8 @@ use homelinter_execute::execute_batch;
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::hash;
 use homelinter_model::suggestion::{
-    DependentOpType, DependentOperation, ExecutionStatus, OperationStatus, Provenance, Suggestion,
-    SuggestionStatus, SuggestionType,
+    DependentOpType, DependentOperation, ExecutionStatus, OperationKind, OperationStatus,
+    Provenance, Suggestion, SuggestionStatus, SuggestionType,
 };
 use std::path::{Path, PathBuf};
 
@@ -99,6 +99,52 @@ fn move_refuses_existing_destination() {
     // Nothing changed.
     assert_eq!(std::fs::read(&src).unwrap(), b"1");
     assert_eq!(std::fs::read(&dst).unwrap(), b"2");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn failed_parent_reports_dependent_repairs_as_skipped() {
+    let base = tmpdir("mvdeny-dep");
+    let src = base.join("a.txt");
+    let dst = base.join("b.txt");
+    let link = base.join("link.txt");
+    write(&src, b"1");
+    write(&dst, b"2"); // occupied, so the move fails
+    let dep = DependentOperation {
+        op_type: DependentOpType::RepairSymlink,
+        link_path: link.to_string_lossy().into_owned(),
+        recorded_target: src.to_string_lossy().into_owned(),
+        replacement_target: dst.to_string_lossy().into_owned(),
+        recorded_target_relative: false,
+        provenance: Provenance {
+            link_resolved_target: Some(src.to_string_lossy().into_owned()),
+            link_raw_relative: Some(false),
+            ..Default::default()
+        },
+    };
+    let mut s = Suggestion::new_move(
+        AssetKind::Document,
+        &src,
+        &dst,
+        "test".into(),
+        Default::default(),
+        vec![dep],
+        provenance_for(&src),
+    );
+    s.selected = true;
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    let ops = &report.entries[0].operations;
+    assert_eq!(ops.len(), 2, "parent plus one dependent repair");
+    assert_eq!(ops[0].status, OperationStatus::Failed);
+    assert_eq!(ops[1].operation, OperationKind::RepairSymlink);
+    assert_eq!(ops[1].status, OperationStatus::Skipped);
+    assert!(ops[1]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("parent operation failed"));
     std::fs::remove_dir_all(&base).ok();
 }
 
