@@ -262,21 +262,12 @@ pub fn analyze(
             if let Ok(m) = f.modified.duration_since(std::time::UNIX_EPOCH) {
                 prov.mtime_ns = m.as_nanos() as i128;
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if let Ok(meta) = std::fs::metadata(&f.path) {
-                    prov.dev = meta.dev();
-                    prov.ino = meta.ino();
-                    prov.identity_available = meta.dev() != 0 && meta.ino() != 0;
-                }
-                if !prov.identity_available {
-                    degraded = true;
-                }
+            if let Ok(id) = homelinter_model::identity::file_identity(&f.path) {
+                prov.dev = id.dev;
+                prov.ino = id.ino;
+                prov.identity_available = id.available;
             }
-            #[cfg(not(unix))]
-            {
-                prov.identity_available = false;
+            if !prov.identity_available {
                 degraded = true;
             }
             AnalyzedFile {

@@ -486,29 +486,19 @@ fn repo_meta_json(meta: &homelinter_analyze::RepoMeta) -> BTreeMap<String, serde
     m
 }
 
-#[cfg(unix)]
 fn repo_provenance(root: &Path) -> Provenance {
-    use std::os::unix::fs::MetadataExt;
     let mut p = Provenance::default();
-    if let Ok(m) = std::fs::metadata(root) {
-        p.dev = m.dev();
-        p.ino = m.ino();
-        p.identity_available = m.dev() != 0 && m.ino() != 0;
-        if let Ok(mt) = m.modified() {
-            if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
-                p.mtime_ns = d.as_nanos() as i128;
-            }
+    if let Ok(id) = homelinter_model::identity::file_identity(root) {
+        p.dev = id.dev;
+        p.ino = id.ino;
+        p.identity_available = id.available;
+    }
+    if let Ok(mt) = std::fs::metadata(root).and_then(|m| m.modified()) {
+        if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+            p.mtime_ns = d.as_nanos() as i128;
         }
     }
     p
-}
-
-#[cfg(not(unix))]
-fn repo_provenance(_root: &Path) -> Provenance {
-    Provenance {
-        identity_available: false,
-        ..Default::default()
-    }
 }
 
 fn split_name(p: &Path) -> (String, String) {

@@ -54,20 +54,12 @@ pub fn create_parent_dirs(parent: &Path) -> Result<(), String> {
 /// the filesystem offers no stronger primitive, and only after the executor's
 /// own preflight check of the destination.
 ///
-/// Windows keeps the checked rename until the native Windows executor lands
-/// (it will use `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING`).
+/// Windows uses `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, which
+/// fails when the destination exists instead of replacing it.
 pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        return checked_rename(src, dst);
-    }
-
-    #[cfg(not(windows))]
-    {
-        match platform_rename_noreplace(src, dst)? {
-            RenameAttempt::Renamed => Ok(()),
-            RenameAttempt::Unsupported => publish_without_platform_rename(src, dst),
-        }
+    match platform_rename_noreplace(src, dst)? {
+        RenameAttempt::Renamed => Ok(()),
+        RenameAttempt::Unsupported => publish_without_platform_rename(src, dst),
     }
 }
 
@@ -75,7 +67,12 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
 enum RenameAttempt {
     /// The rename happened; the destination did not exist.
     Renamed,
-    /// The kernel or filesystem does not support the primitive.
+    /// The kernel or filesystem does not support the primitive. Unreachable
+    /// on supported platforms, which all provide a native no-replace rename.
+    #[cfg_attr(
+        any(windows, target_os = "linux", target_os = "macos"),
+        allow(dead_code)
+    )]
     Unsupported,
 }
 
@@ -130,6 +127,35 @@ fn platform_rename_noreplace(src: &Path, dst: &Path) -> Result<RenameAttempt, St
     }
 }
 
+#[cfg(windows)]
+fn platform_rename_noreplace(src: &Path, dst: &Path) -> Result<RenameAttempt, String> {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let src_w = homelinter_model::identity::wide_path(src)
+        .map_err(|_| "source path contains a NUL byte".to_string())?;
+    let dst_w = homelinter_model::identity::wide_path(dst)
+        .map_err(|_| "destination path contains a NUL byte".to_string())?;
+    // No MOVEFILE_REPLACE_EXISTING: an existing destination makes the call
+    // fail instead of being replaced. MOVEFILE_WRITE_THROUGH flushes the
+    // rename before returning. Same-volume renames (the only kind routed
+    // here) do not need MOVEFILE_COPY_ALLOWED, which would degrade into an
+    // unverified copy.
+    // SAFETY: both buffers are NUL-terminated and outlive the call.
+    let ok = unsafe { MoveFileExW(src_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if ok != 0 {
+        return Ok(RenameAttempt::Renamed);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error().map(|e| e as u32) {
+        Some(code) if code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS => Err(format!(
+            "destination exists; refusing to overwrite: {}",
+            dst.display()
+        )),
+        _ => Err(format!("cannot rename to {}: {err}", dst.display())),
+    }
+}
+
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn platform_rename_noreplace(_src: &Path, _dst: &Path) -> Result<RenameAttempt, String> {
     Ok(RenameAttempt::Unsupported)
@@ -139,6 +165,7 @@ fn platform_rename_noreplace(_src: &Path, _dst: &Path) -> Result<RenameAttempt, 
 ///
 /// This is best-effort, because `rename` replaces an existing destination;
 /// it is used only where no atomic publish is available.
+#[cfg_attr(windows, allow(dead_code))]
 fn checked_rename(src: &Path, dst: &Path) -> Result<(), String> {
     if path_exists(dst) {
         return Err(format!(
@@ -195,28 +222,15 @@ fn publish_without_platform_rename(src: &Path, dst: &Path) -> Result<(), String>
 // ---------------------------------------------------------------------------
 
 /// Whether two paths live on the same filesystem. Uses the platform's
-/// object-identity fields: `st_dev` on Unix, volume serial on Windows.
+/// device field (`st_dev` on Unix, volume serial on Windows) of the object
+/// each path resolves to: a destination parent that is a symlink or
+/// junction must be compared at its target, not at the link.
 pub fn same_filesystem(a: &Path, b: &Path) -> Result<bool, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let ma = std::fs::metadata(a).map_err(|e| format!("cannot stat {}: {e}", a.display()))?;
-        let mb = std::fs::metadata(b).map_err(|e| format!("cannot stat {}: {e}", b.display()))?;
-        Ok(ma.dev() == mb.dev())
-    }
-    #[cfg(windows)]
-    {
-        // Compare volume serial numbers when available; treat unknown as
-        // same-filesystem only when both are on one drive is unknowable
-        // from std alone. Conservative: if we cannot prove they differ,
-        // assume the same volume and rely on the no-replace rename to fail
-        // safely rather than attempting an unsafe copy.
-        Ok(true)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Ok(true)
-    }
+    let ia = homelinter_model::identity::file_identity_following(a)
+        .map_err(|e| format!("cannot stat {}: {e}", a.display()))?;
+    let ib = homelinter_model::identity::file_identity_following(b)
+        .map_err(|e| format!("cannot stat {}: {e}", b.display()))?;
+    Ok(ia.dev == ib.dev)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +339,11 @@ fn fsync_dir(dir: &Path) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        // Windows does not support flushing a directory handle; make the
+        // call still fail for a missing directory so callers get an honest
+        // error instead of a silent success.
+        std::fs::metadata(dir)
+            .map_err(|e| format!("cannot open directory {} for fsync: {e}", dir.display()))?;
         Ok(())
     }
 }
@@ -390,6 +408,24 @@ pub fn copy_file_verified(src: &Path, dst: &Path) -> Result<(), String> {
             .write_all(&buf[..n])
             .map_err(|e| format!("write error on {}: {e}", dst.display()))?;
     }
+    // Preserve mtime/atime where the host supports setting them. Without
+    // this a cross-filesystem move would make an old file look new, which
+    // would distort later keeper (oldest copy) selection.
+    if let Ok(meta) = std::fs::metadata(src) {
+        let mut times = std::fs::FileTimes::new();
+        let mut any = false;
+        if let Ok(t) = meta.modified() {
+            times = times.set_modified(t);
+            any = true;
+        }
+        if let Ok(t) = meta.accessed() {
+            times = times.set_accessed(t);
+            any = true;
+        }
+        if any {
+            let _ = output.set_times(times);
+        }
+    }
     output
         .sync_all()
         .map_err(|e| format!("fsync failed on {}: {e}", dst.display()))?;
@@ -431,28 +467,43 @@ pub fn copy_tree_verified(src: &Path, dst: &Path) -> Result<(), String> {
         let ft = entry
             .file_type()
             .map_err(|e| format!("cannot stat {}: {e}", child_src.display()))?;
-        if ft.is_dir() {
-            copy_tree_verified(&child_src, &child_dst)?;
-        } else if ft.is_file() {
-            copy_file_verified(&child_src, &child_dst)?;
-        } else if ft.is_symlink() {
-            // Recreate from the raw target so relative and absolute links
-            // stay exactly as recorded and links to missing targets are
-            // still reproduced (the copy never follows them).
-            let raw = std::fs::read_link(&child_src)
-                .map_err(|e| format!("cannot read link {}: {e}", child_src.display()))?;
-            create_symlink(&child_dst, &raw).map_err(|e| {
-                format!(
-                    "cannot recreate contained symlink {} -> {}: {e}",
-                    child_src.display(),
-                    raw.display()
-                )
-            })?;
-        } else {
-            return Err(format!(
-                "unsupported entry kind in tree: {}; move refused",
-                child_src.display()
-            ));
+        // Classify links before `is_dir`/`is_file`: a directory symlink or
+        // junction has the directory attribute set but must never be
+        // traversed.
+        match homelinter_model::identity::link_kind(&child_src, &ft) {
+            homelinter_model::identity::LinkKind::Symlink => {
+                // Recreate from the raw target so relative and absolute
+                // links stay exactly as recorded and links to missing
+                // targets are still reproduced (the copy never follows
+                // them).
+                let raw = std::fs::read_link(&child_src)
+                    .map_err(|e| format!("cannot read link {}: {e}", child_src.display()))?;
+                create_symlink(&child_dst, &raw).map_err(|e| {
+                    format!(
+                        "cannot recreate contained symlink {} -> {}: {e}",
+                        child_src.display(),
+                        raw.display()
+                    )
+                })?;
+            }
+            homelinter_model::identity::LinkKind::OtherReparsePoint => {
+                return Err(format!(
+                    "unsupported reparse point in tree: {}; move refused",
+                    child_src.display()
+                ));
+            }
+            homelinter_model::identity::LinkKind::NotLink => {
+                if ft.is_dir() {
+                    copy_tree_verified(&child_src, &child_dst)?;
+                } else if ft.is_file() {
+                    copy_file_verified(&child_src, &child_dst)?;
+                } else {
+                    return Err(format!(
+                        "unsupported entry kind in tree: {}; move refused",
+                        child_src.display()
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -475,8 +526,19 @@ fn tree_entries(root: &Path) -> Result<std::collections::BTreeSet<PathBuf>, Stri
             let ft = entry
                 .file_type()
                 .map_err(|e| format!("cannot stat {}: {e}", dir.join(&name).display()))?;
-            if ft.is_dir() {
-                stack.push((dir.join(&name), child_rel.clone()));
+            match homelinter_model::identity::link_kind(&dir.join(&name), &ft) {
+                homelinter_model::identity::LinkKind::NotLink => {
+                    if ft.is_dir() {
+                        stack.push((dir.join(&name), child_rel.clone()));
+                    }
+                }
+                homelinter_model::identity::LinkKind::Symlink => {}
+                homelinter_model::identity::LinkKind::OtherReparsePoint => {
+                    return Err(format!(
+                        "unsupported reparse point in tree: {}",
+                        dir.join(&name).display()
+                    ));
+                }
             }
             out.insert(child_rel);
         }
@@ -523,7 +585,7 @@ fn verify_tree_completeness(src: &Path, copy: &Path) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Symlink creation (never follows)
+// Symlink creation and replacement (never follows)
 // ---------------------------------------------------------------------------
 
 /// Create a new symlink at `link_path` pointing at `target` verbatim, as
@@ -536,31 +598,8 @@ pub fn create_symlink(link_path: &Path, target: &Path) -> Result<(), String> {
             link_path.display()
         ));
     }
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link_path).map_err(|e| {
-            format!(
-                "cannot create symlink {} -> {}: {e}",
-                link_path.display(),
-                target.display()
-            )
-        })?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        // Junction/reparse-point creation needs Windows APIs that the
-        // scaffold does not yet bind; report unsupported rather than guess.
-        Err(format!(
-            "symlink creation is not implemented on this platform: {}",
-            link_path.display()
-        ))
-    }
+    create_link(link_path, &target.to_string_lossy())
 }
-
-// ---------------------------------------------------------------------------
-// Symlink replacement (never follows)
-// ---------------------------------------------------------------------------
 
 /// Replace the symlink at `link_path` so it points at `target`. `target`
 /// has already been resolved to its final relative or absolute form by the
@@ -573,33 +612,94 @@ pub fn replace_symlink(
 ) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(link_path)
         .map_err(|e| format!("cannot stat link {}: {e}", link_path.display()))?;
-    if !meta.file_type().is_symlink() {
-        return Err(format!("not a symlink: {}", link_path.display()));
+    if homelinter_model::identity::link_kind(link_path, &meta.file_type())
+        != homelinter_model::identity::LinkKind::Symlink
+    {
+        return Err(format!(
+            "not a supported symbolic link: {}",
+            link_path.display()
+        ));
     }
     // Remove the old link, then create the new one pointing at the
     // (already-planned) replacement target. Creating never follows.
-    std::fs::remove_file(link_path)
+    remove_link(link_path)
         .map_err(|e| format!("cannot remove old link {}: {e}", link_path.display()))?;
+    create_link(link_path, target)
+}
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link_path).map_err(|e| {
-            format!(
-                "cannot create symlink {} -> {}: {e}",
-                link_path.display(),
-                target
-            )
-        })?;
-        Ok(())
+/// Create `link_path` pointing at the raw target string. The caller has
+/// already ensured the path does not exist.
+#[cfg(unix)]
+fn create_link(link_path: &Path, target: &str) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link_path).map_err(|e| {
+        format!(
+            "cannot create symlink {} -> {}: {e}",
+            link_path.display(),
+            target
+        )
+    })
+}
+
+/// Create a Windows symbolic link (never a junction or other reparse
+/// point). The directory flag is derived from the target when it resolves;
+/// a dangling target is recreated as a file link, which still preserves the
+/// raw target text. Creating links requires either Developer Mode or the
+/// SeCreateSymbolicLinkPrivilege; the error says so instead of guessing.
+#[cfg(windows)]
+fn create_link(link_path: &Path, target: &str) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateSymbolicLinkW, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+        SYMBOLIC_LINK_FLAG_DIRECTORY,
+    };
+
+    let target_path = Path::new(target);
+    let resolved = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        link_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target_path)
+    };
+    let mut flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir()) {
+        flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
     }
-    #[cfg(not(unix))]
-    {
-        // Junction/reparse-point creation needs Windows APIs that the
-        // scaffold does not yet bind; report unsupported rather than guess.
-        Err(format!(
-            "symlink replacement is not implemented on this platform: {}",
-            link_path.display()
-        ))
+
+    let link_w = homelinter_model::identity::wide_path(link_path)
+        .map_err(|_| "link path contains a NUL byte".to_string())?;
+    // The target is passed raw (no extended-path prefix) when relative so
+    // the link keeps the exact text the user would see; an absolute target
+    // gains the extended prefix, which Windows accepts for link targets.
+    let target_w = homelinter_model::identity::wide_path(target_path)
+        .map_err(|_| "link target contains a NUL byte".to_string())?;
+    // SAFETY: both buffers are NUL-terminated and outlive the call.
+    let ok = unsafe { CreateSymbolicLinkW(link_w.as_ptr(), target_w.as_ptr(), flags) };
+    if ok != 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error().map(|e| e as u32) == Some(ERROR_PRIVILEGE_NOT_HELD) {
+        return Err(format!(
+            "cannot create symlink {} -> {}: {err} (enable Developer Mode or grant SeCreateSymbolicLinkPrivilege)",
+            link_path.display(),
+            target
+        ));
+    }
+    Err(format!(
+        "cannot create symlink {} -> {}: {err}",
+        link_path.display(),
+        target
+    ))
+}
+
+/// Remove a symlink without following it. A Windows directory symlink is
+/// removed with `remove_dir`; Unix links use `remove_file` in both cases.
+fn remove_link(link_path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(link_path) {
+        Ok(()) => Ok(()),
+        Err(first) => std::fs::remove_dir(link_path).map_err(|_| first),
     }
 }
 
@@ -628,6 +728,30 @@ mod tests {
         std::fs::create_dir_all(root.join("nested/deep")).unwrap();
         std::fs::write(root.join("a.bin"), b"a").unwrap();
         std::fs::write(root.join("nested/b.bin"), b"bb").unwrap();
+    }
+
+    #[test]
+    fn copy_preserves_the_modification_time() {
+        let root = tmpdir("copy-times");
+        let src = root.join("src.bin");
+        let dst = root.join("dst.bin");
+        std::fs::write(&src, b"payload").unwrap();
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        copy_file_verified(&src, &dst).unwrap();
+        let copied = std::fs::metadata(&dst)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(copied.as_secs(), 1_000_000);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -807,6 +931,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn cross_fs_move_reports_partial_when_source_cleanup_fails() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -846,5 +971,64 @@ mod tests {
         let err = verify_tree_completeness(&src, &copy).unwrap_err();
         assert!(err.contains("1 unexpected entries"), "{err}");
         assert!(err.contains("stray.bin"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_refuses_an_existing_destination() {
+        let root = tmpdir("win-rename-exists");
+        let src = root.join("a.txt");
+        let dst = root.join("b.txt");
+        std::fs::write(&src, b"source").unwrap();
+        std::fs::write(&dst, b"occupant").unwrap();
+        let err = rename_no_replace(&src, &dst).unwrap_err();
+        assert!(err.contains("exists"), "{err}");
+        assert_eq!(std::fs::read(&src).unwrap(), b"source");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"occupant");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_moves_a_directory() {
+        let root = tmpdir("win-rename-dir");
+        let src = root.join("before");
+        let dst = root.join("after");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("nested/file.txt"), b"x").unwrap();
+        rename_no_replace(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(dst.join("nested/file.txt")).unwrap(), b"x");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_symlink_is_replaced_without_following() {
+        let root = tmpdir("win-symlink");
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let link = root.join("link.txt");
+        if let Err(e) = create_symlink(&link, Path::new("a.txt")) {
+            // Creating symlinks needs Developer Mode or the symlink
+            // privilege; the test is meaningless without either.
+            if e.contains("Developer Mode") || e.contains("privilege") {
+                std::fs::remove_dir_all(&root).ok();
+                return;
+            }
+            panic!("{e}");
+        }
+        replace_symlink(&link, "b.txt", true).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("b.txt"));
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert_eq!(
+            homelinter_model::identity::link_kind(&link, &meta.file_type()),
+            homelinter_model::identity::LinkKind::Symlink
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), b"a");
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

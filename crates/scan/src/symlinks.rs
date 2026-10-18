@@ -67,11 +67,17 @@ fn walk(dir: &Path, cancel: &dyn Fn() -> bool, out: &mut Vec<SymlinkEntry>) {
             Ok(t) => t,
             Err(_) => continue,
         };
-        if ft.is_symlink() {
-            if let Some(e) = index_one(&path) {
-                out.push(e);
+        match homelinter_model::identity::link_kind(&path, &ft) {
+            homelinter_model::identity::LinkKind::Symlink => {
+                if let Some(e) = index_one(&path) {
+                    out.push(e);
+                }
+                continue; // never follow links
             }
-            continue; // never follow links
+            // Junctions and other reparse points are unsupported link types:
+            // never index, follow, or traverse them.
+            homelinter_model::identity::LinkKind::OtherReparsePoint => continue,
+            homelinter_model::identity::LinkKind::NotLink => {}
         }
         if ft.is_dir() {
             walk(&path, cancel, out);

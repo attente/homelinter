@@ -463,54 +463,44 @@ enum ContentCheck {
 }
 
 /// Re-stat the source immediately before execution and compare identity and
-/// size to the analysis-time provenance. On Unix the identity is
-/// (st_dev, st_ino). Only mtime drift is tolerated and only when full
-/// content identity is confirmed; moves re-verify by re-hash when one was
-/// recorded, deletes always require the recorded full-content hash. This is
-/// the single content-hash pass per operation.
+/// size to the analysis-time provenance. Identity is host-native (Unix
+/// `st_dev` + `st_ino`, Windows volume serial + file index). Only mtime drift
+/// is tolerated and only when full content identity is confirmed; moves
+/// re-verify by re-hash when one was recorded, deletes always require the
+/// recorded full-content hash. This is the single content-hash pass per
+/// operation.
 fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::symlink_metadata(src)
-            .map_err(|e| format!("source missing or unreadable: {e}"))?;
-        let p = &s.provenance;
-        if !p.identity_available {
-            return Err(
-                "source identity unavailable at analysis time; re-analysis required".into(),
-            );
-        }
-        if meta.dev() != p.dev || meta.ino() != p.ino {
-            return Err("source identity changed since analysis; re-analysis required".into());
-        }
-        if meta.len() != p.size {
-            return Err("source size changed since analysis; re-analysis required".into());
-        }
-        // If only mtime moved and full content hash is available, allow the
-        // operation; delete always requires it, and move verification
-        // re-hashes full content on cross-filesystem paths.
-        match (&p.full_hash, check) {
-            (Some(recorded), _) => {
-                let now = hash::hash_file_full(src)
-                    .map_err(|e| format!("cannot hash {}: {e}", src.display()))?;
-                if now != *recorded {
-                    return Err(
-                        "source content changed since analysis; re-analysis required".into(),
-                    );
-                }
-            }
-            (None, ContentCheck::Required) => {
-                return Err("no recorded full-content hash; delete refused (re-analyze)".into());
-            }
-            (None, ContentCheck::Optional) => {}
-        }
-        Ok(())
+    let meta =
+        std::fs::symlink_metadata(src).map_err(|e| format!("source missing or unreadable: {e}"))?;
+    let p = &s.provenance;
+    if !p.identity_available {
+        return Err("source identity unavailable at analysis time; re-analysis required".into());
     }
-    #[cfg(not(unix))]
-    {
-        // Degraded-identity platforms re-analyze rather than execute.
-        Err("no native object identity on this platform; re-analysis required".into())
+    let id = homelinter_model::identity::file_identity(src)
+        .map_err(|e| format!("cannot read source identity: {e}; re-analysis required"))?;
+    if id.dev != p.dev || id.ino != p.ino {
+        return Err("source identity changed since analysis; re-analysis required".into());
     }
+    if meta.len() != p.size {
+        return Err("source size changed since analysis; re-analysis required".into());
+    }
+    // If only mtime moved and full content hash is available, allow the
+    // operation; delete always requires it, and move verification
+    // re-hashes full content on cross-filesystem paths.
+    match (&p.full_hash, check) {
+        (Some(recorded), _) => {
+            let now = hash::hash_file_full(src)
+                .map_err(|e| format!("cannot hash {}: {e}", src.display()))?;
+            if now != *recorded {
+                return Err("source content changed since analysis; re-analysis required".into());
+            }
+        }
+        (None, ContentCheck::Required) => {
+            return Err("no recorded full-content hash; delete refused (re-analyze)".into());
+        }
+        (None, ContentCheck::Optional) => {}
+    }
+    Ok(())
 }
 
 /// Convenience for callers that already validated suggestions: mark all

@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod format;
 pub mod hash;
+pub mod identity;
 pub mod path;
 pub mod prompt;
 pub mod suggestion;

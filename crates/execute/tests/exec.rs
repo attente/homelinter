@@ -22,11 +22,15 @@ fn tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
-#[cfg(unix)]
 fn provenance_for(p: &Path) -> Provenance {
-    use std::os::unix::fs::MetadataExt;
     let m = std::fs::metadata(p).unwrap();
-    let mut prov = Provenance::unix_identity(m.dev(), m.ino());
+    let id = homelinter_model::identity::file_identity(p).unwrap();
+    let mut prov = Provenance {
+        dev: id.dev,
+        ino: id.ino,
+        identity_available: id.available,
+        ..Default::default()
+    };
     prov.size = m.len();
     if let Ok(d) = m
         .modified()

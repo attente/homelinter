@@ -189,6 +189,7 @@ pub fn default_app_data_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

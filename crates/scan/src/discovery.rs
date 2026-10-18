@@ -307,8 +307,12 @@ fn walk_dir(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if meta.file_type().is_symlink() {
-            // Symlinks are never followed or analyzed by the primary scan.
+        if homelinter_model::identity::link_kind(&abs, &meta.file_type())
+            != homelinter_model::identity::LinkKind::NotLink
+        {
+            // Symlinks are never followed or analyzed by the primary scan;
+            // junctions and other reparse points are unsupported and are
+            // never traversed either.
             continue;
         }
         let rel = rel_path(root, &abs);

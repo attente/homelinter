@@ -86,17 +86,14 @@ pub struct Provenance {
     pub full_hash: Option<[u8; 32]>,
     pub size: u64,
     pub mtime_ns: i128,
-    /// Unix device + inode identity, when the platform provides one.
-    #[cfg(unix)]
+    /// Host object identity: Unix device + inode, or Windows volume serial
+    /// + file index.
     pub dev: u64,
-    #[cfg(unix)]
     pub ino: u64,
-    /// Degraded identity fallback (path + metadata signature) is implicit:
-    /// when no identity fields are set the executor re-analyzes rather than
-    /// executing, per the design.
-    #[cfg(unix)]
-    pub identity_available: bool,
-    #[cfg(not(unix))]
+    /// False when the platform could not provide a usable identity (for
+    /// example a zero inode on a FAT-style filesystem). The executor then
+    /// refuses the operation and asks for re-analysis rather than trusting
+    /// the path alone.
     pub identity_available: bool,
     /// The resolved absolute target of the link (for repair validation).
     pub link_resolved_target: Option<String>,
@@ -105,7 +102,6 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    #[cfg(unix)]
     pub fn unix_identity(dev: u64, ino: u64) -> Provenance {
         Provenance {
             dev,
@@ -340,6 +336,7 @@ pub struct SessionFailure {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

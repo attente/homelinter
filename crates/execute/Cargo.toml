@@ -12,5 +12,8 @@ hex = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
