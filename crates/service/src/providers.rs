@@ -2751,6 +2751,7 @@ mod tests {
             files: vec![file],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -3936,6 +3937,7 @@ mod tests {
             files: vec![photo, photo_no_gps, doc, audio],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4005,6 +4007,7 @@ mod tests {
             files: vec![photo.clone(), doc.clone()],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4027,6 +4030,7 @@ mod tests {
             files: vec![photo, doc],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let after = plan_provider_jobs(&cfg, &analysis, &formats, 1).await;
@@ -4451,6 +4455,7 @@ mod tests {
             files: vec![a, b, c],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4492,8 +4497,8 @@ mod tests {
             groups: vec![homelinter_analyze::DupGroup {
                 keeper: 0,
                 redundant: vec![1],
-                metadata_warning: None,
             }],
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4518,6 +4523,7 @@ mod tests {
             files: vec![a, b],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4552,6 +4558,7 @@ mod tests {
             files: vec![a, b, c],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4609,6 +4616,7 @@ mod tests {
             files: vec![titled_doc, blank_title, titled_photo],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4649,6 +4657,7 @@ mod tests {
             files: vec![doc, titled_doc, photo],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4684,6 +4693,7 @@ mod tests {
             files: vec![video],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4723,6 +4733,7 @@ mod tests {
             files: vec![video],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4754,6 +4765,7 @@ mod tests {
             files: vec![svg.clone()],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4801,6 +4813,7 @@ mod tests {
             files: vec![no_author, with_author, photo],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();
@@ -4837,6 +4850,7 @@ mod tests {
             files: vec![photo],
             repos: Vec::new(),
             groups: Vec::new(),
+            warnings: Vec::new(),
             degraded_identity: false,
         });
         let mut formats = BTreeMap::new();

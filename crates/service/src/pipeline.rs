@@ -341,11 +341,7 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         sess.state = SessionState::Ready;
         sess.batch_config_hash = Some(config_hash(&cfg));
         sess.degraded_identity = analysis.degraded_identity;
-        sess.warnings = analysis
-            .groups
-            .iter()
-            .filter_map(|g| g.metadata_warning.clone())
-            .collect();
+        sess.warnings = analysis.warnings.clone();
         // Provider context: lets the background worker refresh this scan's
         // provider-dependent move suggestions when geocoder or description
         // results arrive, without re-running the scan.

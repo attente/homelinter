@@ -146,15 +146,14 @@ impl AnalyzedFile {
 
 /// One confirmed duplicate group: files with identical full-content
 /// hashes. The keeper is the preferred file; the rest are deletion
-/// candidates.
+/// candidates. Groups suppressed for manual review never reach here; their
+/// reasons are reported in `Analysis.warnings`.
 #[derive(Debug, Clone)]
 pub struct DupGroup {
     /// Index into `Analysis.files`.
     pub keeper: usize,
     /// Indexes of the redundant copies.
     pub redundant: Vec<usize>,
-    /// Emitted warning when a newer copy has better metadata.
-    pub metadata_warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +162,11 @@ pub struct Analysis {
     pub files: Vec<AnalyzedFile>,
     pub repos: Vec<(RepoEntry, RepoMeta)>,
     pub groups: Vec<DupGroup>,
+    /// Human-readable reasons for findings analysis left untouched, such as
+    /// a duplicate group suppressed because the newest copy carries embedded
+    /// metadata the keeper lacks. Surfaced to clients as the scan's
+    /// warnings.
+    pub warnings: Vec<String>,
     /// True when any file used the degraded identity (no dev/ino).
     pub degraded_identity: bool,
 }
@@ -306,7 +310,8 @@ pub fn analyze(
     // movement in clients instead of a frozen phase line.
     progress("metadata", analyzed.len() as u64);
 
-    let groups = dedup_groups(&mut analyzed, opts.large_file_threshold, cancel, progress);
+    let (groups, warnings) =
+        dedup_groups(&mut analyzed, opts.large_file_threshold, cancel, progress);
 
     // Repositories are independent; the per-VCS adapters shell out to the
     // VCS CLI, so running them in parallel hides their process latency.
@@ -328,6 +333,7 @@ pub fn analyze(
         files: analyzed,
         repos: repo_meta,
         groups,
+        warnings,
         degraded_identity: degraded,
     }
 }
@@ -355,7 +361,7 @@ fn dedup_groups(
     threshold: u64,
     cancel: &(dyn Fn() -> bool + Sync),
     progress: &(dyn Fn(&'static str, u64) + Sync),
-) -> Vec<DupGroup> {
+) -> (Vec<DupGroup>, Vec<String>) {
     let hashed = AtomicU64::new(0);
     // Pass 1: full-hash every file below the threshold and fast-hash the
     // rest. Files are independent, so the pass runs in parallel; hashing
@@ -423,6 +429,7 @@ fn dedup_groups(
     }
 
     let mut groups = Vec::new();
+    let mut warnings = Vec::new();
     for (_, members) in full {
         if members.len() < 2 {
             continue;
@@ -433,24 +440,17 @@ fn dedup_groups(
         let newest = *members.last().unwrap();
         // Metadata preservation: when the newest duplicate carries embedded
         // title metadata the keeper lacks, suppress the group's suggestion
-        // and leave the files for manual review.
-        let metadata_warning = if files[newest].embedded_title.is_some()
-            && files[keeper].embedded_title.is_none()
-        {
-            Some(format!(
+        // and leave the files for manual review, reporting why.
+        if files[newest].embedded_title.is_some() && files[keeper].embedded_title.is_none() {
+            warnings.push(format!(
                 "newer duplicate {} carries embedded metadata the keeper lacks; leaving untouched for manual review",
                 files[newest].path.display()
-            ))
-        } else {
-            None
-        };
-        if metadata_warning.is_some() {
+            ));
             continue;
         }
         groups.push(DupGroup {
             keeper,
             redundant: members[1..].to_vec(),
-            metadata_warning,
         });
     }
     groups.sort_by(|a, b| {
@@ -459,7 +459,7 @@ fn dedup_groups(
             .to_string_lossy()
             .cmp(&files[b.keeper].path.to_string_lossy())
     });
-    groups
+    (groups, warnings)
 }
 
 /// Oldest first: creation time when available, else modification time.

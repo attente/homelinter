@@ -52,7 +52,7 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
     let analysis = input.analysis;
     let mut out = GenerateOutput {
         suggestions: Vec::new(),
-        warnings: Vec::new(),
+        warnings: analysis.warnings.clone(),
     };
 
     // Index symlinks by their canonical resolved target.
@@ -165,7 +165,6 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
                 prov,
             ));
         }
-        out.warnings.extend(g.metadata_warning.iter().cloned());
     }
 
     // Move candidates, in deterministic order.

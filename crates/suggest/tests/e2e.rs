@@ -1,7 +1,9 @@
 //! End-to-end suggestion generation tests: scan a temp home, analyze,
 //! generate suggestions, and assert deterministic, safe outcomes.
 
-use homelinter_analyze::{analyze, AnalyzeOptions};
+use homelinter_analyze::{
+    analyze, AnalyzeOptions, EmbeddedMeta, ExtractionContext, MetadataExtractor,
+};
 use homelinter_model::asset_kind::AssetKind;
 use homelinter_model::config::{HiddenDefinition, RawConfig};
 use homelinter_model::format::FormatString;
@@ -10,6 +12,7 @@ use homelinter_scan::{scan_root, DiscoveryOptions};
 use homelinter_suggest::{generate_suggestions, validate_batch, GenerateInput};
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -103,6 +106,60 @@ fn duplicate_kept_moved_others_deleted() {
     assert_eq!(moves.len(), 1);
     assert!(deletes[0].target.ends_with("b.jpg"));
     assert!(moves[0].target.ends_with("a.jpg"));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+struct TitleFor(std::path::PathBuf);
+
+impl MetadataExtractor for TitleFor {
+    fn name(&self) -> &'static str {
+        "test-title"
+    }
+
+    fn extract(&self, path: &Path, _kind: AssetKind, _ctx: &ExtractionContext) -> EmbeddedMeta {
+        let mut meta = EmbeddedMeta::default();
+        if path == self.0 {
+            meta.title = Some("Titled".into());
+        }
+        meta
+    }
+}
+
+#[test]
+fn metadata_preservation_warning_is_surfaced() {
+    let (base, root, home) = setup("dupmwarn");
+    let downloads = root.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let keeper = downloads.join("a.jpg");
+    let newer = downloads.join("b.jpg");
+    std::fs::write(&keeper, b"same-content").unwrap();
+    std::fs::write(&newer, b"same-content").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    filetime::set_file_mtime(&keeper, filetime::FileTime::from_system_time(old)).unwrap();
+
+    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let mut opts = AnalyzeOptions::default();
+    opts.extractors = vec![Box::new(TitleFor(newer.clone()))];
+    let analysis = analyze(&scan.files, &scan.repos, &opts, &|| false, &|_, _| {});
+
+    // Suppressed group, but the reason is reported instead of dropped.
+    assert!(analysis.groups.is_empty());
+    assert_eq!(analysis.warnings.len(), 1);
+    assert!(analysis.warnings[0].contains("b.jpg"));
+    assert!(analysis.warnings[0].contains("manual review"));
+
+    let out = generate_suggestions(&GenerateInput {
+        analysis: &analysis,
+        symlinks: &scan.symlinks,
+        formats: &fmt_map(),
+        home: &home,
+    })
+    .unwrap();
+    assert!(out
+        .suggestions
+        .iter()
+        .all(|s| s.suggestion_type != SuggestionType::Delete));
+    assert_eq!(out.warnings, analysis.warnings);
     let _ = std::fs::remove_dir_all(&base);
 }
 
