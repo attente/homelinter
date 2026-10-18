@@ -141,6 +141,19 @@ fn failure_message(sess: &Value) -> String {
 /// number of suggestions that originally had provider requests; `completed`
 /// is how many have had all of theirs resolve. No-op when the batch has no
 /// provider-dependent suggestions.
+/// Print the scan's warnings (for example suppressed duplicate groups left
+/// for manual review) as notices, so a CLI run does not hide them.
+fn report_scan_warnings(sess: &Value, verbosity: i8) {
+    if verbosity < 0 {
+        return;
+    }
+    for w in sess["warnings"].as_array().into_iter().flatten() {
+        if let Some(w) = w.as_str() {
+            output::note(&format!("warning: {w}"));
+        }
+    }
+}
+
 async fn wait_for_metadata(
     client: &Client,
     verbosity: i8,
@@ -406,7 +419,8 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     // Provider metadata (geocoding, descriptions) resolves in the
     // background; pending suggestions are not executable until it does.
     // Show progress and wait so the CLI acts on complete metadata.
-    wait_for_metadata(&client, verbosity, Duration::from_secs(1800)).await?;
+    let sess = wait_for_metadata(&client, verbosity, Duration::from_secs(1800)).await?;
+    report_scan_warnings(&sess, verbosity);
 
     let suggestions = client
         .suggestions(None)

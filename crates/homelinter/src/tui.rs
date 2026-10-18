@@ -252,6 +252,7 @@ struct App {
     config_hash: Option<String>,
     batch_config_hash: Option<String>,
     failure_reason: Option<String>,
+    warnings: Vec<String>,
     stale_action: Option<StaleAction>,
 }
 
@@ -296,6 +297,7 @@ impl App {
             config_hash: None,
             batch_config_hash: None,
             failure_reason: None,
+            warnings: Vec::new(),
             stale_action: None,
         }
     }
@@ -748,6 +750,14 @@ impl App {
             self.metadata_completed =
                 sess["metadata_progress"]["completed"].as_u64().unwrap_or(0) as usize;
             self.metadata_total = sess["metadata_progress"]["total"].as_u64().unwrap_or(0) as usize;
+            self.warnings = sess["warnings"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
         }
         match self.phase {
             Phase::Scan => {
@@ -1276,6 +1286,12 @@ impl App {
                 Style::new().fg(Color::Yellow),
             ));
         }
+        if !self.warnings.is_empty() {
+            spans.push(Span::styled(
+                format!("  warnings: {}", self.warnings.len()),
+                Style::new().fg(Color::Yellow),
+            ));
+        }
         Line::from(spans)
     }
 
@@ -1329,6 +1345,12 @@ impl App {
                 self.metadata_completed, self.metadata_total
             )));
         }
+        for w in &self.warnings {
+            text.lines.push(Line::from(vec![Span::styled(
+                format!(" warning: {w}"),
+                Style::new().fg(Color::Yellow),
+            )]));
+        }
         text.lines.push(Line::from(""));
         text.lines
             .push(Line::from(" q/Esc: cancel and quit   ?: help"));
@@ -1342,7 +1364,7 @@ impl App {
             Constraint::Length(1),
             Constraint::Min(4),
             Constraint::Length(9),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .areas(area);
         f.render_widget(Paragraph::new(self.header_line()), header);
@@ -1566,6 +1588,18 @@ impl App {
         let mut lines = vec![Line::from(
             " j/arrows move  space select  a all  A clear  t/k/u/c filters  m re-request  b rebuild  x execute  e export  n scan  g config  ? help  q quit",
         )];
+        if let Some(w) = self.warnings.first() {
+            let more = self.warnings.len().saturating_sub(1);
+            let text = if more > 0 {
+                format!(" warning: {w} (+{more} more)")
+            } else {
+                format!(" warning: {w}")
+            };
+            lines.push(Line::from(vec![Span::styled(
+                text,
+                Style::new().fg(Color::Yellow),
+            )]));
+        }
         if let Some(t) = &self.toast {
             lines.push(Line::from(vec![Span::styled(
                 t.as_str(),

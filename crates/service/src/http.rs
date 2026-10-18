@@ -433,6 +433,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
             "completed": metadata_completed,
             "total": metadata_total,
         },
+        "warnings": sess.warnings,
     });
     if let Some(f) = &sess.failure {
         v["failure"] = serde_json::to_value(f).unwrap_or(Value::Null);
