@@ -3,6 +3,8 @@
 //! The executor is the authoritative implementation of the safety rules:
 //!
 //! - Suggestions are ordered deterministically and executed one at a time.
+//!   Moves run before deletes, so a duplicate delete always sees its keeper's
+//!   final path (requiring no reordering, the keeper may itself be a move).
 //! - Immediately before each operation the source is re-stat'ed. A changed
 //!   size or object identity invalidates the operation and re-queues it for
 //!   re-analysis; only an mtime change may still pass when content identity
@@ -31,6 +33,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use homelinter_model::hash;
+use homelinter_model::path;
 use homelinter_model::suggestion::{
     DependentOperation, ExecutionReport, ExecutionStatus, OperationKind, OperationOutcome,
     OperationStatus, ReportEntry, Suggestion, SuggestionStatus, SuggestionType,
@@ -45,9 +48,10 @@ pub fn execute_batch(
 ) -> ExecutionReport {
     let mut report = ExecutionReport::empty(scan_root);
 
-    // Deterministic order: the caller sorts, but a defensive re-sort keeps
-    // validation and dependency order identical to generation.
-    items.sort_by_key(|a| a.sort_key());
+    // Deterministic order: moves before deletes, then source sort key. A
+    // keeper may itself be a move, so every move publishes its relocation
+    // before any delete needs to confirm or repair against it.
+    items.sort_by_key(|a| (a.suggestion_type != SuggestionType::Move, a.sort_key()));
 
     // Keeper relocations from moves that already completed in this batch, so
     // a duplicate delete can still find its keeper after the keeper moved.
@@ -59,6 +63,13 @@ pub fn execute_batch(
         }
         if s.status != SuggestionStatus::Pending {
             continue;
+        }
+        // A keeper that moved earlier in the batch lives at its new path;
+        // publish the delete's symlink repairs there, not at the old path.
+        if s.suggestion_type == SuggestionType::Delete {
+            if let Some((recorded, current)) = moved_keeper(s, &relocated) {
+                retarget_keeper_repairs(s, &recorded, &current);
+            }
         }
         let entry = execute_one(s, &relocated);
         if entry.result == ExecutionStatus::Partial {
@@ -337,6 +348,60 @@ fn validate_link_before_repair(link_path: &Path, dep: &DependentOperation) -> Re
     Ok(())
 }
 
+/// The keeper recorded for a duplicate delete, paired with its executed
+/// destination when a move for that keeper completed earlier in the batch.
+fn moved_keeper(
+    s: &Suggestion,
+    relocated: &BTreeMap<PathBuf, PathBuf>,
+) -> Option<(PathBuf, PathBuf)> {
+    let recorded = recorded_keeper(s)?;
+    let current = relocated.get(&recorded)?.clone();
+    Some((recorded, current))
+}
+
+fn recorded_keeper(s: &Suggestion) -> Option<PathBuf> {
+    s.metadata
+        .get("duplicate_of")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+}
+
+/// Point a duplicate delete's dependent symlink repairs at the keeper's
+/// current location. Repairs generated at analysis time target the keeper's
+/// original path; when the keeper is itself moved in the same batch, its
+/// final path is the only one that will still resolve after execution.
+pub fn retarget_keeper_repairs(s: &mut Suggestion, recorded: &Path, current: &Path) {
+    for dep in &mut s.dependent_operations {
+        if let Some(replacement) = remap_repair_target(dep, recorded, current) {
+            dep.replacement_target = replacement;
+        }
+    }
+}
+
+/// Rewrite one repair target when it points exactly at `recorded`; returns
+/// `None` when the repair is unrelated and must stay untouched.
+fn remap_repair_target(
+    dep: &DependentOperation,
+    recorded: &Path,
+    current: &Path,
+) -> Option<String> {
+    let link_path = Path::new(&dep.link_path);
+    let parent = link_path.parent().unwrap_or(Path::new("/"));
+    let absolute = if dep.recorded_target_relative {
+        path::normalize_lexical(&parent.join(&dep.replacement_target))?
+    } else {
+        PathBuf::from(&dep.replacement_target)
+    };
+    if absolute != recorded {
+        return None;
+    }
+    Some(if dep.recorded_target_relative {
+        path::relative_to(parent, current)
+    } else {
+        current.to_string_lossy().into_owned()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Keeper confirmation
 // ---------------------------------------------------------------------------
@@ -348,12 +413,9 @@ fn validate_link_before_repair(link_path: &Path, dep: &DependentOperation) -> Re
 /// keeper, keeper equal to the target) refuses the delete and asks for
 /// re-analysis rather than risking the only remaining copy.
 fn confirm_keeper(s: &Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Result<(), String> {
-    let recorded = s
-        .metadata
-        .get("duplicate_of")
-        .and_then(|v| v.as_str())
+    let recorded = recorded_keeper(s)
         .ok_or_else(|| "delete has no recorded keeper; re-analysis required".to_string())?;
-    let recorded = Path::new(recorded);
+    let recorded = recorded.as_path();
     if recorded == s.target_path() {
         return Err("recorded keeper is the delete target; re-analysis required".into());
     }

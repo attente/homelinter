@@ -149,6 +149,34 @@ pub fn paths_collide(a: &Path, b: &Path) -> bool {
     sort_key(a) == sort_key(b)
 }
 
+/// Lexically relative path from `from` (a directory) to `to`.
+///
+/// Both paths are compared component by component; no filesystem access is
+/// performed. Returns `"."` when the paths are equal.
+pub fn relative_to(from: &Path, to: &Path) -> String {
+    let from_comps: Vec<_> = from.components().collect();
+    let to_comps: Vec<_> = to.components().collect();
+    let mut common = 0;
+    while common < from_comps.len()
+        && common < to_comps.len()
+        && from_comps[common] == to_comps[common]
+    {
+        common += 1;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for _ in common..from_comps.len() {
+        parts.push("..".to_string());
+    }
+    for c in &to_comps[common..] {
+        parts.push(c.as_os_str().to_string_lossy().into_owned());
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
 /// Platform home directory resolved at call time from the host
 /// environment. `None` when no home can be determined.
 pub fn home_dir() -> Option<PathBuf> {
@@ -176,6 +204,14 @@ mod tests {
             PathBuf::from("/a")
         );
         assert!(normalize_lexical(Path::new("relative")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_paths() {
+        assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/b/c")), "c");
+        assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/x")), "../x");
+        assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/b")), ".");
     }
 
     #[cfg(unix)]

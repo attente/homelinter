@@ -476,7 +476,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     // Deterministic execution order: batch ids sorted by suggestion sort key.
     // Only Pending suggestions run; already-executed or rejected ids are
     // covered by the stored report and never re-queued.
-    let mut batch: Vec<(usize, String)> = Vec::new();
+    let mut batch: Vec<(usize, String, bool)> = Vec::new();
     {
         let sess = app.session.lock().await;
         for id in &req.ids {
@@ -487,12 +487,19 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                 .find(|(_, s)| &s.id == id)
             {
                 if s.status == SuggestionStatus::Pending && !s.metadata_pending {
-                    batch.push((i, s.sort_key()));
+                    batch.push((
+                        i,
+                        s.sort_key(),
+                        s.suggestion_type != homelinter_model::suggestion::SuggestionType::Move,
+                    ));
                 }
             }
         }
     }
-    batch.sort_by(|a, b| a.1.cmp(&b.1));
+    // Moves first, then deletes: a keeper may itself be scheduled for a move,
+    // so its relocation must exist before a duplicate delete confirms the
+    // keeper or retargets repairs at it.
+    batch.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
 
     // Keeper relocations from moves that completed earlier in this batch, so
     // a duplicate delete still finds its keeper after the keeper moved.
@@ -501,12 +508,12 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
 
     let mut pos = 0usize;
     while pos < batch.len() {
-        let (i, _) = batch[pos];
+        let (i, _, _) = batch[pos];
         if is_cancelled(&app, cancel_token) {
             // Finish nothing more: mark every remaining suggestion skipped
             // with the cancellation reason and include them in the report.
             let mut sess = app.session.lock().await;
-            for (j, _) in batch.iter().skip(pos) {
+            for (j, _, _) in batch.iter().skip(pos) {
                 sess.suggestions[*j].status = SuggestionStatus::Skipped;
                 report
                     .entries
@@ -530,13 +537,18 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                 .get("duplicate_of")
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from);
-            if let Some(new_path) = recorded.as_ref().and_then(|p| relocated.get(p)) {
-                let new_path = new_path.to_string_lossy().into_owned();
-                s.metadata.insert(
-                    "duplicate_of".into(),
-                    serde_json::Value::String(new_path.clone()),
-                );
-                keeper_moved_to = Some(new_path);
+            if let Some(recorded) = recorded.as_ref() {
+                if let Some(new_path) = relocated.get(recorded) {
+                    // The keeper now lives at its destination: confirm the
+                    // delete against that path and point its repairs there.
+                    homelinter_execute::retarget_keeper_repairs(&mut s, recorded, new_path);
+                    let new_path_str = new_path.to_string_lossy().into_owned();
+                    s.metadata.insert(
+                        "duplicate_of".into(),
+                        serde_json::Value::String(new_path_str.clone()),
+                    );
+                    keeper_moved_to = Some(new_path_str);
+                }
             }
         }
         let (s, entry) = match run_one(&app, s, &root).await {

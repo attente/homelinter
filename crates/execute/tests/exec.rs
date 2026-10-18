@@ -351,6 +351,171 @@ fn delete_follows_a_keeper_moved_in_the_same_batch() {
 
 #[cfg(unix)]
 #[test]
+fn delete_repair_follows_a_keeper_moved_later_in_sort_order() {
+    use std::os::unix::fs::symlink;
+
+    let base = tmpdir("delrepairkeepermoved");
+    let keeper = base.join("Downloads/zeta.bin");
+    let duplicate = base.join("Downloads/beta.bin");
+    let keeper_dst = base.join("Pictures/zeta.bin");
+    let link = base.join("Photos/link.bin");
+    write(&keeper, b"same-content");
+    write(&duplicate, b"same-content");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&keeper, &link).unwrap();
+
+    let mut mv = Suggestion::new_move(
+        AssetKind::Document,
+        &keeper,
+        &keeper_dst,
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&keeper),
+    );
+    mv.selected = true;
+
+    let dep = DependentOperation {
+        op_type: DependentOpType::RepairSymlink,
+        link_path: link.to_string_lossy().into_owned(),
+        recorded_target: keeper.to_string_lossy().into_owned(),
+        replacement_target: keeper.to_string_lossy().into_owned(),
+        recorded_target_relative: false,
+        provenance: Provenance {
+            link_resolved_target: Some(keeper.to_string_lossy().into_owned()),
+            link_raw_relative: Some(false),
+            ..Default::default()
+        },
+    };
+    let mut del = Suggestion::new_delete(
+        AssetKind::Document,
+        &duplicate,
+        "duplicate".into(),
+        keeper_metadata(&keeper),
+        vec![dep],
+        provenance_for(&duplicate),
+    );
+    del.provenance.full_hash = Some(hash::hash_file_full(&duplicate).unwrap());
+    del.selected = true;
+
+    // The duplicate sorts before the keeper, so only the executor's
+    // moves-first order can publish the keeper before this delete runs.
+    let mut items = vec![del, mv];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(report.entries[1].result, ExecutionStatus::Executed);
+    assert_eq!(std::fs::read_link(&link).unwrap(), keeper_dst);
+    assert_eq!(
+        report.entries[1].operations[1].destination.as_deref(),
+        Some(keeper_dst.to_string_lossy().as_ref())
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_repair_keeps_the_original_keeper_path_when_the_keeper_stays() {
+    use std::os::unix::fs::symlink;
+
+    let base = tmpdir("delrepairkeeperstays");
+    let keeper = base.join("a.bin");
+    let duplicate = base.join("b.bin");
+    let link = base.join("link.bin");
+    write(&keeper, b"same-content");
+    write(&duplicate, b"same-content");
+    symlink(&keeper, &link).unwrap();
+
+    let dep = DependentOperation {
+        op_type: DependentOpType::RepairSymlink,
+        link_path: link.to_string_lossy().into_owned(),
+        recorded_target: keeper.to_string_lossy().into_owned(),
+        replacement_target: keeper.to_string_lossy().into_owned(),
+        recorded_target_relative: false,
+        provenance: Provenance {
+            link_resolved_target: Some(keeper.to_string_lossy().into_owned()),
+            link_raw_relative: Some(false),
+            ..Default::default()
+        },
+    };
+    let mut del = Suggestion::new_delete(
+        AssetKind::Document,
+        &duplicate,
+        "duplicate".into(),
+        keeper_metadata(&keeper),
+        vec![dep],
+        provenance_for(&duplicate),
+    );
+    del.provenance.full_hash = Some(hash::hash_file_full(&duplicate).unwrap());
+    del.selected = true;
+
+    let mut items = vec![del];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(std::fs::read_link(&link).unwrap(), keeper);
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_repair_rewrites_a_relative_link_for_the_moved_keeper() {
+    use std::os::unix::fs::symlink;
+
+    let base = tmpdir("delrepairrelative");
+    let keeper = base.join("Downloads/zeta.bin");
+    let duplicate = base.join("Downloads/beta.bin");
+    let keeper_dst = base.join("Pictures/zeta.bin");
+    let link = base.join("Photos/link.bin");
+    write(&keeper, b"same-content");
+    write(&duplicate, b"same-content");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink("../Downloads/zeta.bin", &link).unwrap();
+
+    let mut mv = Suggestion::new_move(
+        AssetKind::Document,
+        &keeper,
+        &keeper_dst,
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&keeper),
+    );
+    mv.selected = true;
+
+    let dep = DependentOperation {
+        op_type: DependentOpType::RepairSymlink,
+        link_path: link.to_string_lossy().into_owned(),
+        recorded_target: "../Downloads/zeta.bin".into(),
+        replacement_target: "../Downloads/zeta.bin".into(),
+        recorded_target_relative: true,
+        provenance: Provenance {
+            link_resolved_target: Some(keeper.to_string_lossy().into_owned()),
+            link_raw_relative: Some(true),
+            ..Default::default()
+        },
+    };
+    let mut del = Suggestion::new_delete(
+        AssetKind::Document,
+        &duplicate,
+        "duplicate".into(),
+        keeper_metadata(&keeper),
+        vec![dep],
+        provenance_for(&duplicate),
+    );
+    del.provenance.full_hash = Some(hash::hash_file_full(&duplicate).unwrap());
+    del.selected = true;
+
+    let mut items = vec![del, mv];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[1].result, ExecutionStatus::Executed);
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        PathBuf::from("../Pictures/zeta.bin")
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[cfg(unix)]
+#[test]
 fn move_repairs_dependent_symlink() {
     use std::os::unix::fs::symlink;
 

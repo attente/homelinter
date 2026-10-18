@@ -635,30 +635,7 @@ fn make_repair(link: &SymlinkEntry, replacement_abs: &Path) -> DependentOperatio
     }
 }
 
-/// Lexically relative path from `from` (a directory) to `to`.
-pub fn relative_to(from: &Path, to: &Path) -> String {
-    let from_comps: Vec<_> = from.components().collect();
-    let to_comps: Vec<_> = to.components().collect();
-    let mut common = 0;
-    while common < from_comps.len()
-        && common < to_comps.len()
-        && from_comps[common] == to_comps[common]
-    {
-        common += 1;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    for _ in common..from_comps.len() {
-        parts.push("..".to_string());
-    }
-    for c in &to_comps[common..] {
-        parts.push(c.as_os_str().to_string_lossy().into_owned());
-    }
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
-}
+pub use homelinter_model::path::relative_to;
 
 #[cfg(test)]
 mod tests {

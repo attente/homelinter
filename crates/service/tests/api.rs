@@ -652,6 +652,61 @@ async fn invalid_settings_write_leaves_session_untouched() {
     assert!(sess["suggestions_total"].as_u64().unwrap() >= 1);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execute_repoints_a_duplicate_repair_at_the_moved_keeper() {
+    use std::os::unix::fs::symlink;
+
+    let env = Env::new("exec_repair_keeper");
+    let app = env.service();
+    let downloads = env.home.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    // The keeper sorts after the duplicate, so only dependency ordering can
+    // publish the keeper's move before the delete's repair runs.
+    let keeper = downloads.join("zeta.bin");
+    let duplicate = downloads.join("beta.bin");
+    std::fs::write(&keeper, b"same-content-xyz").unwrap();
+    std::fs::write(&duplicate, b"same-content-xyz").unwrap();
+    let old = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000));
+    let new = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_001_000));
+    std::fs::File::open(&keeper)
+        .unwrap()
+        .set_times(old)
+        .unwrap();
+    std::fs::File::open(&duplicate)
+        .unwrap()
+        .set_times(new)
+        .unwrap();
+    let link = env.home.join("link.bin");
+    symlink(&keeper, &link).unwrap();
+
+    scan_to_ready(&app, &env.home).await;
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let items = list["items"].as_array().unwrap();
+    let moved_to = items
+        .iter()
+        .find(|s| s["type"] == "move")
+        .and_then(|s| s["new_path"].as_str())
+        .expect("the keeper's move suggestion")
+        .to_string();
+    let ids = suggestion_ids(&app, "pending").await;
+    assert_eq!(ids.len(), 2, "expected keeper move + duplicate delete");
+
+    let (status, _) = request(&app, "POST", "/api/v1/execute", Some(json!({ "ids": ids }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+
+    assert!(!keeper.exists());
+    assert!(!duplicate.exists());
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        PathBuf::from(moved_to),
+        "repair follows the keeper to its executed destination"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     let env = Env::new("exec");
