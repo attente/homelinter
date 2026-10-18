@@ -731,6 +731,21 @@ textarea:focus {
   color: var(--bad);
 }
 
+/* Advisory scan warnings: visible but less alarming than a blocking error. */
+.banner.notice {
+  border-color: var(--busy);
+  color: var(--busy);
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

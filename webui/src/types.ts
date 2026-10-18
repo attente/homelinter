@@ -32,6 +32,9 @@ export interface Session {
    * least one saved manual override. */
   manual_overrides_total: number;
   metadata_progress?: MetadataProgress;
+  /** Scan warnings for the current batch, for example a duplicate group
+   * left for manual review; empty until a scan publishes them. */
+  warnings?: string[];
   failure?: ApiErrorBody['error'] | null;
   [key: string]: unknown;
 }

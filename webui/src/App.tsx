@@ -798,6 +798,7 @@ export default function App() {
   }, [pushToast, resetSuggestions]);
 
   const state = st.session?.state ?? "unknown";
+  const warnings = st.session?.warnings ?? [];
   // Mirror the backend's state guards so controls are disabled when the
   // service would reject the request (see "Session Model" in DESIGN.md):
   // a new scan is only accepted outside scanning/analyzing/executing, and
@@ -925,6 +926,16 @@ export default function App() {
         }
         onConfig={() => patch({ configOpen: true })}
       />
+      {warnings.length > 0 && (
+        <div className="banner notice" role="status">
+          <p>Scan warnings:</p>
+          <ul>
+            {warnings.map((w, i) => (
+              <li key={`${i}-${w}`}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {body}
       {st.pendingAction && (
         <div
