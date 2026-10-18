@@ -68,61 +68,52 @@ pub fn emit_report(format: OutputFormat, report: &Value) -> std::io::Result<()> 
     match format {
         OutputFormat::Pretty => {
             let mut out = std::io::stdout().lock();
-            writeln!(out, "Execution report:")?;
-            writeln!(
-                out,
-                "  scan_root: {}",
-                report["scan_root"].as_str().unwrap_or("?")
-            )?;
-            writeln!(
-                out,
-                "  platform:  {}",
-                report["platform"].as_str().unwrap_or("?")
-            )?;
-            writeln!(out, "  partial:   {}", report["partial"])?;
-            writeln!(
-                out,
-                "  entries:   {}",
-                report["entries"].as_array().map(|a| a.len()).unwrap_or(0)
-            )?;
-            if let Some(entries) = report["entries"].as_array() {
-                for e in entries {
-                    let op = e["operations"]
-                        .as_array()
-                        .and_then(|a| a.first())
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    writeln!(
-                        out,
-                        "    {}: {}",
-                        e["suggestion_id"].as_str().unwrap_or("?"),
-                        e["result"].as_str().unwrap_or("?")
-                    )?;
-                    if op.is_object() {
-                        let detail = op["detail"].as_object();
-                        let keys = detail.map(|m| {
-                            m.keys()
-                                .filter(|k| {
-                                    matches!(
-                                        k.as_str(),
-                                        "source" | "destination" | "reason" | "error"
-                                    )
-                                })
-                                .map(|k| format!("{k}={}", op["detail"][k]))
-                                .collect::<Vec<_>>()
-                        });
-                        if let Some(ks) = keys {
-                            for k in ks {
-                                writeln!(out, "      {k}")?;
-                            }
-                        }
-                    }
-                }
-            }
+            out.write_all(report_text(report).as_bytes())?;
             out.flush()
         }
         _ => emit_document(format, report),
     }
+}
+
+/// Human-readable execution report: one entry per suggestion with the
+/// operation's paths and any failure or partial-completion detail.
+fn report_text(report: &Value) -> String {
+    use std::fmt::Write as _;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "Execution report:");
+    let _ = writeln!(
+        s,
+        "  scan_root: {}",
+        report["scan_root"].as_str().unwrap_or("?")
+    );
+    let _ = writeln!(
+        s,
+        "  platform:  {}",
+        report["platform"].as_str().unwrap_or("?")
+    );
+    let _ = writeln!(s, "  partial:   {}", report["partial"]);
+    let _ = writeln!(
+        s,
+        "  entries:   {}",
+        report["entries"].as_array().map(|a| a.len()).unwrap_or(0)
+    );
+    for e in report["entries"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            s,
+            "    {}: {}",
+            e["suggestion_id"].as_str().unwrap_or("?"),
+            e["result"].as_str().unwrap_or("?")
+        );
+        for op in e["operations"].as_array().into_iter().flatten() {
+            for key in ["source", "destination", "detail"] {
+                if let Some(v) = op[key].as_str() {
+                    let _ = writeln!(s, "      {key}={v}");
+                }
+            }
+        }
+    }
+    s
 }
 
 /// Confirm a written export script.
@@ -154,4 +145,37 @@ pub fn readiness(port: u16) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "homelinter: listening on 127.0.0.1:{port}");
     let _ = out.flush();
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn report_text_prints_operation_paths_and_string_detail() {
+        let report = json!({
+            "scan_root": "/home/alice",
+            "platform": "linux",
+            "partial": true,
+            "entries": [{
+                "suggestion_id": "s1",
+                "result": "partial",
+                "operations": [{
+                    "operation": "move",
+                    "source": "/home/alice/a.bin",
+                    "destination": "/home/alice/Documents/a.bin",
+                    "status": "completed",
+                    "detail": "copy verified and published but removing source failed"
+                }]
+            }]
+        });
+        let text = report_text(&report);
+        assert!(text.contains("s1: partial"), "{text}");
+        assert!(text.contains("source=/home/alice/a.bin"), "{text}");
+        assert!(
+            text.contains("destination=/home/alice/Documents/a.bin"),
+            "{text}"
+        );
+        assert!(text.contains("detail=copy verified"), "{text}");
+    }
 }
