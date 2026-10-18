@@ -1,4 +1,5 @@
-//! Filesystem primitives for the executor: no-replace rename, verified
+//! Filesystem primitives for the executor: no-replace rename (kernel-atomic
+//! on Linux and macOS, hard-link publish elsewhere), verified
 //! cross-filesystem moves, and symlink replacement without following.
 //!
 //! These are the only places in homelinter that touch the filesystem on
@@ -36,38 +37,100 @@ pub fn create_parent_dirs(parent: &Path) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Rename `src` to `dst`, failing when `dst` exists (no-replace semantics).
-/// On Linux this uses `renameat2(RENAME_NOREPLACE)` so the guarantee holds
-/// atomically; elsewhere it falls back to an existence check immediately
-/// before `rename`, which is best-effort under a race.
+///
+/// Linux uses `renameat2(RENAME_NOREPLACE)` and macOS uses
+/// `renamex_np(RENAME_EXCL)`, both of which fail atomically when the
+/// destination appears. Where the kernel or filesystem cannot express a
+/// no-replace rename, a non-directory is published with a hard link (which
+/// fails if the destination exists) and then removed from the source, and a
+/// directory is refused rather than risk replacing a destination that
+/// appeared after a check. A plain check-then-`rename` is never used,
+/// because `rename` silently replaces an existing destination.
+///
+/// Windows keeps the checked rename until the native Windows executor lands
+/// (it will use `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING`).
 pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(windows)]
     {
-        use std::os::unix::ffi::OsStrExt;
-
-        let c_src = std::ffi::CString::new(src.as_os_str().as_bytes())
-            .map_err(|_| "source path contains a NUL byte".to_string())?;
-        let c_dst = std::ffi::CString::new(dst.as_os_str().as_bytes())
-            .map_err(|_| "destination path contains a NUL byte".to_string())?;
-        let res = rustix::fs::renameat_with(
-            rustix::fs::CWD,
-            &c_src,
-            rustix::fs::CWD,
-            &c_dst,
-            rustix::fs::RenameFlags::NOREPLACE,
-        );
-        match res {
-            Ok(()) => return Ok(()),
-            Err(rustix::io::Errno::NOSYS)
-            | Err(rustix::io::Errno::INVAL)
-            | Err(rustix::io::Errno::NOTSUP) => {
-                // Kernel without renameat2: fall through to the checked
-                // fallback below.
-            }
-            Err(e) => return Err(format!("cannot rename to {}: {e}", dst.display())),
-        }
+        return checked_rename(src, dst);
     }
 
-    // Fallback (macOS, BSD, non-Linux): check then rename.
+    #[cfg(not(windows))]
+    {
+        match platform_rename_noreplace(src, dst)? {
+            RenameAttempt::Renamed => Ok(()),
+            RenameAttempt::Unsupported => publish_by_hard_link(src, dst),
+        }
+    }
+}
+
+/// Outcome of the platform's atomic no-replace rename attempt.
+enum RenameAttempt {
+    /// The rename happened; the destination did not exist.
+    Renamed,
+    /// The kernel or filesystem does not support the primitive.
+    Unsupported,
+}
+
+#[cfg(target_os = "linux")]
+fn platform_rename_noreplace(src: &Path, dst: &Path) -> Result<RenameAttempt, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_src = std::ffi::CString::new(src.as_os_str().as_bytes())
+        .map_err(|_| "source path contains a NUL byte".to_string())?;
+    let c_dst = std::ffi::CString::new(dst.as_os_str().as_bytes())
+        .map_err(|_| "destination path contains a NUL byte".to_string())?;
+    let res = rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &c_src,
+        rustix::fs::CWD,
+        &c_dst,
+        rustix::fs::RenameFlags::NOREPLACE,
+    );
+    match res {
+        Ok(()) => Ok(RenameAttempt::Renamed),
+        Err(rustix::io::Errno::NOSYS)
+        | Err(rustix::io::Errno::INVAL)
+        | Err(rustix::io::Errno::NOTSUP) => Ok(RenameAttempt::Unsupported),
+        Err(e) => Err(format!("cannot rename to {}: {e}", dst.display())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_rename_noreplace(src: &Path, dst: &Path) -> Result<RenameAttempt, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_src = std::ffi::CString::new(src.as_os_str().as_bytes())
+        .map_err(|_| "source path contains a NUL byte".to_string())?;
+    let c_dst = std::ffi::CString::new(dst.as_os_str().as_bytes())
+        .map_err(|_| "destination path contains a NUL byte".to_string())?;
+    // SAFETY: both pointers come from live CStrings and the flag constant is
+    // the documented `RENAME_EXCL` value for `renamex_np`.
+    let res = unsafe { libc::renamex_np(c_src.as_ptr(), c_dst.as_ptr(), libc::RENAME_EXCL) };
+    if res == 0 {
+        return Ok(RenameAttempt::Renamed);
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            Ok(RenameAttempt::Unsupported)
+        }
+        Some(libc::EEXIST) => Err(format!(
+            "destination exists; refusing to overwrite: {}",
+            dst.display()
+        )),
+        _ => Err(format!("cannot rename to {}: {e}", dst.display())),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn platform_rename_noreplace(_src: &Path, _dst: &Path) -> Result<RenameAttempt, String> {
+    Ok(RenameAttempt::Unsupported)
+}
+
+/// Checked rename used only on Windows until the native executor lands.
+#[cfg(windows)]
+fn checked_rename(src: &Path, dst: &Path) -> Result<(), String> {
     if path_exists(dst) {
         return Err(format!(
             "destination exists; refusing to overwrite: {}",
@@ -76,6 +139,47 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
     }
     std::fs::rename(src, dst)
         .map_err(|e| format!("cannot rename {} to {}: {e}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+/// Publish `src` at `dst` with a hard link, then remove the source name.
+///
+/// `hard_link` creates the destination name atomically and fails when it
+/// already exists, so the publish keeps the no-replace guarantee without a
+/// platform rename primitive. Directories cannot be hard-linked, so a
+/// directory is refused: replacing it after a check could destroy a
+/// destination that appeared in between.
+#[cfg_attr(windows, allow(dead_code))]
+fn publish_by_hard_link(src: &Path, dst: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(src)
+        .map_err(|e| format!("cannot stat source {}: {e}", src.display()))?;
+    if meta.is_dir() {
+        return Err(format!(
+            "cannot move directory {}: this filesystem has no atomic no-replace rename for directories; refusing to risk overwriting {}",
+            src.display(),
+            dst.display()
+        ));
+    }
+    std::fs::hard_link(src, dst).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "destination exists; refusing to overwrite: {}",
+                dst.display()
+            )
+        } else {
+            format!(
+                "cannot publish {} without an atomic no-replace rename: {e}",
+                dst.display()
+            )
+        }
+    })?;
+    std::fs::remove_file(src).map_err(|e| {
+        format!(
+            "published {} but could not remove source {}: {e}",
+            dst.display(),
+            src.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -612,6 +716,76 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn hard_link_publish_removes_source_and_keeps_content() {
+        let root = tmpdir("link-publish");
+        let src = root.join("src.bin");
+        let dst = root.join("dst.bin");
+        std::fs::write(&src, b"payload").unwrap();
+        publish_by_hard_link(&src, &dst).unwrap();
+        assert!(!path_exists(&src));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn hard_link_publish_refuses_existing_destination() {
+        let root = tmpdir("link-exists");
+        let src = root.join("src.bin");
+        let dst = root.join("dst.bin");
+        std::fs::write(&src, b"source").unwrap();
+        std::fs::write(&dst, b"destination").unwrap();
+        let err = publish_by_hard_link(&src, &dst).unwrap_err();
+        assert!(err.contains("destination exists"), "{err}");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"destination");
+        assert_eq!(std::fs::read(&src).unwrap(), b"source");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn hard_link_publish_refuses_directories() {
+        let root = tmpdir("link-dir");
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        let err = publish_by_hard_link(&src, &root.join("dst")).unwrap_err();
+        assert!(err.contains("no atomic no-replace rename"), "{err}");
+        assert!(path_exists(&src));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_publish_keeps_contained_symlinks() {
+        let root = tmpdir("link-symlink");
+        let src = root.join("link");
+        let dst = root.join("published");
+        std::os::unix::fs::symlink("raw-target", &src).unwrap();
+        publish_by_hard_link(&src, &dst).unwrap();
+        assert!(!path_exists(&src));
+        assert_eq!(std::fs::read_link(&dst).unwrap().as_os_str(), "raw-target");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rename_no_replace_is_atomic_on_macos() {
+        let root = tmpdir("renamex");
+        let src = root.join("src.bin");
+        let dst = root.join("dst.bin");
+        std::fs::write(&src, b"source").unwrap();
+        rename_no_replace(&src, &dst).unwrap();
+        assert!(!path_exists(&src));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"source");
+
+        let src2 = root.join("src2.bin");
+        std::fs::write(&src2, b"second").unwrap();
+        let err = rename_no_replace(&src2, &dst).unwrap_err();
+        assert!(err.contains("destination exists"), "{err}");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"source");
+        assert_eq!(std::fs::read(&src2).unwrap(), b"second");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn cross_fs_move_reports_partial_when_source_cleanup_fails() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

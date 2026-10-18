@@ -9,5 +9,8 @@ homelinter-model = { path = "../model" }
 rustix = { workspace = true }
 hex = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 serde_json = { workspace = true }
