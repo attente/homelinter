@@ -501,10 +501,13 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     // keeper or retargets repairs at it.
     batch.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
 
-    // Keeper relocations from moves that completed earlier in this batch, so
-    // a duplicate delete still finds its keeper after the keeper moved.
-    let mut relocated: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> =
-        std::collections::BTreeMap::new();
+    // Keeper relocations from moves that already executed, so a duplicate
+    // delete still finds its keeper when the keeper's move ran in an earlier
+    // batch (a cancelled run, or a selection that excluded the delete).
+    let mut relocated: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> = {
+        let sess = app.session.lock().await;
+        homelinter_execute::relocations_of(&sess.suggestions)
+    };
 
     let mut pos = 0usize;
     while pos < batch.len() {
@@ -529,8 +532,9 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
             let sess = app.session.lock().await;
             sess.suggestions[i].clone()
         };
-        // Point a duplicate delete at its keeper's executed destination.
-        let mut keeper_moved_to: Option<String> = None;
+        // Point a duplicate delete at its keeper's executed destination. The
+        // session is republished rather than the clone alone so repairs and
+        // the reason text stay consistent with the keeper's new path.
         if s.suggestion_type == homelinter_model::suggestion::SuggestionType::Delete {
             let recorded = s
                 .metadata
@@ -539,15 +543,13 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                 .map(std::path::PathBuf::from);
             if let Some(recorded) = recorded.as_ref() {
                 if let Some(new_path) = relocated.get(recorded) {
-                    // The keeper now lives at its destination: confirm the
-                    // delete against that path and point its repairs there.
-                    homelinter_execute::retarget_keeper_repairs(&mut s, recorded, new_path);
-                    let new_path_str = new_path.to_string_lossy().into_owned();
-                    s.metadata.insert(
-                        "duplicate_of".into(),
-                        serde_json::Value::String(new_path_str.clone()),
+                    let mut sess = app.session.lock().await;
+                    homelinter_execute::publish_keeper_relocation(
+                        &mut sess.suggestions,
+                        recorded,
+                        new_path,
                     );
-                    keeper_moved_to = Some(new_path_str);
+                    s = sess.suggestions[i].clone();
                 }
             }
         }
@@ -575,7 +577,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         let dependent_failed = entry
             .operations
             .iter()
-            .skip(1)
+            .filter(|o| o.operation == OperationKind::RepairSymlink)
             .any(|o| o.status == OperationStatus::Failed);
         if entry.result == ExecutionStatus::Partial || (parent_ok && dependent_failed) {
             report.partial = true;
@@ -584,11 +586,18 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         {
             let mut sess = app.session.lock().await;
             sess.suggestions[i].status = s.status;
-            if let Some(new_path) = &keeper_moved_to {
-                sess.suggestions[i].metadata.insert(
-                    "duplicate_of".into(),
-                    serde_json::Value::String(new_path.clone()),
-                );
+            if s.suggestion_type == homelinter_model::suggestion::SuggestionType::Move
+                && s.status == SuggestionStatus::Executed
+            {
+                // A keeper that moved changes what every delete of it must
+                // point at, including deletes executed in a later batch.
+                if let Some(dst) = &s.new_path {
+                    homelinter_execute::publish_keeper_relocation(
+                        &mut sess.suggestions,
+                        std::path::Path::new(&s.target),
+                        std::path::Path::new(dst),
+                    );
+                }
             }
             if s.status == SuggestionStatus::Executed {
                 let audit = AuditEntry {

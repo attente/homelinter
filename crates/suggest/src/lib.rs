@@ -132,13 +132,8 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
             };
             // Only links confirmed at scan time are repaired on delete: the
             // link must resolve to the deleted file's identity.
-            let dependents = delete_dependents(
-                &f.path,
-                &canonical,
-                &keeper_path,
-                &input.symlinks.entries,
-                &by_canon,
-            );
+            let dependents =
+                delete_dependents(&canonical, &keeper_path, &input.symlinks.entries, &by_canon);
             let size = f.size;
             // The delete requires the recorded full-content hash at
             // execution time; carry it from analysis into the provenance.
@@ -318,6 +313,11 @@ fn build_move_suggestion(
     if let Some(a) = &effective_author {
         metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
+    // A move re-verifies content when analysis recorded a full-content hash:
+    // every file below the fast-path threshold and every confirmed group
+    // member has one, so carry it instead of dropping it.
+    let mut provenance = f.provenance.clone();
+    provenance.full_hash = f.full_hash;
     // Move suggestions carry no human-readable reason: the from/to paths
     // already explain the operation, so the generic "moved to the <kind>
     // destination" text was redundant (see `Suggestion.reason`).
@@ -328,7 +328,7 @@ fn build_move_suggestion(
         String::new(),
         metadata,
         dependents,
-        f.provenance.clone(),
+        provenance,
     );
     let mut manual = Vec::new();
     if f.overrides.location.is_some() {
@@ -581,13 +581,11 @@ fn collect_dependents(
 }
 
 fn delete_dependents(
-    deleted: &Path,
     canonical_deleted: &Path,
     keeper: &Path,
     links: &[SymlinkEntry],
     by_canon: &HashMap<PathBuf, Vec<usize>>,
 ) -> Vec<DependentOperation> {
-    let _ = deleted;
     let mut out = Vec::new();
     if let Some(idxs) = by_canon.get(canonical_deleted) {
         for &i in idxs {
@@ -743,6 +741,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(edited.manual_overrides, vec![MetadataField::Subject]);
+    }
+
+    #[test]
+    fn move_suggestions_carry_the_analyzed_full_content_hash() {
+        // Analysis computes a full-content hash for every file it can, and a
+        // move must carry it so the executor can re-verify content when the
+        // modification time drifted.
+        let fmt = FormatString::parse("Pictures/%f").unwrap();
+        let home = Path::new("/home/user");
+        let symlinks = SymlinkIndex::default();
+        let mut f = analyzed("/tmp/IMG_0001.jpg");
+        f.full_hash = Some([0x5a; 32]);
+        let s = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.provenance.full_hash, Some([0x5a; 32]));
+
+        // Without a hash at analysis the move records none, so the executor
+        // falls back to refusing drifted content.
+        f.full_hash = None;
+        let s = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.provenance.full_hash, None);
     }
 
     #[test]

@@ -620,11 +620,57 @@ pub fn replace_symlink(
             link_path.display()
         ));
     }
-    // Remove the old link, then create the new one pointing at the
-    // (already-planned) replacement target. Creating never follows.
-    remove_link(link_path)
-        .map_err(|e| format!("cannot remove old link {}: {e}", link_path.display()))?;
-    create_link(link_path, target)
+    // Point the link at the (already-planned) replacement target. On Unix the
+    // replacement link is created beside the old one and renamed over it, so
+    // an interruption leaves either the old or the new link, never no link at
+    // all. Windows keeps remove-then-create: replacing a reparse point in one
+    // atomic step needs a Win32 handle-level operation that std does not
+    // expose, and that window is a documented seam.
+    #[cfg(unix)]
+    {
+        let mut candidate = temp_link_path(link_path);
+        let mut attempt = 0u32;
+        while path_exists(&candidate) {
+            attempt += 1;
+            candidate = temp_link_path_with(link_path, attempt);
+        }
+        create_link(&candidate, target)?;
+        match std::fs::rename(&candidate, link_path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = remove_link(&candidate);
+                Err(format!(
+                    "cannot replace symlink {}: {e}",
+                    link_path.display()
+                ))
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        remove_link(link_path)
+            .map_err(|e| format!("cannot remove old link {}: {e}", link_path.display()))?;
+        create_link(link_path, target)
+    }
+}
+
+/// Sibling path used to stage an atomic link replacement.
+#[cfg(unix)]
+fn temp_link_path(link_path: &Path) -> PathBuf {
+    temp_link_path_with(link_path, 0)
+}
+
+#[cfg(unix)]
+fn temp_link_path_with(link_path: &Path, attempt: u32) -> PathBuf {
+    let parent = link_path.parent().unwrap_or_else(|| Path::new("."));
+    let name = link_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "link".to_string());
+    parent.join(format!(
+        ".homelinter-link-{name}-{}-{attempt}",
+        std::process::id()
+    ))
 }
 
 /// Create `link_path` pointing at the raw target string. The caller has
@@ -999,6 +1045,30 @@ mod tests {
         rename_no_replace(&src, &dst).unwrap();
         assert!(!src.exists());
         assert_eq!(std::fs::read(dst.join("nested/file.txt")).unwrap(), b"x");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_symlink_replacement_leaves_no_staging_file() {
+        // The replacement link is staged beside the target and renamed over
+        // it, so the directory holds exactly the link afterwards and an
+        // interruption cannot leave the path missing.
+        let root = tmpdir("unix-symlink");
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("b.txt"), b"b").unwrap();
+        let link = root.join("link.txt");
+        create_symlink(&link, Path::new("a.txt")).unwrap();
+        replace_symlink(&link, "b.txt", true).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("b.txt"));
+        let entries: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().all(|n| !n.starts_with(".homelinter-link-")),
+            "no staging file is left behind: {entries:?}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

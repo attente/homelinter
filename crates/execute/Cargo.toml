@@ -8,6 +8,7 @@ license.workspace = true
 homelinter-model = { path = "../model" }
 rustix = { workspace = true }
 hex = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
@@ -16,4 +17,3 @@ libc = "0.2"
 windows-sys = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }

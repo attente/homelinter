@@ -6,9 +6,12 @@
 //!   Moves run before deletes, so a duplicate delete always sees its keeper's
 //!   final path (requiring no reordering, the keeper may itself be a move).
 //! - Immediately before each operation the source is re-stat'ed. A changed
-//!   size or object identity invalidates the operation and re-queues it for
-//!   re-analysis; only an mtime change may still pass when content identity
-//!   is unchanged (move verification re-hashes full content anyway).
+//!   size, object identity, or path kind invalidates the operation, and the
+//!   operation fails with "re-analysis required"; nothing is re-queued or
+//!   re-analyzed automatically, a fresh scan rebuilds the suggestion. A
+//!   changed mtime is tolerated only when the recorded full-content hash
+//!   still matches; without a recorded hash (which analysis supplies for
+//!   every file below the fast-path threshold) drifted mtime is refused.
 //! - A destination is never overwritten: moves use rename semantics that
 //!   fail when the destination exists (no-replace), and cross-filesystem
 //!   moves use the verified copy-and-delete protocol.
@@ -16,7 +19,8 @@
 //!   confirmed by full-content hash at analysis time; the executor re-verifies
 //!   the hash and confirms that the recorded keeper still exists with that
 //!   same content immediately before deletion, following a keeper that was
-//!   already moved earlier in the same batch.
+//!   moved earlier in the same batch (or, through the session's relocation
+//!   map, in an earlier batch) via `publish_keeper_relocation`.
 //! - Dependent symlink repairs run only after their parent succeeds, never
 //!   follow links, and are re-validated immediately before repair.
 //!
@@ -57,40 +61,109 @@ pub fn execute_batch(
     // a duplicate delete can still find its keeper after the keeper moved.
     let mut relocated: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
 
-    for s in items.iter_mut() {
-        if selected_only && !s.selected {
-            continue;
-        }
-        if s.status != SuggestionStatus::Pending {
-            continue;
-        }
-        // A keeper that moved earlier in the batch lives at its new path;
-        // publish the delete's symlink repairs there, not at the old path.
-        if s.suggestion_type == SuggestionType::Delete {
-            if let Some((recorded, current)) = moved_keeper(s, &relocated) {
-                retarget_keeper_repairs(s, &recorded, &current);
+    for idx in 0..items.len() {
+        // The keeper this delete recorded may be stale if the keeper was
+        // moved by a previous batch; follow the recorded move so the delete
+        // still finds it, exactly once per item, before it runs.
+        let stale_keeper = {
+            let s = &items[idx];
+            if selected_only && !s.selected {
+                continue;
             }
+            if s.status != SuggestionStatus::Pending {
+                continue;
+            }
+            if s.suggestion_type == SuggestionType::Delete {
+                moved_keeper(s, &relocated)
+            } else {
+                None
+            }
+        };
+        if let Some((recorded, current)) = stale_keeper {
+            publish_keeper_relocation(items, &recorded, &current);
         }
-        let entry = execute_one(s, &relocated);
+        let (entry, landed) = {
+            let s = &mut items[idx];
+            let entry = execute_one(s, &relocated);
+            // Mirror the outcome onto the suggestion's own status for the
+            // session model.
+            s.status = match entry.result {
+                ExecutionStatus::Executed => SuggestionStatus::Executed,
+                ExecutionStatus::Partial => SuggestionStatus::Partial,
+                ExecutionStatus::Failed => SuggestionStatus::Failed,
+                ExecutionStatus::Skipped => SuggestionStatus::Skipped,
+            };
+            let landed = match (s.suggestion_type, s.status, s.new_path_path()) {
+                (SuggestionType::Move, SuggestionStatus::Executed, Some(to)) => {
+                    Some((s.target_path().to_path_buf(), to.to_path_buf()))
+                }
+                _ => None,
+            };
+            (entry, landed)
+        };
         if entry.result == ExecutionStatus::Partial {
             report.partial = true;
         }
-        // Mirror the outcome onto the suggestion's own status for the
-        // session model.
-        s.status = match entry.result {
-            ExecutionStatus::Executed => SuggestionStatus::Executed,
-            ExecutionStatus::Partial => SuggestionStatus::Partial,
-            ExecutionStatus::Failed => SuggestionStatus::Failed,
-            ExecutionStatus::Skipped => SuggestionStatus::Skipped,
-        };
-        if s.suggestion_type == SuggestionType::Move && s.status == SuggestionStatus::Executed {
-            if let Some(to) = s.new_path_path() {
-                relocated.insert(s.target_path().to_path_buf(), to.to_path_buf());
-            }
-        }
         report.entries.push(entry);
+        if let Some((from, to)) = landed {
+            relocated.insert(from.clone(), to.clone());
+            // A moved keeper changes what every duplicate delete of it must
+            // point at, whether or not that delete runs in this batch.
+            publish_keeper_relocation(items, &from, &to);
+        }
     }
     report
+}
+
+/// Keeper relocations recorded by moves that already executed, keyed by each
+/// move's source path. A caller that executes suggestions across several
+/// batches (the service executes one per request for cancellation
+/// granularity) seeds its batch with this so a duplicate delete whose keeper
+/// moved in an earlier run still resolves, instead of failing with
+/// "re-analysis required".
+pub fn relocations_of(items: &[Suggestion]) -> BTreeMap<PathBuf, PathBuf> {
+    let mut map = BTreeMap::new();
+    for s in items {
+        if s.suggestion_type != SuggestionType::Move || s.status != SuggestionStatus::Executed {
+            continue;
+        }
+        if let Some(to) = s.new_path_path() {
+            map.insert(s.target_path().to_path_buf(), to.to_path_buf());
+        }
+    }
+    map
+}
+
+/// Point every duplicate delete that records `recorded` as its keeper at the
+/// keeper's new location: its `duplicate_of` record, its dependent symlink
+/// repairs, and the keeper path named in its reason.
+pub fn publish_keeper_relocation(items: &mut [Suggestion], recorded: &Path, current: &Path) {
+    for s in items.iter_mut() {
+        if s.suggestion_type != SuggestionType::Delete {
+            continue;
+        }
+        if recorded_keeper(s).as_deref() != Some(recorded) {
+            continue;
+        }
+        retarget_keeper_repairs(s, recorded, current);
+        s.metadata.insert(
+            "duplicate_of".to_string(),
+            serde_json::Value::String(current.to_string_lossy().into_owned()),
+        );
+        refresh_delete_reason(s, current);
+    }
+}
+
+/// Rewrite the human-readable reason so it names the keeper's current path.
+/// Without a recorded size the reason is left alone rather than guessed at.
+fn refresh_delete_reason(s: &mut Suggestion, keeper: &Path) {
+    let Some(size) = s.metadata.get("size").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    s.reason = format!(
+        "Duplicate of {}; retaining the oldest copy and reclaiming {size} bytes.",
+        keeper.display()
+    );
 }
 
 fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> ReportEntry {
@@ -109,24 +182,19 @@ fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Re
     match parent {
         Ok(ParentOutcome::Complete(mut ops)) => {
             entry.operations.append(&mut ops);
-            // Dependents run only when the parent succeeded.
-            let parent_ok = entry
+            // `Complete` is by construction a single completed parent
+            // operation, so dependents always run here.
+            debug_assert!(entry
                 .operations
                 .iter()
-                .all(|o| o.status == OperationStatus::Completed);
-            if parent_ok {
-                for dep in &s.dependent_operations {
-                    entry.operations.push(repair_symlink(dep));
-                }
-            } else {
-                entry
-                    .operations
-                    .extend(skipped_repairs(s, "parent operation did not complete"));
+                .all(|o| o.status == OperationStatus::Completed));
+            for dep in &s.dependent_operations {
+                entry.operations.push(repair_symlink(dep));
             }
             let repair_failed = entry
                 .operations
                 .iter()
-                .skip(1)
+                .filter(|o| o.operation == OperationKind::RepairSymlink)
                 .any(|o| o.status == OperationStatus::Failed);
             entry.result = if repair_failed {
                 ExecutionStatus::Partial
@@ -462,13 +530,14 @@ enum ContentCheck {
     Required,
 }
 
-/// Re-stat the source immediately before execution and compare identity and
-/// size to the analysis-time provenance. Identity is host-native (Unix
-/// `st_dev` + `st_ino`, Windows volume serial + file index). Only mtime drift
-/// is tolerated and only when full content identity is confirmed; moves
-/// re-verify by re-hash when one was recorded, deletes always require the
-/// recorded full-content hash. This is the single content-hash pass per
-/// operation.
+/// Re-stat the source immediately before execution and compare identity,
+/// size, and modification time to the analysis-time provenance. Identity is
+/// host-native (Unix `st_dev` + `st_ino`, Windows volume serial + file index).
+/// Only mtime drift is tolerated, and only when the full content hash is
+/// re-verified: deletes always require a recorded hash, moves re-verify the
+/// hash analysis recorded (which it does for every file below the fast-path
+/// threshold). A drifted mtime with no recorded hash is refused rather than
+/// assumed safe. This is the single content-hash pass per operation.
 fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(), String> {
     let meta =
         std::fs::symlink_metadata(src).map_err(|e| format!("source missing or unreadable: {e}"))?;
@@ -481,12 +550,22 @@ fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(
     if id.dev != p.dev || id.ino != p.ino {
         return Err("source identity changed since analysis; re-analysis required".into());
     }
+    if !meta.is_file() && !meta.is_dir() {
+        return Err("source is no longer a regular file or directory; re-analysis required".into());
+    }
     if meta.len() != p.size {
         return Err("source size changed since analysis; re-analysis required".into());
     }
-    // If only mtime moved and full content hash is available, allow the
-    // operation; delete always requires it, and move verification
-    // re-hashes full content on cross-filesystem paths.
+    // Zero means analysis recorded no mtime; treat that as "unknown" rather
+    // than as drift, since provenance built without it cannot be compared.
+    let mtime_changed = match meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        Some(d) => p.mtime_ns != 0 && d.as_nanos() as i128 != p.mtime_ns,
+        None => false,
+    };
     match (&p.full_hash, check) {
         (Some(recorded), _) => {
             let now = hash::hash_file_full(src)
@@ -497,6 +576,11 @@ fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(
         }
         (None, ContentCheck::Required) => {
             return Err("no recorded full-content hash; delete refused (re-analyze)".into());
+        }
+        (None, ContentCheck::Optional) if mtime_changed => {
+            return Err(
+                "source changed since analysis (no recorded hash); re-analysis required".into(),
+            );
         }
         (None, ContentCheck::Optional) => {}
     }

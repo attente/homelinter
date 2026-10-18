@@ -3,11 +3,11 @@
 //! Validation is deterministic and idempotent over the provided slice. It
 //! detects destination collisions (every suggestion in a collision set is
 //! rejected when multiple moves share a destination), moves that would
-//! write into a planned delete or another move's target, deletes of
-//! objects another suggestion depends on, and objects whose identity could
-//! not be captured at scan time. Rejected suggestions are marked
-//! `Rejected` with a machine-readable reason; execution skips them without
-//! failing the batch.
+//! write into a planned delete, another move's target, or the link path a
+//! dependent operation rewrites, moves without a destination, and objects
+//! whose identity could not be captured at scan time. Rejected suggestions
+//! are marked `Rejected` with a machine-readable reason; execution skips
+//! them without failing the batch.
 //!
 //! Suggestions whose provider metadata is still in flight
 //! (`metadata_pending`) may be excluded with `skip_pending`: their
@@ -43,6 +43,9 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
     let mut dest_claims: HashMap<String, Vec<usize>> = HashMap::new();
     let mut delete_targets: HashMap<String, usize> = HashMap::new();
     let mut source_keys: HashMap<String, usize> = HashMap::new();
+    // Link paths rewritten by dependent operations: a move onto one would
+    // overwrite the link the repair is about to write, so both conflict.
+    let mut dependent_paths: HashMap<String, usize> = HashMap::new();
 
     for (i, s) in items.iter().enumerate() {
         if skip_pending && s.metadata_pending {
@@ -62,6 +65,9 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
             }
         }
         source_keys.insert(path::sort_key(Path::new(&s.target)), i);
+        for dep in &s.dependent_operations {
+            dependent_paths.insert(path::sort_key(Path::new(&dep.link_path)), i);
+        }
     }
 
     let mut rejected: Vec<String> = Vec::new();
@@ -75,46 +81,56 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
         }
         match s.suggestion_type {
             SuggestionType::Move => {
-                let Some(new_path) = &s.new_path else {
-                    continue;
-                };
-                let dest = new_path.clone();
-                let dest_key = path::sort_key(Path::new(&dest));
-                // Compare with the platform's path-collision rules rather
-                // than raw strings, so a case-only no-op is caught on a
-                // case-folding platform too.
-                if sort_keys[i] == dest_key {
-                    reasons.push("noop_move".to_string());
+                // A move is unusable without a destination; reject it instead
+                // of leaving it pending to fail at execution time.
+                if s.new_path.is_none() {
+                    reasons.push("missing_destination".to_string());
                 }
-                let name = std::path::Path::new(&dest)
-                    .file_name()
-                    .and_then(|n| n.to_str());
-                match name {
-                    Some(n) if homelinter_model::format::validate_file_name_segment(n) => {}
-                    _ => reasons.push("invalid_destination_segment".to_string()),
-                }
-                // Every suggestion in a collision set is rejected: no
-                // arbitrary survivor is picked, so the user must resolve
-                // the conflict. The reason names every partner via its
-                // source sort key.
-                if let Some(others) = dest_claims.get(&dest_key) {
-                    let partners: Vec<&str> = others
-                        .iter()
-                        .filter(|&&j| j != i)
-                        .map(|&j| sort_keys[j].as_str())
-                        .collect();
-                    if !partners.is_empty() {
-                        reasons.push(format!("destination_collision:also={}", partners.join(",")));
+                if let Some(dest) = s.new_path.clone() {
+                    let dest_key = path::sort_key(Path::new(&dest));
+                    // Compare with the platform's path-collision rules rather
+                    // than raw strings, so a case-only no-op is caught on a
+                    // case-folding platform too.
+                    if sort_keys[i] == dest_key {
+                        reasons.push("noop_move".to_string());
                     }
-                }
-                if delete_targets.contains_key(&dest_key) {
-                    reasons.push("destination_is_planned_delete".to_string());
-                }
-                if let Some(&j) = source_keys.get(&dest_key).filter(|&&j| j != i) {
-                    reasons.push(format!(
-                        "destination_is_planned_source:also={}",
-                        sort_keys[j]
-                    ));
+                    let name = std::path::Path::new(&dest)
+                        .file_name()
+                        .and_then(|n| n.to_str());
+                    match name {
+                        Some(n) if homelinter_model::format::validate_file_name_segment(n) => {}
+                        _ => reasons.push("invalid_destination_segment".to_string()),
+                    }
+                    // Every suggestion in a collision set is rejected: no
+                    // arbitrary survivor is picked, so the user must resolve
+                    // the conflict. The reason names every partner via its
+                    // source sort key.
+                    if let Some(others) = dest_claims.get(&dest_key) {
+                        let partners: Vec<&str> = others
+                            .iter()
+                            .filter(|&&j| j != i)
+                            .map(|&j| sort_keys[j].as_str())
+                            .collect();
+                        if !partners.is_empty() {
+                            reasons
+                                .push(format!("destination_collision:also={}", partners.join(",")));
+                        }
+                    }
+                    if delete_targets.contains_key(&dest_key) {
+                        reasons.push("destination_is_planned_delete".to_string());
+                    }
+                    if let Some(&j) = source_keys.get(&dest_key).filter(|&&j| j != i) {
+                        reasons.push(format!(
+                            "destination_is_planned_source:also={}",
+                            sort_keys[j]
+                        ));
+                    }
+                    if let Some(&j) = dependent_paths.get(&dest_key).filter(|&&j| j != i) {
+                        reasons.push(format!(
+                            "destination_is_dependent_operation:also={}",
+                            sort_keys[j]
+                        ));
+                    }
                 }
             }
             SuggestionType::Delete => {
@@ -138,6 +154,7 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
 mod tests {
     use super::*;
     use homelinter_model::asset_kind::AssetKind;
+    use homelinter_model::suggestion::{DependentOpType, DependentOperation};
     use std::path::Path;
 
     fn move_suggestion(target: &str, new_path: &str) -> Suggestion {
@@ -279,6 +296,45 @@ mod tests {
         ];
         let rejected = validate_batch(&mut items, false);
         assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn rejects_move_without_a_destination() {
+        // A move that carries no destination is rejected rather than left
+        // pending to fail at execution time.
+        let mut items = vec![move_suggestion("/a/x.jpg", "/d/x.jpg")];
+        items[0].new_path = None;
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(items[0].status, SuggestionStatus::Rejected);
+        assert!(items[0]
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("missing_destination"));
+    }
+
+    #[test]
+    fn rejects_move_onto_a_dependent_operation_link_path() {
+        // A move whose destination is the link path another suggestion's
+        // dependent repair rewrites would race that repair.
+        let mut repairer = move_suggestion("/a/photo.jpg", "/d/photo.jpg");
+        repairer.dependent_operations.push(DependentOperation {
+            op_type: DependentOpType::RepairSymlink,
+            link_path: "/d/link.jpg".into(),
+            recorded_target: "../a/photo.jpg".into(),
+            replacement_target: "photo.jpg".into(),
+            recorded_target_relative: true,
+            provenance: Default::default(),
+        });
+        let mut items = vec![repairer, move_suggestion("/a/other.jpg", "/d/link.jpg")];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(items[1].status, SuggestionStatus::Rejected);
+        let reason = items[1].rejection_reason.as_deref().unwrap();
+        assert!(reason.contains("destination_is_dependent_operation:also=/a/photo.jpg"));
+        // The suggestion that owns the link is not rejected for it.
+        assert_eq!(items[0].status, SuggestionStatus::Pending);
     }
 
     #[test]

@@ -353,6 +353,205 @@ fn delete_follows_a_keeper_moved_in_the_same_batch() {
     std::fs::remove_dir_all(&base).ok();
 }
 
+#[test]
+fn move_refuses_an_mtime_change_without_a_recorded_hash() {
+    let base = tmpdir("mtimechanged");
+    let src = base.join("a.jpg");
+    write(&src, b"content");
+    let provenance = provenance_for(&src);
+    let mut mv = Suggestion::new_move(
+        AssetKind::Photo,
+        &src,
+        &base.join("dst/a.jpg"),
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance,
+    );
+    mv.selected = true;
+    // Same size and identity, different mtime, no hash on record: analysis
+    // cannot be trusted, so the move is refused rather than guessed at.
+    let stamp = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000));
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(stamp)
+        .unwrap();
+
+    let mut items = vec![mv];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert!(src.exists());
+    let detail = format!("{:?}", report.entries[0]);
+    assert!(
+        detail.contains("re-analysis required"),
+        "unexpected detail: {detail}"
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn move_tolerates_an_mtime_change_when_the_recorded_hash_matches() {
+    let base = tmpdir("mtimehash");
+    let src = base.join("a.jpg");
+    write(&src, b"content");
+    let mut provenance = provenance_for(&src);
+    provenance.full_hash = Some(hash::hash_file_full(&src).unwrap());
+    let mut mv = Suggestion::new_move(
+        AssetKind::Photo,
+        &src,
+        &base.join("dst/a.jpg"),
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance,
+    );
+    mv.selected = true;
+    let stamp = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000));
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(stamp)
+        .unwrap();
+
+    let mut items = vec![mv];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert!(base.join("dst/a.jpg").exists());
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn relocations_cover_executed_moves_only() {
+    let base = tmpdir("relocations");
+    let a = base.join("a.bin");
+    let b = base.join("b.bin");
+    write(&a, b"a");
+    write(&b, b"b");
+    let mut executed = Suggestion::new_move(
+        AssetKind::Document,
+        &a,
+        &base.join("dst/a.bin"),
+        String::new(),
+        Default::default(),
+        vec![],
+        provenance_for(&a),
+    );
+    executed.status = SuggestionStatus::Executed;
+    // A pending move has not relocated anything yet.
+    let mut pending = Suggestion::new_move(
+        AssetKind::Document,
+        &b,
+        &base.join("dst/b.bin"),
+        String::new(),
+        Default::default(),
+        vec![],
+        provenance_for(&b),
+    );
+    pending.status = SuggestionStatus::Pending;
+
+    let map = homelinter_execute::relocations_of(&[executed, pending]);
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get(&a), Some(&base.join("dst/a.bin")));
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn keeper_move_republishes_the_delete_for_a_later_batch() {
+    use std::os::unix::fs::symlink;
+
+    let base = tmpdir("keepermovesplit");
+    let keeper = base.join("Downloads/zeta.bin");
+    let duplicate = base.join("Downloads/beta.bin");
+    let keeper_dst = base.join("Pictures/zeta.bin");
+    let link = base.join("Photos/link.bin");
+    write(&keeper, b"same-content");
+    write(&duplicate, b"same-content");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&keeper, &link).unwrap();
+
+    let mut mv = Suggestion::new_move(
+        AssetKind::Document,
+        &keeper,
+        &keeper_dst,
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&keeper),
+    );
+    mv.selected = true;
+
+    let mut del = Suggestion::new_delete(
+        AssetKind::Document,
+        &duplicate,
+        "duplicate".into(),
+        std::collections::BTreeMap::from([
+            (
+                "duplicate_of".to_string(),
+                serde_json::Value::String(keeper.to_string_lossy().into_owned()),
+            ),
+            // A recorded size lets the reason text be rewritten with the
+            // keeper's current path.
+            ("size".to_string(), serde_json::Value::from(12u64)),
+        ]),
+        vec![homelinter_model::suggestion::DependentOperation {
+            op_type: homelinter_model::suggestion::DependentOpType::RepairSymlink,
+            link_path: link.to_string_lossy().into_owned(),
+            recorded_target: keeper.to_string_lossy().into_owned(),
+            replacement_target: keeper.to_string_lossy().into_owned(),
+            recorded_target_relative: false,
+            provenance: Default::default(),
+        }],
+        provenance_for(&duplicate),
+    );
+    del.provenance.full_hash = Some(hash::hash_file_full(&duplicate).unwrap());
+
+    // Batch 1 executes only the keeper's move. The delete was not selected,
+    // yet its recorded keeper and its repair must follow the keeper.
+    let delete_id = del.id.clone();
+    let mut items = vec![mv, del];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries.len(), 1, "only the selected move runs");
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert!(items[0].status == SuggestionStatus::Executed);
+    assert!(items[1].status == SuggestionStatus::Pending);
+    let keeper_dst_str = keeper_dst.to_string_lossy().into_owned();
+    assert_eq!(
+        items[1].metadata["duplicate_of"].as_str(),
+        Some(keeper_dst_str.as_str()),
+        "the delete's record follows the keeper"
+    );
+    assert!(
+        items[1].reason.contains(&keeper_dst_str),
+        "the reason names the keeper's current path: {}",
+        items[1].reason
+    );
+    assert_eq!(
+        items[1].dependent_operations[0].replacement_target,
+        keeper_dst_str
+    );
+
+    // Batch 2 executes the delete on the same session state and succeeds
+    // without any relocation map, because the record already points at the
+    // keeper's executed destination.
+    items[1].selected = true;
+    let report = execute_batch(&mut items, &base, true);
+    let entry = report
+        .entries
+        .iter()
+        .find(|e| e.suggestion_id == delete_id)
+        .expect("the delete ran");
+    assert_eq!(entry.result, ExecutionStatus::Executed);
+    assert!(!duplicate.exists(), "duplicate removed in a later batch");
+    assert_eq!(std::fs::read_link(&link).unwrap(), keeper_dst);
+    std::fs::remove_dir_all(&base).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn delete_repair_follows_a_keeper_moved_later_in_sort_order() {

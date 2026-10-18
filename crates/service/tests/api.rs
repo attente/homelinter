@@ -708,6 +708,93 @@ async fn execute_repoints_a_duplicate_repair_at_the_moved_keeper() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execute_follows_a_keeper_moved_in_an_earlier_batch() {
+    use std::os::unix::fs::symlink;
+
+    let env = Env::new("exec_keeper_split");
+    let app = env.service();
+    let downloads = env.home.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let a = downloads.join("beta.bin");
+    let b = downloads.join("zeta.bin");
+    std::fs::write(&a, b"same-content-xyz").unwrap();
+    std::fs::write(&b, b"same-content-xyz").unwrap();
+    let old = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000));
+    let new = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_001_000));
+    std::fs::File::open(&a).unwrap().set_times(old).unwrap();
+    std::fs::File::open(&b).unwrap().set_times(new).unwrap();
+    let link = env.home.join("link.bin");
+    symlink(&b, &link).unwrap();
+
+    scan_to_ready(&app, &env.home).await;
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let items = list["items"].as_array().unwrap();
+    let mv = items
+        .iter()
+        .find(|s| s["type"] == "move")
+        .expect("the keeper's move suggestion");
+    let mv_id = mv["id"].as_str().unwrap().to_string();
+    let mv_src = PathBuf::from(mv["target"].as_str().unwrap());
+    let mv_dst = PathBuf::from(mv["new_path"].as_str().unwrap());
+    let del = items
+        .iter()
+        .find(|s| s["type"] == "delete")
+        .expect("the duplicate delete suggestion");
+    let del_id = del["id"].as_str().unwrap().to_string();
+    let del_target = PathBuf::from(del["target"].as_str().unwrap());
+    assert_eq!(
+        del["metadata"]["duplicate_of"],
+        json!(mv_src.to_string_lossy())
+    );
+
+    // Batch 1: the keeper's move alone, leaving the duplicate pending.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/execute",
+        Some(json!({ "ids": [mv_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+    assert!(!mv_src.exists());
+    assert!(mv_dst.exists());
+
+    // The session's delete record already follows the keeper, so a later
+    // batch can still confirm it instead of failing with "re-analysis
+    // required".
+    let (_, after) = request(&app, "GET", &format!("/api/v1/suggestions/{del_id}"), None).await;
+    assert_eq!(
+        after["metadata"]["duplicate_of"],
+        json!(mv_dst.to_string_lossy()),
+        "the duplicate delete follows the moved keeper: {after}"
+    );
+    assert!(
+        after["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&*mv_dst.to_string_lossy()),
+        "the reason names the keeper's current path: {after}"
+    );
+
+    // Batch 2: the duplicate delete.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/execute",
+        Some(json!({ "ids": [del_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+
+    assert!(!del_target.exists(), "duplicate removed in a later batch");
+    assert_eq!(std::fs::read_link(&link).unwrap(), mv_dst);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     let env = Env::new("exec");
     let app = env.service();
