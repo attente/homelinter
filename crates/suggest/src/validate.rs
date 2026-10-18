@@ -185,6 +185,42 @@ mod tests {
     }
 
     #[test]
+    fn skip_pending_defers_pending_delete_targets() {
+        // A pending delete's target must not count as a planned delete when
+        // validation is skipping pending suggestions: the delete may vanish
+        // when its metadata resolves, so a move into that path is not
+        // rejected on its account. With pending suggestions included, the
+        // existing destination_is_planned_delete rule applies.
+        let delete = Suggestion::new_delete(
+            AssetKind::Photo,
+            Path::new("/x/y.bin"),
+            "dup".into(),
+            Default::default(),
+            Vec::new(),
+            homelinter_model::suggestion::Provenance {
+                identity_available: true,
+                ..Default::default()
+            },
+        );
+
+        let mut items = vec![delete.clone(), move_suggestion("/a/z.jpg", "/x/y.bin")];
+        items[0].metadata_pending = true;
+        let rejected = validate_batch(&mut items, true);
+        assert!(rejected.is_empty());
+        assert_eq!(items[1].status, SuggestionStatus::Pending);
+
+        let mut items = vec![delete, move_suggestion("/a/z.jpg", "/x/y.bin")];
+        items[0].metadata_pending = true;
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert!(items[1]
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("destination_is_planned_delete"));
+    }
+
+    #[test]
     fn rejects_every_suggestion_in_a_collision_set() {
         // Three moves to one destination: every member is rejected and its
         // reason names the two partners (never itself) by source sort key.
