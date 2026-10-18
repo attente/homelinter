@@ -898,7 +898,7 @@ async fn export_script(State(app): State<AppHandle>, Json(body): Json<ExportBody
         request_ids
             .iter()
             .filter_map(|id| sess.suggestion_by_id(id).cloned())
-            .filter(|s| s.status == SuggestionStatus::Pending)
+            .filter(exportable)
             .collect()
     };
 
@@ -935,6 +935,14 @@ async fn export_script(State(app): State<AppHandle>, Json(body): Json<ExportBody
         HeaderValue::from_str(&count.to_string()).unwrap_or(HeaderValue::from_static("0")),
     );
     response
+}
+
+/// A suggestion may be exported only while it is still pending execution
+/// and no provider metadata is outstanding: a metadata-pending suggestion is
+/// never exported (it is also never executed), because its destination is
+/// not final yet.
+fn exportable(s: &Suggestion) -> bool {
+    s.status == SuggestionStatus::Pending && !s.metadata_pending
 }
 
 fn write_script_atomically(dest: &std::path::Path, script: &str) -> Result<(), ApiError> {
@@ -1128,4 +1136,45 @@ fn sse_event(ev: ServerEvent) -> SseEvent {
     SseEvent::default()
         .event(ev.name())
         .data(serde_json::to_string(&ev.data()).unwrap_or_else(|_| "{}".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homelinter_model::asset_kind::AssetKind;
+    use homelinter_model::suggestion::Provenance;
+    use std::path::Path;
+
+    fn pending_move() -> Suggestion {
+        Suggestion::new_move(
+            AssetKind::Photo,
+            Path::new("/a/b.jpg"),
+            Path::new("/c/b.jpg"),
+            String::new(),
+            Default::default(),
+            Vec::new(),
+            Provenance::default(),
+        )
+    }
+
+    #[test]
+    fn metadata_pending_is_not_exportable() {
+        let mut s = pending_move();
+        assert!(exportable(&s), "a pending suggestion is exportable");
+        s.metadata_pending = true;
+        assert!(
+            !exportable(&s),
+            "a metadata-pending suggestion is never exported"
+        );
+        s.metadata_pending = false;
+        for status in [
+            SuggestionStatus::Rejected,
+            SuggestionStatus::Executed,
+            SuggestionStatus::Failed,
+            SuggestionStatus::Skipped,
+        ] {
+            s.status = status;
+            assert!(!exportable(&s), "only pending suggestions are exported");
+        }
+    }
 }
