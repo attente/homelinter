@@ -116,7 +116,8 @@ pub fn same_filesystem(a: &Path, b: &Path) -> Result<bool, String> {
 /// tree when `src` and `dst` are on different filesystems:
 ///
 /// 1. copy to a temporary object in the destination filesystem,
-/// 2. verify it against the source with the full-content SHA-256,
+/// 2. verify it against the source: full-content SHA-256 per file and an
+///    exact relative-path-set comparison for trees,
 /// 3. publish by no-replace rename to its final name,
 /// 4. delete the source only after the copy is published.
 ///
@@ -130,6 +131,9 @@ pub fn cross_fs_move(src: &Path, dst: &Path) -> Result<(), String> {
     if meta.is_dir() {
         let tmp = temp_sibling(dst, "dir")?;
         copy_tree_verified(src, &tmp)?;
+        // Structural completeness: the copy's relative path set must match
+        // the source's exactly before anything is published or deleted.
+        verify_tree_completeness(src, &tmp)?;
         // Publish: the temporary directory becomes the destination.
         rename_no_replace(&tmp, dst)?;
         // The verified copy is in place at its final name; only now is the
@@ -232,7 +236,8 @@ pub fn copy_tree_verified(src: &Path, dst: &Path) -> Result<(), String> {
         std::fs::read_dir(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
     std::fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read entry of {}: {e}", src.display()))?;
         let name = entry.file_name();
         let child_src = src.join(&name);
         let child_dst = dst.join(&name);
@@ -262,6 +267,70 @@ pub fn copy_tree_verified(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every entry under `root` as a path relative to `root`, without
+/// following symlinks. Directories contribute their own entry and their
+/// children; unreadable entries are errors, never silently skipped.
+fn tree_entries(root: &Path) -> Result<std::collections::BTreeSet<PathBuf>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![(root.to_path_buf(), PathBuf::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| format!("cannot read entry of {}: {e}", dir.display()))?;
+            let name = entry.file_name();
+            let child_rel = rel.join(&name);
+            let ft = entry
+                .file_type()
+                .map_err(|e| format!("cannot stat {}: {e}", dir.join(&name).display()))?;
+            if ft.is_dir() {
+                stack.push((dir.join(&name), child_rel.clone()));
+            }
+            out.insert(child_rel);
+        }
+    }
+    Ok(out)
+}
+
+/// Compare the relative path sets of a source tree and its copy. Used as
+/// the structural half of cross-filesystem verification; content is
+/// covered per file by `copy_file_verified`.
+fn verify_tree_completeness(src: &Path, copy: &Path) -> Result<(), String> {
+    let src_set = tree_entries(src)?;
+    let copy_set = tree_entries(copy)?;
+    if src_set == copy_set {
+        return Ok(());
+    }
+    let missing: Vec<String> = src_set
+        .difference(&copy_set)
+        .take(3)
+        .map(|p| p.display().to_string())
+        .collect();
+    let unexpected: Vec<String> = copy_set
+        .difference(&src_set)
+        .take(3)
+        .map(|p| p.display().to_string())
+        .collect();
+    Err(format!(
+        "verification failed: copy {} does not match source {} ({} missing entries, {} unexpected entries; missing: {}, unexpected: {})",
+        copy.display(),
+        src.display(),
+        src_set.difference(&copy_set).count(),
+        copy_set.difference(&src_set).count(),
+        if missing.is_empty() {
+            "none".to_string()
+        } else {
+            missing.join(", ")
+        },
+        if unexpected.is_empty() {
+            "none".to_string()
+        } else {
+            unexpected.join(", ")
+        }
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -306,5 +375,77 @@ pub fn replace_symlink(
             "symlink replacement is not implemented on this platform: {}",
             link_path.display()
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hl-fsops-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn build_tree(root: &Path) {
+        std::fs::create_dir_all(root.join("nested/deep")).unwrap();
+        std::fs::write(root.join("a.bin"), b"a").unwrap();
+        std::fs::write(root.join("nested/b.bin"), b"bb").unwrap();
+    }
+
+    #[test]
+    fn tree_entries_lists_dirs_and_files_relative() {
+        let root = tmpdir("entries");
+        build_tree(&root);
+        let set = tree_entries(&root).unwrap();
+        let rel: Vec<String> = set.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(rel, vec!["a.bin", "nested", "nested/b.bin", "nested/deep"]);
+    }
+
+    #[test]
+    fn tree_entries_reports_unreadable_roots() {
+        let root = tmpdir("missing").join("nope");
+        let err = tree_entries(&root).unwrap_err();
+        assert!(err.contains("cannot read"), "{err}");
+    }
+
+    #[test]
+    fn completeness_accepts_an_exact_copy_and_rejects_differences() {
+        let root = tmpdir("complete");
+        let src = root.join("src");
+        let copy = root.join("copy");
+        build_tree(&src);
+        copy_tree_verified(&src, &copy).unwrap();
+        verify_tree_completeness(&src, &copy).unwrap();
+
+        std::fs::remove_file(copy.join("nested/b.bin")).unwrap();
+        let err = verify_tree_completeness(&src, &copy).unwrap_err();
+        assert!(err.contains("1 missing entries"), "{err}");
+        assert!(err.contains("nested/b.bin"), "{err}");
+    }
+
+    #[test]
+    fn completeness_rejects_unexpected_entries() {
+        let root = tmpdir("unexpected");
+        let src = root.join("src");
+        let copy = root.join("copy");
+        build_tree(&src);
+        copy_tree_verified(&src, &copy).unwrap();
+        std::fs::write(copy.join("stray.bin"), b"x").unwrap();
+        let err = verify_tree_completeness(&src, &copy).unwrap_err();
+        assert!(err.contains("1 unexpected entries"), "{err}");
+        assert!(err.contains("stray.bin"), "{err}");
     }
 }
