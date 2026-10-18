@@ -80,7 +80,10 @@ pub fn validate_batch(items: &mut [Suggestion], skip_pending: bool) -> Vec<Strin
                 };
                 let dest = new_path.clone();
                 let dest_key = path::sort_key(Path::new(&dest));
-                if s.target == dest {
+                // Compare with the platform's path-collision rules rather
+                // than raw strings, so a case-only no-op is caught on a
+                // case-folding platform too.
+                if sort_keys[i] == dest_key {
                     reasons.push("noop_move".to_string());
                 }
                 let name = std::path::Path::new(&dest)
@@ -276,6 +279,33 @@ mod tests {
         ];
         let rejected = validate_batch(&mut items, false);
         assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn rejects_noop_move() {
+        let mut items = vec![move_suggestion("/a/x.jpg", "/a/x.jpg")];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert!(items[0]
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("noop_move"));
+    }
+
+    // Compile-time gated: only the branch for the build target runs, so
+    // this is exercised only by a Windows test run.
+    #[cfg(windows)]
+    #[test]
+    fn rejects_case_only_noop_move_on_windows() {
+        let mut items = vec![move_suggestion("/a/X.jpg", "/a/x.jpg")];
+        let rejected = validate_batch(&mut items, false);
+        assert_eq!(rejected.len(), 1);
+        assert!(items[0]
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("noop_move"));
     }
 
     #[test]
