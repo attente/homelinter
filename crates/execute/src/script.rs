@@ -121,7 +121,18 @@ fn export_posix_delete(s: &Suggestion, out: &mut String) -> Result<(), String> {
     // it the native executor refuses and the export refuses too.
     if let Some(hash_hex) = s.provenance.full_hash {
         let expected = hex::encode(hash_hex);
-        out.push_str(&format!("actual=$(sha256sum {target} | cut -d' ' -f1)\n"));
+        // `sha256sum` is GNU coreutils and absent on stock macOS; `shasum`
+        // ships with macOS (and most Perl installations). Pick whichever
+        // exists so the exported delete is portable across both targets.
+        out.push_str("if command -v sha256sum >/dev/null 2>&1; then\n");
+        out.push_str(&format!("  actual=$(sha256sum {target} | cut -d' ' -f1)\n"));
+        out.push_str("elif command -v shasum >/dev/null 2>&1; then\n");
+        out.push_str(&format!(
+            "  actual=$(shasum -a 256 {target} | cut -d' ' -f1)\n"
+        ));
+        out.push_str("else\n");
+        out.push_str("  abort \"no SHA-256 tool available (need sha256sum or shasum)\"\n");
+        out.push_str("fi\n");
         out.push_str(&format!(
             "[ \"$actual\" = \"{expected}\" ] || abort \"content changed since analysis: {target}\"\n"
         ));
@@ -269,6 +280,23 @@ mod tests {
             Default::default(),
         );
         assert!(export_host(std::slice::from_ref(&s)).is_err());
+    }
+
+    #[test]
+    fn posix_delete_hashes_with_a_portable_tool() {
+        let mut s = Suggestion::new_delete(
+            AssetKind::Document,
+            std::path::Path::new("/x/y.bin"),
+            "dup".into(),
+            Default::default(),
+            Vec::new(),
+            Default::default(),
+        );
+        s.provenance.full_hash = Some([0xab; 32]);
+        let script = export_script(std::slice::from_ref(&s), "linux").unwrap();
+        assert!(script.contains("command -v sha256sum"));
+        assert!(script.contains("shasum -a 256"));
+        assert!(script.contains(&hex::encode([0xab; 32])));
     }
 
     #[test]
