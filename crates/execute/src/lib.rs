@@ -12,7 +12,9 @@
 //!   moves use the verified copy-and-delete protocol.
 //! - Delete only ever removes a file whose duplicate relationship was
 //!   confirmed by full-content hash at analysis time; the executor re-verifies
-//!   the hash immediately before deletion.
+//!   the hash and confirms that the recorded keeper still exists with that
+//!   same content immediately before deletion, following a keeper that was
+//!   already moved earlier in the same batch.
 //! - Dependent symlink repairs run only after their parent succeeds, never
 //!   follow links, and are re-validated immediately before repair.
 //!
@@ -25,6 +27,7 @@ mod script;
 
 pub use script::{export_host, export_script};
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use homelinter_model::hash;
@@ -46,6 +49,10 @@ pub fn execute_batch(
     // validation and dependency order identical to generation.
     items.sort_by_key(|a| a.sort_key());
 
+    // Keeper relocations from moves that already completed in this batch, so
+    // a duplicate delete can still find its keeper after the keeper moved.
+    let mut relocated: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+
     for s in items.iter_mut() {
         if selected_only && !s.selected {
             continue;
@@ -53,7 +60,7 @@ pub fn execute_batch(
         if s.status != SuggestionStatus::Pending {
             continue;
         }
-        let mut entry = execute_one(s);
+        let mut entry = execute_one(s, &relocated);
         // Classify the entry from its operations: a failed parent is a
         // failure; a completed parent with one or more failed dependent
         // repairs is partial (executed, flag raised); nothing attempted is
@@ -88,12 +95,17 @@ pub fn execute_batch(
             ExecutionStatus::Failed => SuggestionStatus::Failed,
             ExecutionStatus::Skipped => SuggestionStatus::Skipped,
         };
+        if s.suggestion_type == SuggestionType::Move && s.status == SuggestionStatus::Executed {
+            if let Some(to) = s.new_path_path() {
+                relocated.insert(s.target_path().to_path_buf(), to.to_path_buf());
+            }
+        }
         report.entries.push(entry);
     }
     report
 }
 
-fn execute_one(s: &mut Suggestion) -> ReportEntry {
+fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> ReportEntry {
     let operations: Vec<OperationOutcome> = Vec::new();
     let mut entry = ReportEntry {
         suggestion_id: s.id.clone(),
@@ -103,7 +115,7 @@ fn execute_one(s: &mut Suggestion) -> ReportEntry {
 
     let parent = match s.suggestion_type {
         SuggestionType::Move => run_move(s),
-        SuggestionType::Delete => run_delete(s),
+        SuggestionType::Delete => run_delete(s, relocated),
     };
 
     match parent {
@@ -221,7 +233,10 @@ fn run_move(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
 // Deletes
 // ---------------------------------------------------------------------------
 
-fn run_delete(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
+fn run_delete(
+    s: &Suggestion,
+    relocated: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<Vec<OperationOutcome>, String> {
     let src = s.target_path();
 
     // --- Preflight: identity of the object itself, plus the re-confirmed
@@ -230,6 +245,12 @@ fn run_delete(s: &Suggestion) -> Result<Vec<OperationOutcome>, String> {
     // hash captured during analysis; this is the only hash pass, so the
     // preflight does it and no second pass follows. ---
     preflight_source(src, s, ContentCheck::Required)?;
+
+    // --- Confirm the keeper: the duplicate relationship is only valid while
+    // the recorded original still exists with the duplicate's content. A
+    // keeper that already moved in this batch is looked up at its new path;
+    // a keeper that vanished or changed refuses the delete. ---
+    confirm_keeper(s, relocated)?;
 
     std::fs::remove_file(src).map_err(|e| format!("cannot delete {}: {e}", src.display()))?;
 
@@ -288,6 +309,56 @@ fn validate_link_before_repair(link_path: &Path, dep: &DependentOperation) -> Re
     let raw = std::fs::read_link(link_path).map_err(|e| format!("cannot read link: {e}"))?;
     if raw.to_string_lossy() != dep.recorded_target {
         return Err("link target changed since analysis; repair refused".into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Keeper confirmation
+// ---------------------------------------------------------------------------
+
+/// Confirm that the keeper recorded for a duplicate delete still holds the
+/// same full content. The delete's provenance hash is the group's verified
+/// content hash, so a keeper with that exact hash still justifies removing
+/// the redundant copy. Anything else (missing record, missing keeper, changed
+/// keeper, keeper equal to the target) refuses the delete and asks for
+/// re-analysis rather than risking the only remaining copy.
+fn confirm_keeper(s: &Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Result<(), String> {
+    let recorded = s
+        .metadata
+        .get("duplicate_of")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "delete has no recorded keeper; re-analysis required".to_string())?;
+    let recorded = Path::new(recorded);
+    if recorded == s.target_path() {
+        return Err("recorded keeper is the delete target; re-analysis required".into());
+    }
+    // A keeper moved earlier in this batch now lives at its new path; that is
+    // the only place its content can still be confirmed.
+    let keeper = relocated.get(recorded).map_or(recorded, PathBuf::as_path);
+    let expected = s
+        .provenance
+        .full_hash
+        .ok_or_else(|| "no recorded full-content hash; delete refused (re-analyze)".to_string())?;
+    let meta = std::fs::metadata(keeper).map_err(|e| {
+        format!(
+            "recorded keeper {} is missing or unreadable: {e}; re-analysis required",
+            keeper.display()
+        )
+    })?;
+    if !meta.is_file() {
+        return Err(format!(
+            "recorded keeper {} is not a regular file; re-analysis required",
+            keeper.display()
+        ));
+    }
+    let now = hash::hash_file_full(keeper)
+        .map_err(|e| format!("cannot hash keeper {}: {e}", keeper.display()))?;
+    if now != expected {
+        return Err(format!(
+            "recorded keeper {} no longer holds the duplicate content; re-analysis required",
+            keeper.display()
+        ));
     }
     Ok(())
 }

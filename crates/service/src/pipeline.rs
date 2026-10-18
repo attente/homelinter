@@ -494,6 +494,11 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     }
     batch.sort_by(|a, b| a.1.cmp(&b.1));
 
+    // Keeper relocations from moves that completed earlier in this batch, so
+    // a duplicate delete still finds its keeper after the keeper moved.
+    let mut relocated: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> =
+        std::collections::BTreeMap::new();
+
     let mut pos = 0usize;
     while pos < batch.len() {
         let (i, _) = batch[pos];
@@ -513,10 +518,27 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
             }
             break;
         }
-        let s = {
+        let mut s = {
             let sess = app.session.lock().await;
             sess.suggestions[i].clone()
         };
+        // Point a duplicate delete at its keeper's executed destination.
+        let mut keeper_moved_to: Option<String> = None;
+        if s.suggestion_type == homelinter_model::suggestion::SuggestionType::Delete {
+            let recorded = s
+                .metadata
+                .get("duplicate_of")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from);
+            if let Some(new_path) = recorded.as_ref().and_then(|p| relocated.get(p)) {
+                let new_path = new_path.to_string_lossy().into_owned();
+                s.metadata.insert(
+                    "duplicate_of".into(),
+                    serde_json::Value::String(new_path.clone()),
+                );
+                keeper_moved_to = Some(new_path);
+            }
+        }
         let (s, entry) = match run_one(&app, s, &root).await {
             Ok(v) => v,
             Err(reason) => {
@@ -550,6 +572,12 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         {
             let mut sess = app.session.lock().await;
             sess.suggestions[i].status = s.status;
+            if let Some(new_path) = &keeper_moved_to {
+                sess.suggestions[i].metadata.insert(
+                    "duplicate_of".into(),
+                    serde_json::Value::String(new_path.clone()),
+                );
+            }
             if s.status == SuggestionStatus::Executed {
                 let audit = AuditEntry {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -565,6 +593,16 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                     result: "executed".into(),
                 };
                 let _ = app.audit.append(&audit);
+            }
+        }
+        if s.suggestion_type == homelinter_model::suggestion::SuggestionType::Move
+            && s.status == SuggestionStatus::Executed
+        {
+            if let Some(dst) = &s.new_path {
+                relocated.insert(
+                    std::path::PathBuf::from(&s.target),
+                    std::path::PathBuf::from(dst),
+                );
             }
         }
         report.entries.push(entry);

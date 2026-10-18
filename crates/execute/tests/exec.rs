@@ -37,6 +37,13 @@ fn provenance_for(p: &Path) -> Provenance {
     prov
 }
 
+fn keeper_metadata(keeper: &Path) -> std::collections::BTreeMap<String, serde_json::Value> {
+    std::collections::BTreeMap::from([(
+        "duplicate_of".to_string(),
+        serde_json::Value::String(keeper.to_string_lossy().into_owned()),
+    )])
+}
+
 fn write(p: &Path, content: &[u8]) {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -160,7 +167,7 @@ fn delete_verifies_hash_then_removes() {
         AssetKind::Document,
         &b,
         "duplicate".into(),
-        Default::default(),
+        keeper_metadata(&a),
         vec![],
         provenance_for(&b),
     );
@@ -188,7 +195,7 @@ fn delete_refuses_when_content_changed() {
         AssetKind::Document,
         &b,
         "duplicate".into(),
-        Default::default(),
+        keeper_metadata(&a),
         vec![],
         provenance_for(&b),
     );
@@ -203,6 +210,142 @@ fn delete_refuses_when_content_changed() {
     let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
     assert!(b.exists(), "changed file must not be deleted");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+fn failed_delete_detail(report: &homelinter_model::suggestion::ExecutionReport) -> String {
+    let ops = &report.entries[0].operations;
+    assert_eq!(ops[0].status, OperationStatus::Failed);
+    ops[0].detail.clone().unwrap_or_default()
+}
+
+#[test]
+fn delete_refuses_when_keeper_is_missing() {
+    let base = tmpdir("delkeepergone");
+    let a = base.join("a.bin");
+    let b = base.join("b.bin");
+    write(&a, b"same-content");
+    write(&b, b"same-content");
+
+    let mut s = Suggestion::new_delete(
+        AssetKind::Document,
+        &b,
+        "duplicate".into(),
+        keeper_metadata(&a),
+        vec![],
+        provenance_for(&b),
+    );
+    s.provenance.full_hash = Some(hash::hash_file_full(&b).unwrap());
+    s.selected = true;
+
+    // The keeper disappears after analysis; deleting b would lose the content.
+    std::fs::remove_file(&a).unwrap();
+
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert!(b.exists(), "delete must not run without its keeper");
+    assert!(failed_delete_detail(&report).contains("keeper"));
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn delete_refuses_when_keeper_content_changed() {
+    let base = tmpdir("delkeeperchanged");
+    let a = base.join("a.bin");
+    let b = base.join("b.bin");
+    write(&a, b"same-content");
+    write(&b, b"same-content");
+
+    let mut s = Suggestion::new_delete(
+        AssetKind::Document,
+        &b,
+        "duplicate".into(),
+        keeper_metadata(&a),
+        vec![],
+        provenance_for(&b),
+    );
+    s.provenance.full_hash = Some(hash::hash_file_full(&b).unwrap());
+    s.selected = true;
+
+    // Same size keeps the keeper's identity check irrelevant; only its hash
+    // can tell that it no longer holds the shared content.
+    std::fs::write(&a, b"other-content").unwrap();
+
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert!(b.exists(), "delete must not run when the keeper changed");
+    assert!(failed_delete_detail(&report).contains("no longer holds"));
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn delete_without_recorded_keeper_is_refused() {
+    let base = tmpdir("delnokeeper");
+    let b = base.join("b.bin");
+    write(&b, b"same-content");
+
+    let mut s = Suggestion::new_delete(
+        AssetKind::Document,
+        &b,
+        "duplicate".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&b),
+    );
+    s.provenance.full_hash = Some(hash::hash_file_full(&b).unwrap());
+    s.selected = true;
+
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert!(
+        b.exists(),
+        "a delete without a recorded keeper must not run"
+    );
+    assert!(failed_delete_detail(&report).contains("no recorded keeper"));
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn delete_follows_a_keeper_moved_in_the_same_batch() {
+    let base = tmpdir("delkeepermoved");
+    let a = base.join("Downloads/alpha.bin");
+    let b = base.join("Downloads/beta.bin");
+    let keeper_dst = base.join("Pictures/2024/alpha.bin");
+    write(&a, b"same-content");
+    write(&b, b"same-content");
+
+    let mut mv = Suggestion::new_move(
+        AssetKind::Document,
+        &a,
+        &keeper_dst,
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&a),
+    );
+    mv.selected = true;
+
+    let mut del = Suggestion::new_delete(
+        AssetKind::Document,
+        &b,
+        "duplicate".into(),
+        keeper_metadata(&a),
+        vec![],
+        provenance_for(&b),
+    );
+    del.provenance.full_hash = Some(hash::hash_file_full(&b).unwrap());
+    del.selected = true;
+
+    let mut items = vec![mv, del];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(report.entries[1].result, ExecutionStatus::Executed);
+    assert!(keeper_dst.exists(), "keeper moved to its new path");
+    assert!(!a.exists());
+    assert!(!b.exists(), "duplicate removed after the keeper moved");
     std::fs::remove_dir_all(&base).ok();
 }
 
