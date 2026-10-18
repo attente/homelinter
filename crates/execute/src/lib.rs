@@ -10,17 +10,20 @@
 //!   operation fails with "re-analysis required"; nothing is re-queued or
 //!   re-analyzed automatically, a fresh scan rebuilds the suggestion. A
 //!   changed mtime is tolerated only when the recorded full-content hash
-//!   still matches; without a recorded hash (which analysis supplies for
-//!   every file below the fast-path threshold) drifted mtime is refused.
+//!   still matches; for a file above the fast-path threshold with no full
+//!   hash, the sampled hash must still match; with no recorded hash at all,
+//!   drifted mtime is refused.
 //! - A destination is never overwritten: moves use rename semantics that
 //!   fail when the destination exists (no-replace), and cross-filesystem
 //!   moves use the verified copy-and-delete protocol.
 //! - Delete only ever removes a file whose duplicate relationship was
 //!   confirmed by full-content hash at analysis time; the executor re-verifies
 //!   the hash and confirms that the recorded keeper still exists with that
-//!   same content immediately before deletion, following a keeper that was
-//!   moved earlier in the same batch (or, through the session's relocation
-//!   map, in an earlier batch) via `publish_keeper_relocation`.
+//!   same content immediately before deletion. A keeper that moved earlier -
+//!   in this batch or, because callers may execute one suggestion at a time,
+//!   in an earlier run whose move is still marked executed - is followed to
+//!   its current path (`relocations_of` seeds the map, and every executed
+//!   move republishes through `publish_keeper_relocation`).
 //! - Dependent symlink repairs run only after their parent succeeds, never
 //!   follow links, and are re-validated immediately before repair.
 //!
@@ -57,9 +60,15 @@ pub fn execute_batch(
     // before any delete needs to confirm or repair against it.
     items.sort_by_key(|a| (a.suggestion_type != SuggestionType::Move, a.sort_key()));
 
-    // Keeper relocations from moves that already completed in this batch, so
-    // a duplicate delete can still find its keeper after the keeper moved.
-    let mut relocated: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    // Keeper relocations from moves that already executed in earlier runs of
+    // this session (the service executes one suggestion per request), plus
+    // the ones this batch adds as it goes, so a duplicate delete always finds
+    // its keeper at its current path.
+    let mut relocated: BTreeMap<PathBuf, PathBuf> = relocations_of(items);
+    // Full-content hashes of keepers already confirmed in this batch. A group
+    // of duplicates shares one keeper, so this keeps one hash pass per keeper
+    // instead of one per delete.
+    let mut keeper_hashes: KeeperHashes = BTreeMap::new();
 
     for idx in 0..items.len() {
         // The keeper this delete recorded may be stale if the keeper was
@@ -84,7 +93,7 @@ pub fn execute_batch(
         }
         let (entry, landed) = {
             let s = &mut items[idx];
-            let entry = execute_one(s, &relocated);
+            let entry = execute_one(s, &relocated, &mut keeper_hashes);
             // Mirror the outcome onto the suggestion's own status for the
             // session model.
             s.status = match entry.result {
@@ -166,7 +175,15 @@ fn refresh_delete_reason(s: &mut Suggestion, keeper: &Path) {
     );
 }
 
-fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> ReportEntry {
+/// Full-content hashes of keepers confirmed during one execution batch,
+/// keyed by the keeper's current path.
+type KeeperHashes = BTreeMap<PathBuf, Result<[u8; 32], String>>;
+
+fn execute_one(
+    s: &mut Suggestion,
+    relocated: &BTreeMap<PathBuf, PathBuf>,
+    keeper_hashes: &mut KeeperHashes,
+) -> ReportEntry {
     let operations: Vec<OperationOutcome> = Vec::new();
     let mut entry = ReportEntry {
         suggestion_id: s.id.clone(),
@@ -176,7 +193,7 @@ fn execute_one(s: &mut Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Re
 
     let parent = match s.suggestion_type {
         SuggestionType::Move => run_move(s),
-        SuggestionType::Delete => run_delete(s, relocated),
+        SuggestionType::Delete => run_delete(s, relocated, keeper_hashes),
     };
 
     match parent {
@@ -339,6 +356,7 @@ fn run_move(s: &Suggestion) -> Result<ParentOutcome, String> {
 fn run_delete(
     s: &Suggestion,
     relocated: &BTreeMap<PathBuf, PathBuf>,
+    keeper_hashes: &mut KeeperHashes,
 ) -> Result<ParentOutcome, String> {
     let src = s.target_path();
 
@@ -353,7 +371,7 @@ fn run_delete(
     // the recorded original still exists with the duplicate's content. A
     // keeper that already moved in this batch is looked up at its new path;
     // a keeper that vanished or changed refuses the delete. ---
-    confirm_keeper(s, relocated)?;
+    confirm_keeper(s, relocated, keeper_hashes)?;
 
     std::fs::remove_file(src).map_err(|e| format!("cannot delete {}: {e}", src.display()))?;
 
@@ -480,7 +498,11 @@ fn remap_repair_target(
 /// the redundant copy. Anything else (missing record, missing keeper, changed
 /// keeper, keeper equal to the target) refuses the delete and asks for
 /// re-analysis rather than risking the only remaining copy.
-fn confirm_keeper(s: &Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Result<(), String> {
+fn confirm_keeper(
+    s: &Suggestion,
+    relocated: &BTreeMap<PathBuf, PathBuf>,
+    keeper_hashes: &mut KeeperHashes,
+) -> Result<(), String> {
     let recorded = recorded_keeper(s)
         .ok_or_else(|| "delete has no recorded keeper; re-analysis required".to_string())?;
     let recorded = recorded.as_path();
@@ -506,8 +528,20 @@ fn confirm_keeper(s: &Suggestion, relocated: &BTreeMap<PathBuf, PathBuf>) -> Res
             keeper.display()
         ));
     }
-    let now = hash::hash_file_full(keeper)
-        .map_err(|e| format!("cannot hash keeper {}: {e}", keeper.display()))?;
+    // Hash the keeper at most once per batch: every delete of the same keeper
+    // asks the same question about the same bytes.
+    let now = match keeper_hashes.get(keeper) {
+        Some(Ok(cached)) => *cached,
+        Some(Err(e)) => return Err(format!("cannot hash keeper {}: {e}", keeper.display())),
+        None => {
+            let computed = hash::hash_file_full(keeper);
+            keeper_hashes.insert(
+                keeper.to_path_buf(),
+                computed.as_ref().copied().map_err(|e| e.to_string()),
+            );
+            computed.map_err(|e| format!("cannot hash keeper {}: {e}", keeper.display()))?
+        }
+    };
     if now != expected {
         return Err(format!(
             "recorded keeper {} no longer holds the duplicate content; re-analysis required",
@@ -577,11 +611,28 @@ fn preflight_source(src: &Path, s: &Suggestion, check: ContentCheck) -> Result<(
         (None, ContentCheck::Required) => {
             return Err("no recorded full-content hash; delete refused (re-analyze)".into());
         }
-        (None, ContentCheck::Optional) if mtime_changed => {
-            return Err(
-                "source changed since analysis (no recorded hash); re-analysis required".into(),
-            );
-        }
+        // A file above the fast-path threshold that analysis never confirmed
+        // against a full-content hash records only the sampled hash. That
+        // sample cannot verify content, but it does distinguish a pure mtime
+        // touch from a real edit, so drift is tolerated only when the sampled
+        // frames still match.
+        (None, ContentCheck::Optional) if mtime_changed => match p.fast_hash {
+            Some(recorded) => {
+                let now = hash::hash_file_fast(src, p.size)
+                    .map_err(|e| format!("cannot hash {}: {e}", src.display()))?;
+                if now != recorded {
+                    return Err(
+                        "source changed since analysis (sampled content differs); re-analysis required"
+                            .into(),
+                    );
+                }
+            }
+            None => {
+                return Err(
+                    "source changed since analysis (no recorded hash); re-analysis required".into(),
+                )
+            }
+        },
         (None, ContentCheck::Optional) => {}
     }
     Ok(())

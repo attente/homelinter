@@ -501,9 +501,12 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     // keeper or retargets repairs at it.
     batch.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
 
-    // Keeper relocations from moves that already executed, so a duplicate
-    // delete still finds its keeper when the keeper's move ran in an earlier
-    // batch (a cancelled run, or a selection that excluded the delete).
+    // Keeper relocations from moves that already executed, so this run can
+    // republish a stale delete record before it hands the suggestion to the
+    // executor (which seeds the same map itself). A keeper moved in an
+    // earlier run is common here: the service executes one suggestion per
+    // request, so a cancelled run or a selection that excluded the delete
+    // leaves the keeper's move already done.
     let mut relocated: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> = {
         let sess = app.session.lock().await;
         homelinter_execute::relocations_of(&sess.suggestions)

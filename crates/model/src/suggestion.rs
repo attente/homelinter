@@ -84,6 +84,11 @@ pub struct Provenance {
     /// Recorded full-content SHA-256 for delete targets (duplicate
     /// confirmation) and for move verification bookkeeping.
     pub full_hash: Option<[u8; 32]>,
+    /// Sampling hash recorded by analysis for files above the fast-path
+    /// threshold. It never verifies content and never stands in for
+    /// `full_hash`: a move uses it only to tell an mtime-only touch from a
+    /// real edit when no full-content hash was recorded.
+    pub fast_hash: Option<[u8; 32]>,
     pub size: u64,
     pub mtime_ns: i128,
     /// Host object identity: Unix device + inode, or Windows volume serial

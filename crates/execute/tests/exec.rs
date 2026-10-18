@@ -426,6 +426,68 @@ fn move_tolerates_an_mtime_change_when_the_recorded_hash_matches() {
 }
 
 #[test]
+fn move_tolerates_an_mtime_change_when_only_the_sampled_hash_is_recorded() {
+    let base = tmpdir("mtimefast");
+    let src = base.join("a.mov");
+    write(&src, b"sampled-content");
+    let mut provenance = provenance_for(&src);
+    provenance.fast_hash =
+        Some(homelinter_model::hash::hash_file_fast(&src, provenance.size).unwrap());
+    let mut mv = Suggestion::new_move(
+        AssetKind::Video,
+        &src,
+        &base.join("dst/a.mov"),
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance.clone(),
+    );
+    mv.selected = true;
+    let stamp = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000));
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(stamp)
+        .unwrap();
+
+    // Same bytes, touched mtime, sampled hash identical: the drift is only a
+    // timestamp, so the move proceeds.
+    let mut items = vec![mv];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert!(base.join("dst/a.mov").exists());
+
+    // Different bytes at the same size with the same recorded sample: the
+    // sampled hash no longer matches, so the drift is refused.
+    let src2 = base.join("b.mov");
+    write(&src2, b"sampled-content");
+    let mut mv2 = Suggestion::new_move(
+        AssetKind::Video,
+        &src2,
+        &base.join("dst/b.mov"),
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance,
+    );
+    mv2.selected = true;
+    write(&src2, b"SAMPLED-content");
+    std::fs::File::options()
+        .write(true)
+        .open(&src2)
+        .unwrap()
+        .set_times(stamp)
+        .unwrap();
+    let mut items = vec![mv2];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert!(src2.exists());
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn relocations_cover_executed_moves_only() {
     let base = tmpdir("relocations");
     let a = base.join("a.bin");
@@ -536,9 +598,15 @@ fn keeper_move_republishes_the_delete_for_a_later_batch() {
         keeper_dst_str
     );
 
-    // Batch 2 executes the delete on the same session state and succeeds
-    // without any relocation map, because the record already points at the
-    // keeper's executed destination.
+    // Batch 2 executes the delete on the same session state. Reset the
+    // republished record first, which is what a caller that only hands the
+    // batch over again leaves behind: the executor seeds its relocations from
+    // the batch's already-executed move, so the delete still confirms the
+    // keeper at its current path instead of failing.
+    items[1].metadata.insert(
+        "duplicate_of".to_string(),
+        serde_json::Value::String(keeper.to_string_lossy().into_owned()),
+    );
     items[1].selected = true;
     let report = execute_batch(&mut items, &base, true);
     let entry = report

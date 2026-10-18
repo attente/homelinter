@@ -315,9 +315,12 @@ fn build_move_suggestion(
     }
     // A move re-verifies content when analysis recorded a full-content hash:
     // every file below the fast-path threshold and every confirmed group
-    // member has one, so carry it instead of dropping it.
+    // member has one, so carry it instead of dropping it. The sampling hash
+    // rides along for the files that only have that one: it never verifies
+    // content, it only tells a touched mtime from an edited file.
     let mut provenance = f.provenance.clone();
     provenance.full_hash = f.full_hash;
+    provenance.fast_hash = f.fast_hash;
     // Move suggestions carry no human-readable reason: the from/to paths
     // already explain the operation, so the generic "moved to the <kind>
     // destination" text was redundant (see `Suggestion.reason`).
@@ -758,13 +761,15 @@ mod tests {
             .unwrap();
         assert_eq!(s.provenance.full_hash, Some([0x5a; 32]));
 
-        // Without a hash at analysis the move records none, so the executor
-        // falls back to refusing drifted content.
+        // A large file records only the sampling hash, and the move carries
+        // it so the executor can tell a touched mtime from an edit.
         f.full_hash = None;
+        f.fast_hash = Some([0x11; 32]);
         let s = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
             .unwrap()
             .unwrap();
         assert_eq!(s.provenance.full_hash, None);
+        assert_eq!(s.provenance.fast_hash, Some([0x11; 32]));
     }
 
     #[test]
