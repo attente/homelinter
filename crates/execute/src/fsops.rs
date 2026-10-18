@@ -1,6 +1,7 @@
 //! Filesystem primitives for the executor: no-replace rename (kernel-atomic
-//! on Linux and macOS, hard-link publish elsewhere), verified
-//! cross-filesystem moves, and symlink replacement without following.
+//! on Linux and macOS, hard-link publish or a checked rename elsewhere),
+//! verified cross-filesystem moves, and symlink replacement without
+//! following.
 //!
 //! These are the only places in homelinter that touch the filesystem on
 //! behalf of execution. Every function here fails rather than overwrite or
@@ -42,10 +43,16 @@ pub fn create_parent_dirs(parent: &Path) -> Result<(), String> {
 /// `renamex_np(RENAME_EXCL)`, both of which fail atomically when the
 /// destination appears. Where the kernel or filesystem cannot express a
 /// no-replace rename, a non-directory is published with a hard link (which
-/// fails if the destination exists) and then removed from the source, and a
-/// directory is refused rather than risk replacing a destination that
-/// appeared after a check. A plain check-then-`rename` is never used,
-/// because `rename` silently replaces an existing destination.
+/// fails if the destination exists) and then removed from the source. Files
+/// on a filesystem that supports neither primitive, and directories
+/// everywhere that lack an atomic rename, fall back to checking the
+/// destination immediately before a plain `rename`.
+///
+/// That last fallback is best-effort: `rename` silently replaces an existing
+/// destination, so a concurrent creation at the same path in the window
+/// between the check and the rename can be replaced. It is used only where
+/// the filesystem offers no stronger primitive, and only after the executor's
+/// own preflight check of the destination.
 ///
 /// Windows keeps the checked rename until the native Windows executor lands
 /// (it will use `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING`).
@@ -59,7 +66,7 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
     {
         match platform_rename_noreplace(src, dst)? {
             RenameAttempt::Renamed => Ok(()),
-            RenameAttempt::Unsupported => publish_by_hard_link(src, dst),
+            RenameAttempt::Unsupported => publish_without_platform_rename(src, dst),
         }
     }
 }
@@ -128,8 +135,10 @@ fn platform_rename_noreplace(_src: &Path, _dst: &Path) -> Result<RenameAttempt, 
     Ok(RenameAttempt::Unsupported)
 }
 
-/// Checked rename used only on Windows until the native executor lands.
-#[cfg(windows)]
+/// Checked rename: verify the destination is absent, then rename.
+///
+/// This is best-effort, because `rename` replaces an existing destination;
+/// it is used only where no atomic publish is available.
 fn checked_rename(src: &Path, dst: &Path) -> Result<(), String> {
     if path_exists(dst) {
         return Err(format!(
@@ -142,45 +151,43 @@ fn checked_rename(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Publish `src` at `dst` with a hard link, then remove the source name.
+/// Publish `src` at `dst` with the strongest primitive the filesystem
+/// offers, then remove the source name.
 ///
 /// `hard_link` creates the destination name atomically and fails when it
-/// already exists, so the publish keeps the no-replace guarantee without a
-/// platform rename primitive. Directories cannot be hard-linked, so a
-/// directory is refused: replacing it after a check could destroy a
-/// destination that appeared in between.
+/// already exists, so files keep the no-replace guarantee without a platform
+/// rename primitive. Directories cannot be hard-linked, and some filesystems
+/// reject hard links entirely; in both cases the destination is checked
+/// immediately before a plain `rename`, which is best-effort because
+/// `rename` replaces an existing destination.
 #[cfg_attr(windows, allow(dead_code))]
-fn publish_by_hard_link(src: &Path, dst: &Path) -> Result<(), String> {
+fn publish_without_platform_rename(src: &Path, dst: &Path) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(src)
         .map_err(|e| format!("cannot stat source {}: {e}", src.display()))?;
-    if meta.is_dir() {
-        return Err(format!(
-            "cannot move directory {}: this filesystem has no atomic no-replace rename for directories; refusing to risk overwriting {}",
-            src.display(),
-            dst.display()
-        ));
-    }
-    std::fs::hard_link(src, dst).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!(
-                "destination exists; refusing to overwrite: {}",
-                dst.display()
-            )
-        } else {
-            format!(
-                "cannot publish {} without an atomic no-replace rename: {e}",
-                dst.display()
-            )
+    if !meta.is_dir() {
+        match std::fs::hard_link(src, dst) {
+            Ok(()) => {
+                return std::fs::remove_file(src).map_err(|e| {
+                    format!(
+                        "published {} but could not remove source {}: {e}",
+                        dst.display(),
+                        src.display()
+                    )
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(format!(
+                    "destination exists; refusing to overwrite: {}",
+                    dst.display()
+                ));
+            }
+            Err(_) => {
+                // No hard links on this filesystem: fall through to the
+                // best-effort checked rename.
+            }
         }
-    })?;
-    std::fs::remove_file(src).map_err(|e| {
-        format!(
-            "published {} but could not remove source {}: {e}",
-            dst.display(),
-            src.display()
-        )
-    })?;
-    Ok(())
+    }
+    checked_rename(src, dst)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +729,7 @@ mod tests {
         let src = root.join("src.bin");
         let dst = root.join("dst.bin");
         std::fs::write(&src, b"payload").unwrap();
-        publish_by_hard_link(&src, &dst).unwrap();
+        publish_without_platform_rename(&src, &dst).unwrap();
         assert!(!path_exists(&src));
         assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
         std::fs::remove_dir_all(&root).unwrap();
@@ -735,7 +742,7 @@ mod tests {
         let dst = root.join("dst.bin");
         std::fs::write(&src, b"source").unwrap();
         std::fs::write(&dst, b"destination").unwrap();
-        let err = publish_by_hard_link(&src, &dst).unwrap_err();
+        let err = publish_without_platform_rename(&src, &dst).unwrap_err();
         assert!(err.contains("destination exists"), "{err}");
         assert_eq!(std::fs::read(&dst).unwrap(), b"destination");
         assert_eq!(std::fs::read(&src).unwrap(), b"source");
@@ -743,12 +750,26 @@ mod tests {
     }
 
     #[test]
-    fn hard_link_publish_refuses_directories() {
+    fn directory_publish_falls_back_to_a_checked_rename() {
         let root = tmpdir("link-dir");
         let src = root.join("src");
         std::fs::create_dir(&src).unwrap();
-        let err = publish_by_hard_link(&src, &root.join("dst")).unwrap_err();
-        assert!(err.contains("no atomic no-replace rename"), "{err}");
+        let dst = root.join("dst");
+        publish_without_platform_rename(&src, &dst).unwrap();
+        assert!(!path_exists(&src));
+        assert!(dst.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn checked_rename_refuses_existing_destination() {
+        let root = tmpdir("checked-exists");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        let err = checked_rename(&src, &dst).unwrap_err();
+        assert!(err.contains("destination exists"), "{err}");
         assert!(path_exists(&src));
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -760,7 +781,7 @@ mod tests {
         let src = root.join("link");
         let dst = root.join("published");
         std::os::unix::fs::symlink("raw-target", &src).unwrap();
-        publish_by_hard_link(&src, &dst).unwrap();
+        publish_without_platform_rename(&src, &dst).unwrap();
         assert!(!path_exists(&src));
         assert_eq!(std::fs::read_link(&dst).unwrap().as_os_str(), "raw-target");
         std::fs::remove_dir_all(&root).unwrap();
