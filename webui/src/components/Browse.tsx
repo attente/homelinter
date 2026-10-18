@@ -423,6 +423,7 @@ function DetailPane(props: {
   const rows = useMemo(() => metaRows(suggestion), [suggestion]);
 
   const tabs: TabId[] = ['preview'];
+  if (lat !== null && lon !== null) tabs.push('location');
   // A move always gets the metadata tab, even before any provider value
   // arrives, so manual editing is always reachable.
   if (suggestion.type === 'move' || rows.length > 0) tabs.push('metadata');
