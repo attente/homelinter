@@ -83,6 +83,16 @@ pub fn platform_name() -> &'static str {
     }
 }
 
+/// The repository-root `defaults.toml`, embedded at build time. A writable
+/// config file that does not exist yet is seeded from this documented dump
+/// before a patch is applied, so a first saved setting produces a
+/// self-documenting configuration whose diff from the dump is just the keys
+/// the user changed. The dump is asserted to resolve to the built-in defaults
+/// (see `crates/homelinter/tests/template.rs`), so seeding either text or
+/// nothing is behaviorally the same.
+pub const DEFAULT_CONFIG_TEMPLATE: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../defaults.toml"));
+
 /// Default user configuration path for the host platform.
 pub fn default_user_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("homelinter").join("config.toml"))
@@ -1320,16 +1330,20 @@ pub fn parse_and_validate_json(value: JsonValue) -> Result<RawConfig, ApiError> 
 // Persistence: in-place document editing
 // ---------------------------------------------------------------------------
 
-/// The document at the writable config path (an empty document when no file
-/// exists), plus the path it is written back to.
+/// The document at the writable config path, the path it is written back to,
+/// and whether the file already existed. A missing file starts from the
+/// embedded `defaults.toml` dump, so the first saved setting lands in a
+/// documented file; an existing file is used exactly as it is on disk.
 fn writable_file_document(
     chain: &ConfigChain,
     cli: Option<&Path>,
-) -> Result<(PathBuf, DocumentMut), ApiError> {
+) -> Result<(PathBuf, DocumentMut, bool), ApiError> {
     let path = writable_config_path_chain(chain, cli)?;
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let (text, existed) = match std::fs::read_to_string(&path) {
+        Ok(text) => (text, true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (DEFAULT_CONFIG_TEMPLATE.to_string(), false)
+        }
         Err(e) => {
             return Err(ApiError::validation(format!(
                 "cannot read config file {}: {e}",
@@ -1340,7 +1354,7 @@ fn writable_file_document(
     let doc = text.parse::<DocumentMut>().map_err(|e| {
         ApiError::validation(format!("malformed config file {}: {e}", path.display()))
     })?;
-    Ok((path, doc))
+    Ok((path, doc, existed))
 }
 
 /// Apply a submitted patch document to `doc` in place.
@@ -1600,14 +1614,13 @@ fn document_to_validated_config(doc: &DocumentMut) -> Result<RawConfig, ApiError
     Ok(raw)
 }
 
-/// Persist the patched document atomically, ensuring the file ends with a
-/// newline.
-fn write_config_document(path: &Path, doc: &DocumentMut) -> Result<(), ApiError> {
+/// Render the patched document, ensuring the file ends with a newline.
+fn render_config_document(doc: &DocumentMut) -> String {
     let mut text = doc.to_string();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    write_config_text(path, &text)
+    text
 }
 
 /// Merge a partial configuration document into the file `PUT /config`
@@ -1626,10 +1639,18 @@ pub fn merge_and_write_config_chain(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<LoadedConfig, ApiError> {
-    let (write_path, mut doc) = writable_file_document(chain, cli)?;
+    let (write_path, mut doc, existed) = writable_file_document(chain, cli)?;
     apply_patch_to_document(&mut doc, submitted)?;
     document_to_validated_config(&doc)?;
-    write_config_document(&write_path, &doc)?;
+    // A file that does not exist yet is only created when the patch changes
+    // the embedded dump: a no-op first save leaves no file behind, just as a
+    // no-op save of an existing file leaves it untouched. An explicitly
+    // requested path is different: it must exist after the save for the
+    // reload that follows to succeed, so it is always written.
+    let text = render_config_document(&doc);
+    if existed || cli.is_some() || text != DEFAULT_CONFIG_TEMPLATE {
+        write_config_text(&write_path, &text)?;
+    }
     load_config_chain(chain, cli)
 }
 
@@ -1649,7 +1670,7 @@ pub fn merge_and_validate_config_chain(
     submitted: &JsonValue,
     cli: Option<&Path>,
 ) -> Result<RawConfig, ApiError> {
-    let (_, mut doc) = writable_file_document(chain, cli)?;
+    let (_, mut doc, _) = writable_file_document(chain, cli)?;
     apply_patch_to_document(&mut doc, submitted)?;
     document_to_validated_config(&doc)
 }
@@ -2373,6 +2394,96 @@ mod tests {
         let file = d.join("config.toml");
         std::fs::write(&file, text).unwrap();
         (chain, d, file)
+    }
+
+    #[test]
+    fn first_write_seeds_the_documented_defaults() {
+        // No user config yet: the first saved setting seeds the embedded
+        // `defaults.toml` dump and edits it in place, so the file is
+        // self-documenting and differs from the dump only in that setting.
+        let (chain, dir, file) = write_temp_config("seed", "");
+        std::fs::remove_file(&file).unwrap();
+
+        let loaded = merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"duplication": {"large_file_threshold": 42}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(loaded.raw.duplication.large_file_threshold, 42);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            DEFAULT_CONFIG_TEMPLATE.replace(
+                "large_file_threshold = 104857600",
+                "large_file_threshold = 42"
+            )
+        );
+
+        // Every later save edits the file that now exists: the new key joins
+        // its own documented section and nothing else moves.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"scan": {"hidden": true}}),
+            Some(&file),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            DEFAULT_CONFIG_TEMPLATE
+                .replace(
+                    "large_file_threshold = 104857600",
+                    "large_file_threshold = 42"
+                )
+                .replace(
+                    "hidden_definition = \"explorer\"\n",
+                    "hidden_definition = \"explorer\"\nhidden = true\n"
+                )
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn first_no_op_save_creates_no_config_file() {
+        // A save that leaves the effective configuration alone writes nothing
+        // when no config file exists yet, just as it leaves an existing file
+        // alone. The per-user path is optional, so it can stay absent.
+        let (_, dir, file) = write_temp_config("seed-noop", "");
+        std::fs::remove_file(&file).unwrap();
+        let chain = ConfigChain {
+            system: None,
+            user: Some(file.clone()),
+        };
+
+        merge_and_write_config_chain(&chain, &serde_json::json!({}), None).unwrap();
+        assert!(
+            !file.exists(),
+            "an empty patch must not create a config file"
+        );
+
+        // Restating a documented default is not a change either.
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"output": {"format": "pretty"}}),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !file.exists(),
+            "restating a default must not create a config file"
+        );
+
+        // An explicitly requested path must exist after the save, so a no-op
+        // first save to `--config` writes the dump and the reload succeeds.
+        let loaded =
+            merge_and_write_config_chain(&chain, &serde_json::json!({}), Some(&file)).unwrap();
+        assert_eq!(loaded.config_path.as_deref(), Some(file.as_path()));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            DEFAULT_CONFIG_TEMPLATE
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

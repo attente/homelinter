@@ -5,7 +5,21 @@
 
 use std::path::PathBuf;
 
-use homelinter_model::config::{effective_config_json, load_config_chain, ConfigChain, RawConfig};
+use homelinter_model::config::{
+    effective_config_json, load_config_chain, ConfigChain, RawConfig, DEFAULT_CONFIG_TEMPLATE,
+};
+
+#[test]
+fn embedded_template_matches_the_repo_dump() {
+    // The binary seeds a missing user config from the embedded dump, so the
+    // embedded copy must be exactly the file the other tests validate.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults.toml");
+    let text = std::fs::read_to_string(&path).expect("template is readable");
+    assert_eq!(
+        DEFAULT_CONFIG_TEMPLATE, text,
+        "the embedded defaults.toml is stale; rebuild after editing the dump"
+    );
+}
 
 #[test]
 fn config_template_loads_and_validates() {

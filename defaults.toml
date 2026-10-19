@@ -1,11 +1,13 @@
-# homelinter configuration defaults.
-# A faithful dump of the built-in defaults: every key is shown with its
-# effective default value, and loading this file is behaviorally equivalent
+# homelinter configuration.
+# This file is a faithful dump of the built-in defaults: every key is shown
+# with its effective default value, and loading it is behaviorally equivalent
 # to running with no configuration file at all. The test in
 # crates/homelinter/tests/template.rs asserts that equivalence and that every
 # key is present, so this file is updated alongside any default change.
-# Copy it and change a value to opt in.
-# Use with: homelinter --config defaults.toml
+# A missing user configuration is seeded from this file on the first saved
+# setting and then edited in place, so a change shows up as a diff against
+# the documented defaults below. The seeded values are explicit and stay
+# pinned; delete a key to fall back to the built-in default again.
 # Placeholders: %Y/%y year, %m/%d month/day, %H/%M/%S hour/minute/second,
 # %t title, %a artist/author, %l location, %s description, %c camera,
 # %h remote host, %o remote owner, %k asset kind, %f original filename,
