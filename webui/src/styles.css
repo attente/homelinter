@@ -230,19 +230,12 @@ textarea:focus {
   cursor: default;
 }
 
-/* Filter combo boxes: a fixed label plus a native select, so every choice is
-   reachable in one click (and by typing) instead of cycling through values. */
+/* Filter combo boxes: a flat select styled like the toolbar buttons, so every
+   choice is reachable in one click (and by typing) instead of cycling. */
 .filter-select {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  font-size: 12px;
-  color: var(--dim);
-}
-
-.filter-select select {
   font: inherit;
-  padding: 1px 4px;
+  font-size: 12px;
+  padding: 2px 4px;
   color: var(--fg);
   background: transparent;
   border: 1px solid var(--line);

@@ -714,72 +714,68 @@ export function Browse(props: BrowseProps) {
     <main className="browse">
       <div className="toolbar-row">
         <div className="filters">
-          <label className="filter-select">
-            <span>type</span>
-            <select
-              value={filter.type}
-              onChange={(e) =>
-                onFilterChange({ ...filter, type: e.currentTarget.value as Filter['type'] })
-              }
-            >
-              {TYPE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="filter-select">
-            <span>kind</span>
-            <select
-              value={filter.kind}
-              onChange={(e) => onFilterChange({ ...filter, kind: e.currentTarget.value })}
-            >
-              {kindOptions.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="filter-select">
-            <span>status</span>
-            <select
-              value={filter.status}
-              onChange={(e) =>
-                onFilterChange({ ...filter, status: e.currentTarget.value as Filter['status'] })
-              }
-            >
-              {STATUS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="filter-select">
-            <span>metadata</span>
-            <select
-              value={filter.manual}
-              title="show only suggestions with saved manual overrides"
-              onChange={(e) =>
-                onFilterChange({ ...filter, manual: e.currentTarget.value as Filter['manual'] })
-              }
-            >
-              {MANUAL_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <select
+            className="filter-select"
+            aria-label="type filter"
+            value={filter.type}
+            onChange={(e) =>
+              onFilterChange({ ...filter, type: e.currentTarget.value as Filter['type'] })
+            }
+          >
+            {TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="filter-select"
+            aria-label="asset kind filter"
+            value={filter.kind}
+            onChange={(e) => onFilterChange({ ...filter, kind: e.currentTarget.value })}
+          >
+            {kindOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="filter-select"
+            aria-label="status filter"
+            value={filter.status}
+            onChange={(e) =>
+              onFilterChange({ ...filter, status: e.currentTarget.value as Filter['status'] })
+            }
+          >
+            {STATUS_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="filter-select"
+            aria-label="metadata filter"
+            title="show only suggestions with saved manual overrides"
+            value={filter.manual}
+            onChange={(e) =>
+              onFilterChange({ ...filter, manual: e.currentTarget.value as Filter['manual'] })
+            }
+          >
+            {MANUAL_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
             className="filter-btn"
             disabled={filtersDefault}
             onClick={() => onFilterChange(ALL_FILTER)}
           >
-            clear
+            reset
           </button>
         </div>
         <div className="toolbar">
