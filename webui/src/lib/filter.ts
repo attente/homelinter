@@ -4,20 +4,31 @@
 
 import type { Suggestion, SuggestionStatus, SuggestionType } from '../types';
 
-export const TYPE_CYCLE: ReadonlyArray<'all' | SuggestionType> = [
-  'all',
-  'move',
-  'delete',
+/** One choice in a filter combo box. `all` is the unconstrained value. */
+export interface FilterOption<T extends string> {
+  value: T;
+  label: string;
+}
+
+export const TYPE_OPTIONS: ReadonlyArray<FilterOption<'all' | SuggestionType>> = [
+  { value: 'all', label: 'any type' },
+  { value: 'move', label: 'move' },
+  { value: 'delete', label: 'delete' },
 ];
 
-export const STATUS_CYCLE: ReadonlyArray<'all' | SuggestionStatus> = [
-  'all',
-  'pending',
-  'rejected',
-  'executed',
-  'partial',
-  'failed',
-  'skipped',
+export const STATUS_OPTIONS: ReadonlyArray<FilterOption<'all' | SuggestionStatus>> = [
+  { value: 'all', label: 'any status' },
+  { value: 'pending', label: 'pending' },
+  { value: 'rejected', label: 'rejected' },
+  { value: 'executed', label: 'executed' },
+  { value: 'partial', label: 'partial' },
+  { value: 'failed', label: 'failed' },
+  { value: 'skipped', label: 'skipped' },
+];
+
+export const MANUAL_OPTIONS: ReadonlyArray<FilterOption<'all' | 'manual'>> = [
+  { value: 'all', label: 'any metadata' },
+  { value: 'manual', label: 'manual only' },
 ];
 
 export interface Filter {
@@ -35,7 +46,15 @@ export const ALL_FILTER: Filter = {
   manual: 'all',
 };
 
-export const MANUAL_CYCLE: ReadonlyArray<'all' | 'manual'> = ['all', 'manual'];
+/** True when no dimension is constrained, so `clear` has nothing to do. */
+export function isDefaultFilter(f: Filter): boolean {
+  return (
+    f.type === ALL_FILTER.type &&
+    f.kind === ALL_FILTER.kind &&
+    f.status === ALL_FILTER.status &&
+    f.manual === ALL_FILTER.manual
+  );
+}
 
 export function matchesFilter(s: Suggestion, f: Filter): boolean {
   if (f.type !== 'all' && s.type !== f.type) {
@@ -105,11 +124,4 @@ export function uniqueKinds(items: Suggestion[]): string[] {
     if (s.asset_kind) seen.add(s.asset_kind);
   }
   return [...seen].sort();
-}
-
-/** Move to the next value in a cycle, wrapping around. */
-export function cycleNext<T extends string>(cycle: ReadonlyArray<T>, current: T): T {
-  const idx = cycle.indexOf(current);
-  const next = cycle[(idx + 1) % cycle.length] ?? cycle[0];
-  return next;
 }

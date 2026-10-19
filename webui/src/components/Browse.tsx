@@ -9,10 +9,11 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   ALL_FILTER,
   Filter,
-  MANUAL_CYCLE,
-  STATUS_CYCLE,
-  TYPE_CYCLE,
-  cycleNext,
+  FilterOption,
+  MANUAL_OPTIONS,
+  STATUS_OPTIONS,
+  TYPE_OPTIONS,
+  isDefaultFilter,
 } from '../lib/filter';
 import { manualOverrideLabel, rowText } from '../lib/format';
 import type { Suggestion } from '../types';
@@ -21,12 +22,6 @@ import { CheckIcon, CopyIcon } from './CopyIcon';
 import { ExpandIcon } from './ExpandIcon';
 import { RefreshIcon } from './RefreshIcon';
 
-export interface FilterState {
-  type: 'all' | 'move' | 'delete';
-  kind: 'all' | string;
-  status: 'all' | Suggestion['status'];
-  manual: 'all' | 'manual';
-}
 
 type TabId = 'preview' | 'location' | 'metadata';
 
@@ -644,12 +639,19 @@ export function Browse(props: BrowseProps) {
   const [detailWidth, setDetailWidth] = useState(360);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  const kindCycle = useMemo(() => ['all', ...kinds], [kinds]);
-  // The row badge and the toolbar button share one toggle: filtering to the
-  // manual-only view and back is a two-value cycle.
-  const toggleManualFilter = useCallback(() => {
-    onFilterChange({ ...filter, manual: cycleNext(MANUAL_CYCLE, filter.manual) });
+  const kindOptions = useMemo<FilterOption<'all' | string>[]>(() => {
+    // Keep an active kind selectable even if the batch summary omits it.
+    const active = filter.kind !== 'all' && !kinds.includes(filter.kind) ? [filter.kind] : [];
+    return [
+      { value: 'all', label: 'any kind' },
+      ...[...active, ...kinds].map((k) => ({ value: k, label: k })),
+    ];
+  }, [kinds, filter.kind]);
+  // The row badge is a shortcut, not a toggle: it shows the manual-only view.
+  const showManualFilter = useCallback(() => {
+    onFilterChange({ ...filter, manual: 'manual' });
   }, [filter, onFilterChange]);
+  const filtersDefault = isDefaultFilter(filter);
   const openSuggestion = useMemo(
     () => suggestions.find((s) => s.id === openId) ?? null,
     [suggestions, openId],
@@ -712,36 +714,71 @@ export function Browse(props: BrowseProps) {
     <main className="browse">
       <div className="toolbar-row">
         <div className="filters">
+          <label className="filter-select">
+            <span>type</span>
+            <select
+              value={filter.type}
+              onChange={(e) =>
+                onFilterChange({ ...filter, type: e.currentTarget.value as Filter['type'] })
+              }
+            >
+              {TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-select">
+            <span>kind</span>
+            <select
+              value={filter.kind}
+              onChange={(e) => onFilterChange({ ...filter, kind: e.currentTarget.value })}
+            >
+              {kindOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-select">
+            <span>status</span>
+            <select
+              value={filter.status}
+              onChange={(e) =>
+                onFilterChange({ ...filter, status: e.currentTarget.value as Filter['status'] })
+              }
+            >
+              {STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-select">
+            <span>metadata</span>
+            <select
+              value={filter.manual}
+              title="show only suggestions with saved manual overrides"
+              onChange={(e) =>
+                onFilterChange({ ...filter, manual: e.currentTarget.value as Filter['manual'] })
+              }
+            >
+              {MANUAL_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             className="filter-btn"
-            onClick={() => onFilterChange({ ...filter, type: cycleNext(TYPE_CYCLE, filter.type) })}
+            disabled={filtersDefault}
+            onClick={() => onFilterChange(ALL_FILTER)}
           >
-            t:{filter.type}
-          </button>
-          <button
-            type="button"
-            className="filter-btn"
-            onClick={() => onFilterChange({ ...filter, kind: cycleNext(kindCycle, filter.kind) })}
-          >
-            k:{filter.kind}
-          </button>
-          <button
-            type="button"
-            className="filter-btn"
-            onClick={() => onFilterChange({ ...filter, status: cycleNext(STATUS_CYCLE, filter.status) })}
-          >
-            u:{filter.status}
-          </button>
-          <button
-            type="button"
-            className="filter-btn"
-            title="show only suggestions with saved manual overrides"
-            onClick={toggleManualFilter}
-          >
-            m:{filter.manual}
-          </button>
-          <button type="button" className="filter-btn" onClick={() => onFilterChange(ALL_FILTER)}>
             clear
           </button>
         </div>
@@ -810,7 +847,7 @@ export function Browse(props: BrowseProps) {
                       root={root ?? null}
                       onToggle={onToggle}
                       onOpen={setOpenId}
-                      onToggleManualFilter={toggleManualFilter}
+                      onToggleManualFilter={showManualFilter}
                     />
                   </li>
                 );

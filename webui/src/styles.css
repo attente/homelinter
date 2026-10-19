@@ -225,6 +225,30 @@ textarea:focus {
   color: var(--dim);
 }
 
+.filter-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Filter combo boxes: a fixed label plus a native select, so every choice is
+   reachable in one click (and by typing) instead of cycling through values. */
+.filter-select {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.filter-select select {
+  font: inherit;
+  padding: 1px 4px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
 .sep {
   width: 1px;
   height: 18px;

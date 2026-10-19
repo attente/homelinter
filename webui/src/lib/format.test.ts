@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALL_FILTER,
-  MANUAL_CYCLE,
-  STATUS_CYCLE,
-  TYPE_CYCLE,
-  cycleNext,
+  MANUAL_OPTIONS,
+  STATUS_OPTIONS,
+  TYPE_OPTIONS,
+  isDefaultFilter,
   matchesFilter,
   mergeSuggestionEvents,
   uniqueKinds,
@@ -71,14 +71,31 @@ describe('filter', () => {
     expect(matchesFilter(sampleSuggestion(), ALL_FILTER)).toBe(true);
   });
 
-  it('cycles values with wraparound', () => {
-    expect(cycleNext(TYPE_CYCLE, 'all')).toBe('move');
-    expect(cycleNext(TYPE_CYCLE, 'delete')).toBe('all');
-    expect(cycleNext(STATUS_CYCLE, 'executed')).toBe('partial');
-    expect(cycleNext(STATUS_CYCLE, 'partial')).toBe('failed');
-    expect(cycleNext(STATUS_CYCLE, 'skipped')).toBe('all');
-    expect(cycleNext(MANUAL_CYCLE, 'all')).toBe('manual');
-    expect(cycleNext(MANUAL_CYCLE, 'manual')).toBe('all');
+  it('offers one combo-box option per value, with an unconstrained first entry', () => {
+    expect(TYPE_OPTIONS.map((o) => o.value)).toEqual(['all', 'move', 'delete']);
+    expect(STATUS_OPTIONS.map((o) => o.value)).toEqual([
+      'all',
+      'pending',
+      'rejected',
+      'executed',
+      'partial',
+      'failed',
+      'skipped',
+    ]);
+    expect(MANUAL_OPTIONS.map((o) => o.value)).toEqual(['all', 'manual']);
+    for (const options of [TYPE_OPTIONS, STATUS_OPTIONS, MANUAL_OPTIONS]) {
+      expect(options[0].value).toBe('all');
+      const labels = options.map((o) => o.label);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+
+  it('recognizes the unconstrained filter', () => {
+    expect(isDefaultFilter(ALL_FILTER)).toBe(true);
+    expect(isDefaultFilter({ ...ALL_FILTER, kind: 'photo' })).toBe(false);
+    expect(isDefaultFilter({ ...ALL_FILTER, status: 'failed' })).toBe(false);
+    expect(isDefaultFilter({ ...ALL_FILTER, manual: 'manual' })).toBe(false);
+    expect(isDefaultFilter({ ...ALL_FILTER, type: 'move' })).toBe(false);
   });
 
   it('collects unique sorted kinds', () => {
