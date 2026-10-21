@@ -218,9 +218,9 @@ describe('format', () => {
   it('metadata progress and cache counters share one label', () => {
     expect(metadataProgressLabel(0, 0, 0, 0)).toBe('');
     expect(metadataProgressLabel(4, 9, 0, 0)).toBe('metadata: 4/9');
-    expect(metadataProgressLabel(0, 0, 2, 1)).toBe('cache: 2 hits, 1 miss');
+    expect(metadataProgressLabel(0, 0, 2, 1)).toBe('2 hits, 1 miss');
     expect(metadataProgressLabel(4, 9, 2, 1)).toBe(
-      'metadata: 4/9, cache: 2 hits, 1 miss',
+      'metadata: 4/9, 2 hits, 1 miss',
     );
     expect(asciiOnly(metadataProgressLabel(9, 9, 12, 0))).toBe(true);
   });

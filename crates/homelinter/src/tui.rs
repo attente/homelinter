@@ -1278,7 +1278,7 @@ impl App {
         }
         if self.cache_hits + self.cache_misses > 0 {
             parts.push(format!(
-                "cache: {} hits, {} misses",
+                "{} hits, {} misses",
                 self.cache_hits, self.cache_misses
             ));
         }
@@ -2039,14 +2039,11 @@ mod tests {
         app.cache_misses = 1;
         assert_eq!(
             app.metadata_label().as_deref(),
-            Some("metadata: 4/9, cache: 2 hits, 1 misses")
+            Some("metadata: 4/9, 2 hits, 1 misses")
         );
         app.metadata_completed = 0;
         app.metadata_total = 0;
-        assert_eq!(
-            app.metadata_label().as_deref(),
-            Some("cache: 2 hits, 1 misses")
-        );
+        assert_eq!(app.metadata_label().as_deref(), Some("2 hits, 1 misses"));
         app.cache_hits = 0;
         app.cache_misses = 0;
         assert_eq!(app.metadata_label(), None);
