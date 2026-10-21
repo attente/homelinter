@@ -9,11 +9,14 @@ members = [
   "crates/service",
   "crates/clients",
   "crates/homelinter",
+  "crates/launcher",
 ]
 # The desktop shell is a separate workspace: it needs WebKit/GTK on Linux and
 # is only built on macOS in CI. Excluding it keeps `cargo build`, `cargo test`,
 # and `cargo test --workspace` on a Linux development host free of those
 # system libraries. Build it from `crates/desktop` with the Tauri CLI.
+# `crates/launcher` (`homelinter-app`) is the Linux counterpart: it needs no
+# GUI toolkit because it opens the SPA in an app-mode browser window instead.
 exclude = ["crates/desktop/src-tauri"]
 
 [workspace.package]
@@ -39,7 +42,7 @@ axum = "0.8"
 tower = "0.5"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
-rustix = { version = "0.38", features = ["fs"] }
+rustix = { version = "0.38", features = ["fs", "process"] }
 unicode-normalization = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }

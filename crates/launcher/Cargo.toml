@@ -1,0 +1,18 @@
+[package]
+name = "homelinter-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser-hosted homelinter app: the launcher behind the Linux AppImage"
+
+[[bin]]
+name = "homelinter-app"
+path = "src/main.rs"
+
+[dependencies]
+homelinter-clients = { path = "../clients" }
+homelinter-service = { path = "../service" }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }

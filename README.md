@@ -59,6 +59,28 @@ pnpm dlx @tauri-apps/cli@2.11.1 build --target universal-apple-darwin
 Without the Apple secrets this produces the unsigned build; with all six set it signs and notarizes.
 The DMG is written to `crates/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/`.
 
+## Linux app (AppImage)
+
+`crates/launcher` builds `homelinter-app`, a small launcher that runs the same in-process service and opens the SPA in an app-mode window of the browser you already have.
+It is not a Tauri build: the bundle carries no WebKitGTK, GTK, or GStreamer, so it is one self-contained AppImage whose only library dependencies are glibc and libgcc.
+The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` with `--app` (Chromium, Chrome, Brave, Edge, Vivaldi) or `--kiosk` (Firefox), and stops the service when you close that window; Ctrl-C in a terminal stops both.
+Chromium-based browsers give a true app window with no location bar, bookmarks, or tabs.
+Set `HOMELINTER_BROWSER` to choose the browser or a wrapper for it.
+
+`.github/workflows/linux-release.yml` builds the release AppImage on `ubuntu-22.04` (glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora 36+), smoke-tests it, and publishes it with install notes on `v*` tags.
+On NixOS it runs as-is with AppImage support enabled (`programs.appimage = { enable = true; binfmt = true; }`), or through `appimage-run` otherwise; the browser still comes from your profile.
+See [docs/linux-release.md](docs/linux-release.md) for the full guide.
+
+To build it yourself:
+
+```
+cd webui && pnpm install --frozen-lockfile && pnpm build && cd ..
+cargo build --release -p homelinter-app
+APPIMAGETOOL=appimagetool ./packaging/appimage/build.sh
+```
+
+The AppImage is written to `target/appimage/`.
+
 ## Configuration
 
 Configuration is TOML, resolved by precedence: per-scan CLI options, then the config file, then values inferred from tools and your home layout, then defaults.

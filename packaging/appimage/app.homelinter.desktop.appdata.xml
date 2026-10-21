@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>app.homelinter.desktop</id>
+  <name>homelinter</name>
+  <summary>Find, organize, deduplicate, and archive files in your home directory</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <description>
+    <p>
+      homelinter scans your home directory, proposes safe moves and duplicate
+      deletions, and executes only the plan you approve. It runs as a local
+      service on the loopback interface and opens its interface in an
+      app-mode window of the browser you already have.
+    </p>
+    <p>
+      Nothing is moved or deleted without confirmation, and no file leaves
+      your machine unless you enable an optional online metadata provider.
+    </p>
+  </description>
+  <launchable type="desktop-id">app.homelinter.desktop</launchable>
+  <provides>
+    <binary>homelinter-app</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

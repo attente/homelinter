@@ -574,7 +574,20 @@ The shell owns the service's shutdown watch.
 `Built` exposes its `shutdown_tx`; on Tauri's `RunEvent::Exit` the shell sets the watch, waits up to five seconds for the HTTP task to finish, and then the process exit closes the listener regardless.
 This mirrors the CLI/TUI invariant that an invocation-owned service never outlives its client, without an HTTP shutdown call or child-process supervision.
 
-## Distribution & macOS Packaging
+### Linux AppImage Launcher
+
+The Linux deliverable is an AppImage driven by `crates/launcher` (crate `homelinter-app`), a launcher with no GUI toolkit rather than a Tauri build.
+It links `homelinter-service` in-process, binds an ephemeral loopback listener, waits up to ten seconds for `GET /api/v1/health`, opens `http://127.0.0.1:<port>/` in an app-mode window of a browser the user already has, and shuts the service down when that window closes.
+A browser-hosted shell is the deliberate Linux choice: bundling WebKitGTK pulls in GTK, GStreamer, GIO modules, and fontconfig, which is what usually breaks AppImages on NixOS and other non-FHS systems, while the launcher links only glibc and libgcc.
+App mode is requested from the Chromium family (`chromium`, `google-chrome`, `brave`, `microsoft-edge`, `vivaldi`) with `--app=<url>`, producing a window with no location bar, bookmark bar, back/forward buttons, or tab strip; Firefox has no app mode and is started with `--kiosk` as the chrome-less fallback.
+`HOMELINTER_BROWSER` accepts a program plus arguments (for example `flatpak run org.chromium.Chromium`) and wins over detection.
+Each run gets a private browser profile under `XDG_RUNTIME_DIR`, removed on exit: a shared profile would hand the URL to an already running browser and return at once, which would stop the service underneath an open window.
+The browser is spawned in its own process group, so Ctrl-C or SIGTERM forwards `SIGTERM` to the whole browser tree before the service stops, and a browser still alive after three seconds is killed.
+The bundled SPA lives at `usr/share/homelinter/webui` and is resolved relative to the executable, with `HOMELINTER_WEB_DIR` still taking precedence.
+
+## Distribution & Packaging
+
+### macOS
 
 The macOS deliverable is a universal `.app` inside a `.dmg`, in either an unsigned or a signed and notarized form.
 The unsigned form is the default and requires no Apple account: macOS blocks the first launch of a downloaded copy until the recipient approves that app once, without disabling Gatekeeper globally.
@@ -590,6 +603,16 @@ The Tauri CLI is invoked through `pnpm dlx @tauri-apps/cli@2.11.1`, so the relea
 The desktop crate is its own Cargo workspace, excluded from the root workspace (`exclude = ["crates/desktop/src-tauri"]`).
 It declares `rust-version = "1.85"` and `resolver = "3"` and commits its own `Cargo.lock`, so MSRV-aware resolution does not select newer transitive crates; the exclusion also means `cargo test --workspace` on Linux never needs WebKitGTK or other Tauri system libraries.
 The shell is built explicitly on macOS with the Tauri CLI.
+
+### Linux
+
+The Linux deliverable is a single x86_64 AppImage named `homelinter-<version>-x86_64.AppImage`, assembled by `packaging/appimage/build.sh` and published by `.github/workflows/linux-release.yml` on `v*` tags.
+The workflow builds the SPA with pnpm, builds `homelinter-app` with Rust 1.85.0, lays out an AppDir (launcher, `usr/share/homelinter/webui`, desktop entry, 512x512 icon, and AppStream metadata), and runs `appimagetool` 1.9.1 (checksum-pinned) with `APPIMAGE_EXTRACT_AND_RUN=1`, so the runner needs no FUSE.
+Builds run on `ubuntu-22.04`, giving a glibc floor of 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+).
+A smoke test runs the finished AppImage with `HOMELINTER_BROWSER=true`, exercising the bundled SPA lookup, the in-process service, the health check, and the shutdown path without a display.
+The workflow publishes `INSTALL-Linux.txt` with the browser requirement, the FUSE fallback, and the NixOS instructions (`programs.appimage.enable` with `binfmt`, or `appimage-run`), and `docs/linux-release.md` carries the full guide.
+The AppImage is the only packaged Linux artifact: a deb or rpm would declare `libwebkit2gtk-4.1-0` and `libgtk-3-0` that neither the AppImage nor NixOS needs, and Flatpak or Snap confinement would require broad home-directory access to do the job at all.
+A native Nix package (flake `packages.homelinter` and `packages.homelinter-desktop`) and an aarch64 AppImage are not implemented yet.
 
 Optional signing secrets for the signed route:
 
@@ -958,7 +981,8 @@ The core pipeline and the HTTP service API are implemented and exercised by an e
 - `service` implements the full REST + SSE API under `/api/v1`, the single-session state machine, batch validation, config merge-and-write, the SQLite cache, and the append-only audit log. Async-accept endpoints (`POST /session/scan`, `POST /execute`) return 202 and deliver their outcomes over SSE.
 - `clients` is a small hyper-based HTTP/1.1 + SSE client used by the CLI and the TUI.
 - The `homelinter` binary embeds one service instance in-process for the managed CLI flows, the `tui` subcommand, and `web`, per the lifecycle described under "User Interfaces".
-- `homelinter-desktop` is the macOS Tauri shell: it links the same service in-process, serves the bundled SPA from the resource directory, waits for health, opens an app-mode WebView window at the loopback origin, and shuts the service down on app exit (see "macOS Desktop Application" and "Distribution & macOS Packaging").
+- `homelinter-desktop` is the macOS Tauri shell: it links the same service in-process, serves the bundled SPA from the resource directory, waits for health, opens an app-mode WebView window at the loopback origin, and shuts the service down on app exit (see "macOS Desktop Application" and "Distribution & Packaging > macOS").
+- `homelinter-app` is the Linux launcher behind the AppImage: the same in-process service with no GUI toolkit, an app-mode browser window against the loopback origin, a private per-run browser profile, and the same shutdown-on-close invariant (see "Linux AppImage Launcher" and "Distribution & Packaging > Linux").
 - `homelinter tui` is the full-screen terminal client (ratatui + crossterm): scanning screen, two-pane suggestion browser with type/kind/status filters and selection, live execution log, report view, read-only configuration view, a read-only metadata-cache viewer, cache clearing, confirmation and text-input dialogs, and an 80x24 minimum terminal check. Keys: arrows/`j` move, space select, `a`/`A` select all/none, `t`/`k`/`u`/`c` filters, `x` execute, `m` re-request the highlighted suggestion's provider metadata, `b` rebuild the highlighted move suggestion's destination from the effective metadata (move suggestions only; the detail pane shows a `metadata: pending` line while it is in flight), `e` export, `n` scan another root, `g` open configuration, `v` (or `l`) open the cache viewer from the configuration view, `C` clear the cache, `?` help, `q`/Esc/Ctrl-C quit (cancelling in-flight work first). In the cache viewer, arrows scroll, `n`/`p` page, `k` cycles the kind filter, and `r` reloads. The TUI mirrors session configuration hashes and surfaces service failure reasons, and it asks for confirmation before executing or exporting a batch whose configuration hash differs from the scan-time hash. The TUI does not yet expose a manual metadata editor: unlike the SPA, its metadata view is read-only today, and TUI-side editing is deliberately deferred (the service endpoint and the SPA editor ship first).
 
 ### Documented seams

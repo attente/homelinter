@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=homelinter
+GenericName=Home Directory Organizer
+Comment=Find, organize, deduplicate, and archive files in your home directory
+Exec=homelinter-app
+Icon=homelinter
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=files;duplicates;organize;archive;
+StartupNotify=true
+StartupWMClass=homelinter

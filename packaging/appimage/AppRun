@@ -1,0 +1,11 @@
+#!/bin/sh
+# AppRun for the homelinter AppImage.
+#
+# The launcher resolves the bundled SPA relative to its own executable
+# (usr/share/homelinter/webui), starts the service on a loopback port,
+# opens an app-mode browser window, and stops the service when that window
+# closes. Nothing else needs to be set up here.
+set -eu
+self=$(readlink -f "$0")
+here=$(dirname "$self")
+exec "$here/usr/bin/homelinter-app" "$@"

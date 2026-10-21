@@ -1065,6 +1065,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "homelinter-app"
+version = "0.1.0"
+dependencies = [
+ "homelinter-clients",
+ "homelinter-service",
+ "rustix",
+ "tokio",
+]
+
+[[package]]
 name = "homelinter-clients"
 version = "0.1.0"
 dependencies = [

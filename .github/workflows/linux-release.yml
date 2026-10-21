@@ -1,0 +1,129 @@
+name: Linux release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    # The AppImage is built on the oldest supported Ubuntu so its glibc floor
+    # is 2.35 (Ubuntu 22.04, Debian 12, Fedora 36 and newer).
+    #
+    # The bundle carries no GUI toolkit: `homelinter-app` starts the service
+    # in-process and opens the SPA in an app-mode window of the browser the
+    # user already has, so no WebKitGTK, GTK, or GStreamer has to be bundled.
+    runs-on: ubuntu-22.04
+    env:
+      APPIMAGETOOL_VERSION: "1.9.1"
+      APPIMAGETOOL_SHA256: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Build the SPA
+        working-directory: webui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build the launcher
+        run: cargo build --release -p homelinter-app
+
+      - name: Fetch appimagetool
+        run: |
+          set -euo pipefail
+          url="https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+          curl -fsSL -o appimagetool "$url"
+          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c -
+          chmod +x appimagetool
+
+      - name: Build the AppImage
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+        run: |
+          set -euo pipefail
+          # The tag names the artifact; the binary itself takes its version
+          # from the workspace Cargo.toml, so keep the two in step.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./packaging/appimage/build.sh
+
+      - name: Smoke test the AppImage
+        run: |
+          set -euo pipefail
+          appimage=$(ls target/appimage/*.AppImage)
+          # `true` stands in for the browser: it exits at once, so this
+          # exercises the bundled SPA lookup, the in-process service, the
+          # health check, and the shutdown path without needing a display.
+          APPIMAGE_EXTRACT_AND_RUN=1 HOMELINTER_BROWSER=true "$appimage"
+
+      - name: Write install notes
+        run: |
+          cat > INSTALL-Linux.txt <<'EOF'
+          homelinter for Linux (AppImage)
+
+          1. Make the file executable:
+               chmod +x homelinter-*.AppImage
+          2. Run it:
+               ./homelinter-*.AppImage
+
+          homelinter starts its backend on a random loopback port, opens the UI in
+          an app-mode window (no location bar, bookmarks, or tabs) of the first
+          browser it finds among chromium, chromium-browser, google-chrome,
+          brave-browser, microsoft-edge-stable, vivaldi-stable, and firefox, and
+          stops the backend when you close that window. Chromium-based browsers
+          give a true app window; Firefox opens its kiosk window instead.
+
+          Requirements:
+          - glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
+          - A Chromium-based browser (preferred) or Firefox on PATH.
+          - FUSE 2 for the normal AppImage runtime. Without it, run the file with
+            APPIMAGE_EXTRACT_AND_RUN=1 in front of the command.
+
+          Choosing a browser explicitly:
+               HOMELINTER_BROWSER=firefox ./homelinter-*.AppImage
+          A wrapper works too:
+               HOMELINTER_BROWSER="flatpak run org.chromium.Chromium" ./homelinter-*.AppImage
+
+          NixOS:
+          - With AppImage support enabled in the system configuration, the file
+            runs directly:
+                programs.appimage = { enable = true; binfmt = true; };
+          - Without it:
+                appimage-run ./homelinter-*.AppImage
+          - Chromium or Firefox must be installed and on PATH.
+          EOF
+
+      - name: Upload the AppImage and install notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: homelinter-linux-x86_64-appimage
+          path: |
+            target/appimage/*.AppImage
+            INSTALL-Linux.txt
+          if-no-files-found: error
+
+      - name: Attach the AppImage and install notes to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/appimage/*.AppImage
+            INSTALL-Linux.txt
