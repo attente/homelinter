@@ -62,8 +62,16 @@ Because there is exactly one profile, only one homelinter window runs at a time;
 The guard is an `flock` on `~/.local/share/homelinter/browser.lock`, released by the kernel when the app exits, so a crash never blocks the next start.
 
 Closing the window stops the service and exits the launcher; Ctrl-C in the foreground or a `SIGTERM` does the same and also stops the browser tree.
-The launcher ignores `SIGHUP`, so starting it with `&` (or losing the terminal or SSH session that started it) leaves the service and window running until one of those quit paths occurs.
-On NixOS, `appimage-run` adds a bubblewrap supervisor that exits on `SIGHUP` before the launcher handles it; start the AppImage with `nohup ... &` there to keep it alive across a terminal close.
+The launcher ignores `SIGHUP`, so a launch detached from its terminal keeps the service and window running until one of those quit paths occurs.
+Detach it with `setsid`, which starts it in a new session with no controlling terminal, so closing the terminal or losing the SSH session delivers no hangup at all:
+
+```sh
+setsid ./homelinter-0.2.0-x86_64.AppImage >~/homelinter.log 2>&1 </dev/null &
+```
+
+On NixOS the AppImage runs through `appimage-run`, whose bubblewrap supervisor exits on `SIGHUP` before the launcher handles it.
+`nohup ... &` is not enough there: `nohup` only ignores `SIGHUP` in the process it starts, while the shell resends `SIGHUP` to the whole job process group on hangup, and the supervisor is in that group.
+Use `setsid ... &` on NixOS as well, and confirm the detached launch with `pgrep -af usr/bin/homelinter-app`; the port it bound is in the log the command writes.
 
 To pick a browser, or to reach one behind a wrapper:
 

@@ -23,8 +23,11 @@
 //! 5. Spawn the browser against that origin and wait for it to exit.
 //! 6. Signal the service's shutdown watch and wait, bounded, for it to stop.
 //!
-//! SIGHUP is ignored for the launcher's lifetime, so starting the AppImage
-//! in the background or closing its terminal does not tear the service down.
+//! SIGHUP is ignored for the launcher's lifetime, so a launch that is
+//! detached from its terminal (`setsid ... &`) does not tear the service down
+//! when the terminal or SSH session goes away. (`nohup ... &` alone is not
+//! enough on NixOS: the shell resends SIGHUP to the job's process group,
+//! where `appimage-run`'s bubblewrap supervisor does not ignore it.)
 //! Nothing is spawned as a child process except the browser, so a crash of
 //! either side cannot leave an orphaned backend behind.
 
@@ -56,11 +59,11 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    // A GUI launch from a shell (`./homelinter.AppImage &`) must outlive the
-    // terminal or SSH session that started it. SIGHUP defaults to terminating
-    // the process, which would stop the in-process service and could leave the
-    // browser window open on a dead origin while the shell's job cleanup
-    // signals the launcher.
+    // A GUI launch from a shell must outlive the terminal or SSH session that
+    // started it once it is detached from the shell's session (`setsid ...`).
+    // SIGHUP defaults to terminating the process, which would stop the
+    // in-process service and could leave the browser window open on a dead
+    // origin while the shell's job cleanup signals the launcher.
     ignore_hangup();
 
     // Resolve everything that can fail on its own before starting the
