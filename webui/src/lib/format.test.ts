@@ -16,6 +16,7 @@ import {
   countsSummary,
   entryLine,
   manualOverrideLabel,
+  metadataProgressLabel,
   pathLabel,
   rowLabel,
   shorten,
@@ -212,6 +213,16 @@ describe('format', () => {
     expect(cacheStatsLabel(12, 3)).toBe('12 hits, 3 misses');
     expect(cacheStatsLabel(1, 1)).toBe('1 hit, 1 miss');
     expect(asciiOnly(cacheStatsLabel(3, 1))).toBe(true);
+  });
+
+  it('metadata progress and cache counters share one label', () => {
+    expect(metadataProgressLabel(0, 0, 0, 0)).toBe('');
+    expect(metadataProgressLabel(4, 9, 0, 0)).toBe('metadata: 4/9');
+    expect(metadataProgressLabel(0, 0, 2, 1)).toBe('cache: 2 hits, 1 miss');
+    expect(metadataProgressLabel(4, 9, 2, 1)).toBe(
+      'metadata: 4/9, cache: 2 hits, 1 miss',
+    );
+    expect(asciiOnly(metadataProgressLabel(9, 9, 12, 0))).toBe(true);
   });
 
   it('row label shows a scanning placeholder while provider metadata is pending', () => {

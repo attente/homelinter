@@ -9,7 +9,7 @@ import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
 import { ALL_FILTER, Filter, matchesFilter, mergeSuggestionEvents } from "./lib/filter";
-import { elapsedLabel, opLine, stateLabel } from "./lib/format";
+import { elapsedLabel, metadataProgressLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
   MetadataProgress,
@@ -815,6 +815,14 @@ export default function App() {
     selected: st.session?.selection_count ?? 0,
     manual: st.session?.manual_overrides_total ?? 0,
   };
+  // Metadata progress and the provider-cache lookups behind it share one
+  // label while a scan is being planned and analyzed.
+  const metadataLabel = metadataProgressLabel(
+    st.metadataProgress?.completed ?? 0,
+    st.metadataProgress?.total ?? 0,
+    st.session?.cache_hits ?? 0,
+    st.session?.cache_misses ?? 0,
+  );
 
   let body;
   if (st.configOpen) {
@@ -849,10 +857,8 @@ export default function App() {
               {elapsedLabel(st.progress.elapsed_ms)}
             </span>
           )}
-          {st.metadataProgress && st.metadataProgress.total > 0 && (
-            <span className="progress-line">
-              metadata: {st.metadataProgress.completed}/{st.metadataProgress.total}
-            </span>
+          {metadataLabel && (
+            <span className="progress-line">{metadataLabel}</span>
           )}
           <div className="toolbar">
             <button

@@ -184,3 +184,22 @@ export function cacheStatsLabel(hits: number, misses: number): string {
   const m = `${misses} ${misses === 1 ? 'miss' : 'misses'}`;
   return `${h}, ${m}`;
 }
+
+/**
+ * Metadata progress and provider-cache counters share one header label,
+ * e.g. `metadata: 4/9, cache: 3 hits, 6 misses`. A hit or a miss only means
+ * something next to the progress it advanced, and one combined label keeps
+ * the header from growing a counter per phase. Empty when there is nothing
+ * to report yet.
+ */
+export function metadataProgressLabel(
+  completed: number,
+  total: number,
+  hits: number,
+  misses: number,
+): string {
+  const parts: string[] = [];
+  if (total > 0) parts.push(`metadata: ${completed}/${total}`);
+  if (hits + misses > 0) parts.push(`cache: ${cacheStatsLabel(hits, misses)}`);
+  return parts.join(', ');
+}

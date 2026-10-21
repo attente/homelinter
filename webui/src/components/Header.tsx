@@ -1,4 +1,4 @@
-import { cacheStatsLabel, stateLabel } from '../lib/format';
+import { metadataProgressLabel, stateLabel } from '../lib/format';
 import type { MetadataProgress } from '../types';
 
 export interface HeaderCounts {
@@ -27,6 +27,13 @@ interface HeaderProps {
 export function Header(props: HeaderProps) {
   const { state, root, counts, metadataProgress, cacheHits, cacheMisses, busy, scanDisabled, onNewScan, onConfig } = props;
   const badgeClass = state === 'ready' || state === 'done' ? 'state-ok' : state === 'failed' ? 'state-bad' : 'state-busy';
+  // One label: metadata progress and the cache lookups behind it.
+  const metadataLabel = metadataProgressLabel(
+    metadataProgress?.completed ?? 0,
+    metadataProgress?.total ?? 0,
+    cacheHits,
+    cacheMisses,
+  );
   return (
     <header className="header">
       <span className="title">homelinter</span>
@@ -35,14 +42,9 @@ export function Header(props: HeaderProps) {
       <span className="counts">
         {counts.suggestions} suggestions, {counts.shown} shown, {counts.selected} selected, {counts.manual} with manual overrides
       </span>
-      {metadataProgress && metadataProgress.total > 0 && (
+      {metadataLabel && (
         <span className="counts metadata-progress">
-          metadata: {metadataProgress.completed}/{metadataProgress.total}
-        </span>
-      )}
-      {cacheHits + cacheMisses > 0 && (
-        <span className="counts cache-stats">
-          cache: {cacheStatsLabel(cacheHits, cacheMisses)}
+          {metadataLabel}
         </span>
       )}
       <nav className="header-actions">

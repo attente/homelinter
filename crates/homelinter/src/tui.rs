@@ -1264,6 +1264,31 @@ impl App {
         }
     }
 
+    /// Metadata progress and the provider-cache lookups behind it share one
+    /// label: a hit or a miss only means something next to the progress it
+    /// advanced, and one label keeps the header from growing a counter per
+    /// phase. Empty when there is nothing to report yet.
+    fn metadata_label(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if self.metadata_total > 0 {
+            parts.push(format!(
+                "metadata: {}/{}",
+                self.metadata_completed, self.metadata_total
+            ));
+        }
+        if self.cache_hits + self.cache_misses > 0 {
+            parts.push(format!(
+                "cache: {} hits, {} misses",
+                self.cache_hits, self.cache_misses
+            ));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
+
     fn header_line(&self) -> Line<'static> {
         let state_color = match self.state.as_str() {
             "ready" => Color::Green,
@@ -1287,21 +1312,9 @@ impl App {
                 selected
             )),
         ];
-        if self.metadata_total > 0 {
+        if let Some(label) = self.metadata_label() {
             spans.push(Span::styled(
-                format!(
-                    "  metadata: {}/{}",
-                    self.metadata_completed, self.metadata_total
-                ),
-                Style::new().fg(Color::Yellow),
-            ));
-        }
-        if self.cache_hits + self.cache_misses > 0 {
-            spans.push(Span::styled(
-                format!(
-                    "  cache: {} hits, {} misses",
-                    self.cache_hits, self.cache_misses
-                ),
+                format!("  {label}"),
                 Style::new().fg(Color::Yellow),
             ));
         }
@@ -1358,17 +1371,8 @@ impl App {
                 self.progress_phase, self.progress_scanned, self.progress_elapsed_ms
             )));
         }
-        if self.metadata_total > 0 {
-            text.lines.push(Line::from(format!(
-                " metadata: {}/{} resolved",
-                self.metadata_completed, self.metadata_total
-            )));
-        }
-        if self.cache_hits + self.cache_misses > 0 {
-            text.lines.push(Line::from(format!(
-                " cache: {} hits, {} misses",
-                self.cache_hits, self.cache_misses
-            )));
+        if let Some(label) = self.metadata_label() {
+            text.lines.push(Line::from(format!(" {label}")));
         }
         for w in &self.warnings {
             text.lines.push(Line::from(vec![Span::styled(
@@ -2017,6 +2021,35 @@ mod tests {
         assert_eq!(r.dependents.len(), 1);
         assert!(r.dependents[0].contains("repair_symlink"));
         assert!(r.is_executable());
+    }
+
+    #[test]
+    fn metadata_and_cache_counters_share_one_label() {
+        let mut app = App::new(
+            Client::new(1),
+            PathBuf::from("/home/a"),
+            false,
+            BTreeMap::new(),
+        );
+        assert_eq!(app.metadata_label(), None);
+        app.metadata_completed = 4;
+        app.metadata_total = 9;
+        assert_eq!(app.metadata_label().as_deref(), Some("metadata: 4/9"));
+        app.cache_hits = 2;
+        app.cache_misses = 1;
+        assert_eq!(
+            app.metadata_label().as_deref(),
+            Some("metadata: 4/9, cache: 2 hits, 1 misses")
+        );
+        app.metadata_completed = 0;
+        app.metadata_total = 0;
+        assert_eq!(
+            app.metadata_label().as_deref(),
+            Some("cache: 2 hits, 1 misses")
+        );
+        app.cache_hits = 0;
+        app.cache_misses = 0;
+        assert_eq!(app.metadata_label(), None);
     }
 
     #[test]
