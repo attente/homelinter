@@ -63,6 +63,7 @@ The guard is an `flock` on `~/.local/share/homelinter/browser.lock`, released by
 
 Closing the window stops the service and exits the launcher; Ctrl-C in the foreground or a `SIGTERM` does the same and also stops the browser tree.
 The launcher ignores `SIGHUP`, so starting it with `&` (or losing the terminal or SSH session that started it) leaves the service and window running until one of those quit paths occurs.
+On NixOS, `appimage-run` adds a bubblewrap supervisor that exits on `SIGHUP` before the launcher handles it; start the AppImage with `nohup ... &` there to keep it alive across a terminal close.
 
 To pick a browser, or to reach one behind a wrapper:
 
