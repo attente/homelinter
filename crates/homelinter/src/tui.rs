@@ -1278,8 +1278,11 @@ impl App {
         }
         if self.cache_hits + self.cache_misses > 0 {
             parts.push(format!(
-                "{} hits, {} misses",
-                self.cache_hits, self.cache_misses
+                "{} {}, {} {}",
+                self.cache_hits,
+                plural(self.cache_hits, "hit", "hits"),
+                self.cache_misses,
+                plural(self.cache_misses, "miss", "misses")
             ));
         }
         if parts.is_empty() {
@@ -1712,6 +1715,15 @@ fn block(title: &str) -> Block<'static> {
     Block::bordered().title(title.to_string())
 }
 
+/// Singular for exactly one, plural otherwise ("0 hits", "1 hit").
+fn plural<'a>(n: u64, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 {
+        one
+    } else {
+        many
+    }
+}
+
 fn centered_rect(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
     let [v] = Layout::vertical([Constraint::Percentage(height_pct)])
         .flex(Flex::Center)
@@ -2039,11 +2051,14 @@ mod tests {
         app.cache_misses = 1;
         assert_eq!(
             app.metadata_label().as_deref(),
-            Some("metadata: 4/9, 2 hits, 1 misses")
+            Some("metadata: 4/9, 2 hits, 1 miss")
         );
         app.metadata_completed = 0;
         app.metadata_total = 0;
-        assert_eq!(app.metadata_label().as_deref(), Some("2 hits, 1 misses"));
+        assert_eq!(app.metadata_label().as_deref(), Some("2 hits, 1 miss"));
+        app.cache_hits = 1;
+        app.cache_misses = 0;
+        assert_eq!(app.metadata_label().as_deref(), Some("1 hit, 0 misses"));
         app.cache_hits = 0;
         app.cache_misses = 0;
         assert_eq!(app.metadata_label(), None);
