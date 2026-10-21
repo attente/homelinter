@@ -170,6 +170,26 @@ textarea:focus {
   color: var(--fg);
 }
 
+/* Selects, including the popup list of options. `color-scheme: dark` asks
+   the browser for dark widgets, but the popup is drawn by the platform rather
+   than the page, so on a light GTK theme Chromium painted the list light
+   while the options kept this page's light text. Paint both sides here;
+   Chromium and Firefox both honour `option` colours. */
+select {
+  font: inherit;
+  color: var(--fg);
+  background-color: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+select option,
+select optgroup {
+  color: var(--fg);
+  background-color: var(--bg2);
+}
+
 .field {
   display: block;
   margin-bottom: 16px;
@@ -230,16 +250,10 @@ textarea:focus {
   cursor: default;
 }
 
-/* Filter combo boxes: a flat select styled like the toolbar buttons, so every
+/* Filter combo boxes: a select styled like the toolbar buttons, so every
    choice is reachable in one click (and by typing) instead of cycling. */
 .filter-select {
-  font: inherit;
   font-size: 12px;
-  padding: 2px 4px;
-  color: var(--fg);
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 4px;
 }
 
 .sep {
