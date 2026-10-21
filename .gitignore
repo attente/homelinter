@@ -1,5 +1,9 @@
+# Cargo build output
 /target
+
+# local environment and process logs
 /.direnv
+/nohup.out
 
 # webui build artifacts
 /webui/dist
