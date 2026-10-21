@@ -67,6 +67,43 @@ pub struct App {
     /// Scan epoch for provider results: incremented per scan start; jobs
     /// carrying an older epoch are dropped by the worker.
     pub provider_epoch: AtomicU64,
+    /// Provider cache lookups for the current batch (see `CacheStats`).
+    pub cache_stats: CacheStats,
+}
+
+/// Provider cache lookups since the current scan enqueued its provider work:
+/// how many requests were answered from the persistent cache and how many had
+/// to reach the provider. The pair is reset when a scan plans its work, so it
+/// describes the batch the session is showing rather than the life of the
+/// process. A forced refresh (an explicit re-request that discards the cached
+/// value) never reads the cache and is therefore neither a hit nor a miss.
+#[derive(Debug, Default)]
+pub struct CacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl CacheStats {
+    pub fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn reset(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
+
+    /// `(hits, misses)` for the current batch.
+    pub fn counts(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
+    }
 }
 
 pub type AppHandle = Arc<App>;
@@ -385,7 +422,9 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     // Enqueue provider work (reverse geocoding, descriptions). The worker
     // fetches these in the background with per-provider rate limiting and
     // clears each suggestion's pending flag as its requests resolve; the
-    // scan itself was never blocked on them.
+    // scan itself was never blocked on them. The cache counters restart with
+    // this batch, so the header's hit/miss pair describes the scan on screen.
+    app.cache_stats.reset();
     for job in provider_jobs {
         app.provider_queue.enqueue(job);
     }

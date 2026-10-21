@@ -262,6 +262,9 @@ async fn health_and_session_start_idle() {
         v["metadata_progress"],
         json!({ "completed": 0, "total": 0 })
     );
+    // No provider work has been planned, so no cache lookups happened.
+    assert_eq!(v["cache_hits"], json!(0));
+    assert_eq!(v["cache_misses"], json!(0));
     assert_eq!(v["warnings"], json!([]));
     // Config GET carries the merged effective config.
     let (status, v) = request(&app, "GET", "/api/v1/config", None).await;

@@ -419,6 +419,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
     let selection_count = sess.suggestions.iter().filter(|s| s.selected).count();
     let (metadata_completed, metadata_total) = sess.metadata_progress();
     let manual_overrides_total = sess.manual_overrides_total();
+    let (cache_hits, cache_misses) = app.cache_stats.counts();
     let mut v = json!({
         "state": sess.state,
         "scan_root": sess.scan_root,
@@ -433,6 +434,8 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
             "completed": metadata_completed,
             "total": metadata_total,
         },
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
         "warnings": sess.warnings,
     });
     if let Some(f) = &sess.failure {

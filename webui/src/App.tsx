@@ -919,6 +919,8 @@ export default function App() {
         root={st.session?.scan_root ?? null}
         counts={counts}
         metadataProgress={st.metadataProgress}
+        cacheHits={st.session?.cache_hits ?? 0}
+        cacheMisses={st.session?.cache_misses ?? 0}
         busy={st.busy}
         scanDisabled={!canScan}
         onNewScan={() =>

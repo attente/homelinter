@@ -232,6 +232,10 @@ struct App {
     progress_elapsed_ms: u64,
     metadata_completed: usize,
     metadata_total: usize,
+    /// Provider cache lookups for the current batch, as reported by the
+    /// service's `cache_hits`/`cache_misses` session counters.
+    cache_hits: u64,
+    cache_misses: u64,
     filter: Filter,
     cursor: usize,
     list_offset: usize,
@@ -277,6 +281,8 @@ impl App {
             progress_elapsed_ms: 0,
             metadata_completed: 0,
             metadata_total: 0,
+            cache_hits: 0,
+            cache_misses: 0,
             filter: Filter::default(),
             cursor: 0,
             list_offset: 0,
@@ -329,6 +335,8 @@ impl App {
         self.filter = Filter::default();
         self.metadata_completed = 0;
         self.metadata_total = 0;
+        self.cache_hits = 0;
+        self.cache_misses = 0;
         self.client
             .start_scan(serde_json::json!({}))
             .await
@@ -750,6 +758,8 @@ impl App {
             self.metadata_completed =
                 sess["metadata_progress"]["completed"].as_u64().unwrap_or(0) as usize;
             self.metadata_total = sess["metadata_progress"]["total"].as_u64().unwrap_or(0) as usize;
+            self.cache_hits = sess["cache_hits"].as_u64().unwrap_or(0);
+            self.cache_misses = sess["cache_misses"].as_u64().unwrap_or(0);
             self.warnings = sess["warnings"]
                 .as_array()
                 .map(|a| {
@@ -1286,6 +1296,15 @@ impl App {
                 Style::new().fg(Color::Yellow),
             ));
         }
+        if self.cache_hits + self.cache_misses > 0 {
+            spans.push(Span::styled(
+                format!(
+                    "  cache: {} hits, {} misses",
+                    self.cache_hits, self.cache_misses
+                ),
+                Style::new().fg(Color::Yellow),
+            ));
+        }
         if !self.warnings.is_empty() {
             spans.push(Span::styled(
                 format!("  warnings: {}", self.warnings.len()),
@@ -1343,6 +1362,12 @@ impl App {
             text.lines.push(Line::from(format!(
                 " metadata: {}/{} resolved",
                 self.metadata_completed, self.metadata_total
+            )));
+        }
+        if self.cache_hits + self.cache_misses > 0 {
+            text.lines.push(Line::from(format!(
+                " cache: {} hits, {} misses",
+                self.cache_hits, self.cache_misses
             )));
         }
         for w in &self.warnings {

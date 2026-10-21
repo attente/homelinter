@@ -1,4 +1,4 @@
-import { stateLabel } from '../lib/format';
+import { cacheStatsLabel, stateLabel } from '../lib/format';
 import type { MetadataProgress } from '../types';
 
 export interface HeaderCounts {
@@ -14,6 +14,10 @@ interface HeaderProps {
   root: string | null;
   counts: HeaderCounts;
   metadataProgress?: MetadataProgress | null;
+  /** Provider cache lookups for the current batch (0 until a provider
+   * request is made; the pair is hidden while both are zero). */
+  cacheHits: number;
+  cacheMisses: number;
   busy: boolean;
   scanDisabled?: boolean;
   onNewScan: () => void;
@@ -21,7 +25,7 @@ interface HeaderProps {
 }
 
 export function Header(props: HeaderProps) {
-  const { state, root, counts, metadataProgress, busy, scanDisabled, onNewScan, onConfig } = props;
+  const { state, root, counts, metadataProgress, cacheHits, cacheMisses, busy, scanDisabled, onNewScan, onConfig } = props;
   const badgeClass = state === 'ready' || state === 'done' ? 'state-ok' : state === 'failed' ? 'state-bad' : 'state-busy';
   return (
     <header className="header">
@@ -34,6 +38,11 @@ export function Header(props: HeaderProps) {
       {metadataProgress && metadataProgress.total > 0 && (
         <span className="counts metadata-progress">
           metadata: {metadataProgress.completed}/{metadataProgress.total}
+        </span>
+      )}
+      {cacheHits + cacheMisses > 0 && (
+        <span className="counts cache-stats">
+          cache: {cacheStatsLabel(cacheHits, cacheMisses)}
         </span>
       )}
       <nav className="header-actions">

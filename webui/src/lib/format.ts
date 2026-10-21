@@ -172,3 +172,15 @@ export function stateLabel(state: string): string {
 export function asciiOnly(s: string): boolean {
   return s.split('').every((c) => c.charCodeAt(0) <= 127);
 }
+
+/**
+ * Header label for the provider cache counters, e.g. `12 hits, 3 misses`.
+ * The two counts are named rather than slashed because they are not a
+ * fraction of one another: a hit is a request the cache answered, a miss is
+ * one that had to reach the provider.
+ */
+export function cacheStatsLabel(hits: number, misses: number): string {
+  const h = `${hits} ${hits === 1 ? 'hit' : 'hits'}`;
+  const m = `${misses} ${misses === 1 ? 'miss' : 'misses'}`;
+  return `${h}, ${m}`;
+}

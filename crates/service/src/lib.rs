@@ -118,6 +118,7 @@ pub fn build_service(opts: ServiceOptions) -> Result<Built, ApiError> {
         cancel: AtomicU64::new(0),
         provider_epoch: AtomicU64::new(0),
         provider_queue: provider_queue.clone(),
+        cache_stats: pipeline::CacheStats::default(),
         cli_config: opts.cli_config,
         config_chain: chain,
         home_override: opts.home_override,

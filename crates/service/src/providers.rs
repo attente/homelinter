@@ -386,11 +386,21 @@ async fn process_provider_job(
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
-    match if job.force {
+    let cached = if job.force {
         None
     } else {
         cache_get(app, job).await
-    } {
+    };
+    // A forced re-request deliberately ignores the cached value, so it is
+    // reported as neither a hit nor a miss.
+    if !job.force {
+        if cached.is_some() {
+            app.cache_stats.record_hit();
+        } else {
+            app.cache_stats.record_miss();
+        }
+    }
+    match cached {
         Some(v) => Some(v),
         None => {
             // Cache miss: fetch the provider input first (document text
@@ -2963,6 +2973,41 @@ mod tests {
                 .as_deref(),
             Some("paris")
         );
+    }
+
+    #[tokio::test]
+    async fn cache_lookups_are_counted_per_batch() {
+        let (app, epoch) = primed_app().await;
+        let port = stub_geocoder().await;
+        let job = geocode_job(&app, port, epoch).await;
+        let tools = ToolSet::detect();
+        let last = Mutex::new(BTreeMap::new());
+
+        assert_eq!(app.cache_stats.counts(), (0, 0));
+        let first = super::process_provider_job(&app, &job, &tools, &last).await;
+        assert_eq!(first.as_deref(), Some("paris"));
+        assert_eq!(app.cache_stats.counts(), (0, 1), "the first lookup missed");
+
+        // The same key now resolves from the persistent cache.
+        let second = super::process_provider_job(&app, &job, &tools, &last).await;
+        assert_eq!(second.as_deref(), Some("paris"));
+        assert_eq!(app.cache_stats.counts(), (1, 1), "the second lookup hit");
+
+        // A forced re-request ignores the cache by design, so it is not
+        // reported as a lookup at all.
+        let mut forced = job.clone();
+        forced.force = true;
+        let third = super::process_provider_job(&app, &forced, &tools, &last).await;
+        assert_eq!(third.as_deref(), Some("paris"));
+        assert_eq!(
+            app.cache_stats.counts(),
+            (1, 1),
+            "a forced job is not counted"
+        );
+
+        // A new batch restarts the pair (the scan planner resets it).
+        app.cache_stats.reset();
+        assert_eq!(app.cache_stats.counts(), (0, 0));
     }
 
     #[tokio::test]

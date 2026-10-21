@@ -11,6 +11,7 @@ import {
 } from './filter';
 import {
   asciiOnly,
+  cacheStatsLabel,
   countsOf,
   countsSummary,
   entryLine,
@@ -204,6 +205,13 @@ describe('format', () => {
     expect(manualOverrideLabel(['location', 'subject', 'author'])).toBe(
       'location, subject, and author',
     );
+  });
+
+  it('cache counters read as two named counts, singular when one', () => {
+    expect(cacheStatsLabel(0, 0)).toBe('0 hits, 0 misses');
+    expect(cacheStatsLabel(12, 3)).toBe('12 hits, 3 misses');
+    expect(cacheStatsLabel(1, 1)).toBe('1 hit, 1 miss');
+    expect(asciiOnly(cacheStatsLabel(3, 1))).toBe(true);
   });
 
   it('row label shows a scanning placeholder while provider metadata is pending', () => {

@@ -32,6 +32,12 @@ export interface Session {
    * least one saved manual override. */
   manual_overrides_total: number;
   metadata_progress?: MetadataProgress;
+  /** Provider cache lookups for the current batch: the requests answered
+   * from the persistent cache, and the ones that had to reach the provider.
+   * Reset when a scan plans its provider work; a forced re-request reads
+   * neither the cache nor these counters. */
+  cache_hits?: number;
+  cache_misses?: number;
   /** Scan warnings for the current batch, for example a duplicate group
    * left for manual review; empty until a scan publishes them. */
   warnings?: string[];
