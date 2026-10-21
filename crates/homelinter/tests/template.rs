@@ -82,6 +82,7 @@ fn config_template_loads_and_validates() {
         "exclude_paths",
         "exclude_extensions",
         "default_exclusions",
+        "hidden",
         "hidden_definition",
         // [output]
         "format",

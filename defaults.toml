@@ -115,6 +115,9 @@ exclude_paths = []
 # Extensions excluded from discovery at any depth, without a leading dot and
 # matched case-insensitively (e.g. ["png"] skips a.png and PHOTO.PNG).
 exclude_extensions = []
+# Whether hidden entries are included in discovery. On Linux and macOS a name
+# with a leading dot is hidden; on Windows see hidden_definition.
+hidden = false
 # Windows only: explorer (default) | attribute | dotfiles.
 hidden_definition = "explorer"
 
