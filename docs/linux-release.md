@@ -61,7 +61,8 @@ Set `HOMELINTER_BROWSER_DATA_DIR` to put it elsewhere, and delete that directory
 Because there is exactly one profile, only one homelinter window runs at a time; a second start reports `homelinter is already running` and exits with status 1 instead of hijacking the open window.
 The guard is an `flock` on `~/.local/share/homelinter/browser.lock`, released by the kernel when the app exits, so a crash never blocks the next start.
 
-Closing the window stops the service and exits the launcher; Ctrl-C or a `SIGTERM` does the same and also stops the browser tree.
+Closing the window stops the service and exits the launcher; Ctrl-C in the foreground or a `SIGTERM` does the same and also stops the browser tree.
+The launcher ignores `SIGHUP`, so starting it with `&` (or losing the terminal or SSH session that started it) leaves the service and window running until one of those quit paths occurs.
 
 To pick a browser, or to reach one behind a wrapper:
 

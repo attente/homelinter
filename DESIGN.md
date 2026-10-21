@@ -585,6 +585,7 @@ The launcher keeps one reserved browser profile, `$XDG_DATA_HOME/homelinter/brow
 One profile is shared by every invocation, so a non-blocking `flock` on `<profile>.lock` admits one launcher at a time and a second start fails with a message instead of taking over the window that is already open (Chromium would otherwise hand the URL to the running instance and exit, stopping the new service under the old window).
 The kernel drops the lock with the process, so a killed launcher never blocks the next start, and the profile sits under a hidden directory that the default hidden-file setting keeps out of a scan.
 The browser is spawned in its own process group, so Ctrl-C or SIGTERM forwards `SIGTERM` to the whole browser tree before the service stops, and a browser still alive after three seconds is killed.
+SIGHUP is caught and drained for the launcher's lifetime, so a launch backgrounded with `&`, or one whose terminal or SSH session goes away, keeps both the in-process service and the browser window alive; closing the window, Ctrl-C, and SIGTERM are still the only quit paths.
 The bundled SPA lives at `usr/share/homelinter/webui` and is resolved relative to the executable, with `HOMELINTER_WEB_DIR` still taking precedence.
 
 ## Distribution & Packaging

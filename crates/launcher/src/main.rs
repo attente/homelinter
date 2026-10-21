@@ -23,6 +23,8 @@
 //! 5. Spawn the browser against that origin and wait for it to exit.
 //! 6. Signal the service's shutdown watch and wait, bounded, for it to stop.
 //!
+//! SIGHUP is ignored for the launcher's lifetime, so starting the AppImage
+//! in the background or closing its terminal does not tear the service down.
 //! Nothing is spawned as a child process except the browser, so a crash of
 //! either side cannot leave an orphaned backend behind.
 
@@ -54,6 +56,13 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // A GUI launch from a shell (`./homelinter.AppImage &`) must outlive the
+    // terminal or SSH session that started it. SIGHUP defaults to terminating
+    // the process, which would stop the in-process service and could leave the
+    // browser window open on a dead origin while the shell's job cleanup
+    // signals the launcher.
+    ignore_hangup();
+
     // Resolve everything that can fail on its own before starting the
     // service, so a missing SPA, a missing browser, or a second instance
     // never leaves a running backend behind.
@@ -493,7 +502,9 @@ fn lock_exclusive(_file: &std::fs::File) -> Result<(), LockError> {
 ///
 /// A clean browser exit is the normal quit path. Ctrl-C and SIGTERM close
 /// the browser first, so an interrupted AppImage never leaves a stray
-/// app-mode window pointed at a service that is about to stop.
+/// app-mode window pointed at a service that is about to stop. SIGHUP is
+/// not an interrupt here: `ignore_hangup` catches it so the launcher and
+/// service survive the terminal going away.
 async fn wait_for_browser(child: &mut Child) -> Result<(), String> {
     let mut terminate = terminate_signal();
     let status = tokio::select! {
@@ -540,6 +551,22 @@ fn signal_browser(pid: u32) -> bool {
 fn signal_browser(_pid: u32) -> bool {
     false
 }
+
+/// Catch and drain SIGHUP for the launcher's lifetime.
+///
+/// Installing the handler replaces SIGHUP's default terminate action. The
+/// stream is drained on a background task so later hangups are discarded
+/// instead of accumulating, and the launcher keeps waiting for the browser.
+/// The normal quit paths (window closed, Ctrl-C, SIGTERM) are unchanged.
+#[cfg(unix)]
+fn ignore_hangup() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut hangup = signal(SignalKind::hangup()).expect("install a SIGHUP handler");
+    tokio::spawn(async move { while hangup.recv().await.is_some() {} });
+}
+
+#[cfg(not(unix))]
+fn ignore_hangup() {}
 
 #[cfg(unix)]
 fn terminate_signal() -> tokio::signal::unix::Signal {

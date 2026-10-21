@@ -63,7 +63,7 @@ The DMG is written to `crates/desktop/src-tauri/target/universal-apple-darwin/re
 
 `crates/launcher` builds `homelinter-app`, a small launcher that runs the same in-process service and opens the SPA in an app-mode window of the browser you already have.
 It is not a Tauri build: the bundle carries no WebKitGTK, GTK, or GStreamer, so it is one self-contained AppImage whose only library dependencies are glibc and libgcc.
-The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` with `--app` (Chromium, Chrome, Brave, Edge, Vivaldi) or `--kiosk` (Firefox), and stops the service when you close that window; Ctrl-C in a terminal stops both.
+The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` with `--app` (Chromium, Chrome, Brave, Edge, Vivaldi) or `--kiosk` (Firefox), and stops the service when you close that window; Ctrl-C in the foreground or `SIGTERM` stops both, while closing the terminal does not stop a launch started with `&` because the launcher ignores `SIGHUP`.
 Chromium-based browsers give a true app window with no location bar, bookmarks, or tabs.
 Set `HOMELINTER_BROWSER` to choose the browser or a wrapper for it.
 
