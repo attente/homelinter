@@ -2419,11 +2419,31 @@ mod tests {
             )
         );
 
-        // Every later save edits the file that now exists: the new key joins
-        // its own documented section and nothing else moves.
+        // Every later save edits the file that now exists: a key the dump
+        // already documents (scan.hidden) is rewritten in place, and a key it
+        // does not document yet (scan.root) joins its own section. Nothing
+        // else moves, and no key is ever duplicated.
         merge_and_write_config_chain(
             &chain,
             &serde_json::json!({"scan": {"hidden": true}}),
+            Some(&file),
+        )
+        .unwrap();
+        let after_hidden = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            after_hidden,
+            DEFAULT_CONFIG_TEMPLATE
+                .replace(
+                    "large_file_threshold = 104857600",
+                    "large_file_threshold = 42"
+                )
+                .replace("hidden = false\n", "hidden = true\n")
+        );
+        assert_eq!(after_hidden.matches("hidden =").count(), 1);
+
+        merge_and_write_config_chain(
+            &chain,
+            &serde_json::json!({"scan": {"root": "/tmp/hl-scan-root"}}),
             Some(&file),
         )
         .unwrap();
@@ -2434,9 +2454,10 @@ mod tests {
                     "large_file_threshold = 104857600",
                     "large_file_threshold = 42"
                 )
+                .replace("hidden = false\n", "hidden = true\n")
                 .replace(
                     "hidden_definition = \"explorer\"\n",
-                    "hidden_definition = \"explorer\"\nhidden = true\n"
+                    "hidden_definition = \"explorer\"\nroot = \"/tmp/hl-scan-root\"\n"
                 )
         );
 

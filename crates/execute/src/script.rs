@@ -109,6 +109,26 @@ fn export_posix_move(s: &Suggestion, out: &mut String) -> Result<(), String> {
     out.push_str(&format!(
         "[ -e {src} ] || abort \"source missing:\" {src}\n"
     ));
+    // Content re-verification, matching the executor's source preflight: a
+    // move below the analysis fast-path threshold carries the full-content
+    // hash, so a source replaced or edited since analysis is refused. A
+    // large file carries only the sampling hash, which a shell script cannot
+    // recompute, so the script says so rather than implying it checked.
+    match s.provenance.full_hash {
+        Some(hash_hex) => {
+            let expected = hex::encode(hash_hex);
+            out.push_str(&format!("actual=$(hl_sha256 {src})\n"));
+            out.push_str(&format!(
+                "[ \"$actual\" = \"{expected}\" ] || abort \"content changed since analysis:\" {src}\n"
+            ));
+        }
+        None if s.provenance.fast_hash.is_some() => {
+            out.push_str(
+                "# Analysis recorded only a sampling hash for this large file, which a\n# shell script cannot recompute: the move below checks that the source\n# exists but does not re-verify its content.\n",
+            );
+        }
+        None => {}
+    }
     out.push_str(&format!(
         "[ ! -e {dst_q} ] || abort \"destination exists:\" {dst_q}\n"
     ));
@@ -278,14 +298,41 @@ fn export_powershell_move(s: &Suggestion, out: &mut String) -> Result<(), String
     out.push_str(&format!(
         "if (-not (Test-Path -LiteralPath '{src}')) {{ Abort 'source missing: {src}' }}\n"
     ));
+    // Content re-verification, matching the executor's source preflight (see
+    // the POSIX branch). A directory has no content hash to check.
+    out.push_str(&format!("$hlItem = Get-Item -LiteralPath '{src}'\n"));
+    if let Some(hash_hex) = s.provenance.full_hash {
+        let expected = hex::encode(hash_hex);
+        out.push_str(&format!(
+            "$h = (Get-FileHash -Algorithm SHA256 -LiteralPath '{src}').Hash.ToLower()\n"
+        ));
+        out.push_str(&format!(
+            "if ($h -ne '{expected}') {{ Abort 'content changed since analysis: {src}' }}\n"
+        ));
+    } else if s.provenance.fast_hash.is_some() {
+        out.push_str(
+            "# Analysis recorded only a sampling hash for this large file, which a\n# PowerShell script cannot recompute: the move below checks that the source\n# exists but does not re-verify its content.\n",
+        );
+    }
     out.push_str(&format!(
         "if (Test-Path -LiteralPath '{dst_q}') {{ Abort 'destination exists: {dst_q}' }}\n"
     ));
     out.push_str(&format!(
         "New-Item -ItemType Directory -Force -Path '{parent_q}' | Out-Null\n"
     ));
+    // `[System.IO.File]::Move` / `[System.IO.Directory]::Move` wrap the Win32
+    // no-replace rename: unlike `Move-Item` they never fall back to an
+    // unverified copy, and they fail when the destination exists or the move
+    // crosses a volume. That is the same pair of guarantees the POSIX branch
+    // gets from the device check plus `mv -n`.
     out.push_str(&format!(
-        "Move-Item -LiteralPath '{src}' -Destination '{dst_q}'\n"
+        "try {{\n  if ($hlItem.PSIsContainer) {{ [System.IO.Directory]::Move('{src}', '{dst_q}') }}\n  else {{ [System.IO.File]::Move('{src}', '{dst_q}') }}\n}}\n"
+    ));
+    out.push_str(&format!(
+        "}} catch {{\n  Abort 'move failed (an existing destination or a cross-volume move is refused in an exported script; run homelinter to execute it): {src} -> {dst_q}'\n}}\n"
+    ));
+    out.push_str(&format!(
+        "if (Test-Path -LiteralPath '{src}') {{ Abort 'source remains: {src}' }}\n"
     ));
     Ok(())
 }
@@ -595,6 +642,71 @@ mod tests {
     fn windows_export_notes_reparse_seam() {
         let s = mv_suggestion();
         let script = export_script(std::slice::from_ref(&s), "windows").unwrap();
-        assert!(script.contains("Move-Item"));
+        assert!(script.contains("[System.IO.File]::Move"));
+        assert!(!script.contains("Move-Item"), "{script}");
+    }
+
+    #[test]
+    fn windows_move_refuses_cross_volume_and_checks_the_source_is_gone() {
+        let s = mv_suggestion();
+        let script = export_script(std::slice::from_ref(&s), "windows").unwrap();
+        // No unverified copy fallback, like the POSIX device guard.
+        assert!(script.contains("[System.IO.Directory]::Move"), "{script}");
+        assert!(script.contains("catch"), "{script}");
+        assert!(script.contains("cross-volume move is refused"), "{script}");
+        assert!(script.contains("source remains"), "{script}");
+        // The content check is only emitted when analysis recorded a hash.
+        assert!(
+            !script.contains(
+                "Get-FileHash -Algorithm SHA256 -LiteralPath '/home/alice/Downloads/a.pdf'"
+            ),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn posix_move_verifies_a_recorded_full_hash() {
+        let mut s = mv_suggestion();
+        s.provenance.full_hash = Some([0xcd; 32]);
+        let script = export_script(std::slice::from_ref(&s), "linux").unwrap();
+        assert!(
+            script.contains(&format!(
+                "[ \"$actual\" = \"{}\" ] || abort \"content changed since analysis:\" ",
+                hex::encode([0xcd; 32])
+            )),
+            "{script}"
+        );
+        // The check precedes the move.
+        assert!(script.find("actual=$(hl_sha256").unwrap() < script.find("mv -n").unwrap());
+    }
+
+    #[test]
+    fn windows_move_verifies_a_recorded_full_hash() {
+        let mut s = mv_suggestion();
+        s.provenance.full_hash = Some([0xef; 32]);
+        let script = export_script(std::slice::from_ref(&s), "windows").unwrap();
+        assert!(
+            script.contains("Get-FileHash -Algorithm SHA256"),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!(
+                "if ($h -ne '{}') {{ Abort 'content changed since analysis:",
+                hex::encode([0xef; 32])
+            )),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn large_file_moves_say_content_is_not_reverified() {
+        let mut s = mv_suggestion();
+        s.provenance.fast_hash = Some([0x11; 32]);
+        for platform in ["linux", "windows"] {
+            let script = export_script(std::slice::from_ref(&s), platform).unwrap();
+            assert!(script.contains("sampling hash"), "{platform}: {script}");
+            assert!(!script.contains("Get-FileHash"), "{platform}: {script}");
+            assert!(!script.contains("hl_sha256 '/home"), "{platform}: {script}");
+        }
     }
 }
