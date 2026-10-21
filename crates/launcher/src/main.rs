@@ -17,10 +17,11 @@
 //! Lifecycle, mirroring `crates/desktop/src-tauri/src/main.rs`:
 //!
 //! 1. Resolve the built SPA (bundled as `usr/share/homelinter/webui`).
-//! 2. Pick a browser (Chromium family first, Firefox as a kiosk fallback).
-//! 3. Bind an ephemeral loopback port, build the service, wait for health.
-//! 4. Spawn the browser against that origin and wait for it to exit.
-//! 5. Signal the service's shutdown watch and wait, bounded, for it to stop.
+//! 2. Take the single-instance lock on the reserved browser profile.
+//! 3. Pick a browser (Chromium family first, Firefox as a kiosk fallback).
+//! 4. Bind an ephemeral loopback port, build the service, wait for health.
+//! 5. Spawn the browser against that origin and wait for it to exit.
+//! 6. Signal the service's shutdown watch and wait, bounded, for it to stop.
 //!
 //! Nothing is spawned as a child process except the browser, so a crash of
 //! either side cannot leave an orphaned backend behind.
@@ -54,24 +55,24 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     // Resolve everything that can fail on its own before starting the
-    // service, so a missing SPA or missing browser never leaves a running
-    // backend behind.
+    // service, so a missing SPA, a missing browser, or a second instance
+    // never leaves a running backend behind.
     let web_dir = resolve_web_dir()?;
+    let data = BrowserData::create()?;
+    // Held until the process exits; see `BrowserData`.
+    let _lock = data.lock()?;
     let browser = Browser::detect()?;
 
     let (port, shutdown_tx, server) = start_server(web_dir).await?;
     let url = format!("http://127.0.0.1:{port}/");
 
-    let profile = ProfileDir::create()?;
-    let mut child = browser.spawn(&url, profile.path())?;
+    let mut child = browser.spawn(&url, data.path())?;
     eprintln!(
         "homelinter: {url} opened with {}; close the window to quit",
         browser.describe()
     );
 
     let outcome = wait_for_browser(&mut child).await;
-    // The browser is gone, so its profile is no longer in use.
-    drop(profile);
 
     let _ = shutdown_tx.send(true);
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, server)
@@ -268,10 +269,10 @@ impl Browser {
         cmd.args(&self.prefix);
         match self.flavor {
             Flavor::AppMode => {
-                // A per-run `--user-data-dir` is load-bearing: with the
-                // default profile a second invocation hands the URL to an
-                // already running browser and exits at once, which would
-                // stop the service under the open window.
+                // A dedicated `--user-data-dir` is load-bearing: with the
+                // default profile Chromium hands the URL to an already
+                // running browser and exits at once, which would stop the
+                // service under the open window.
                 cmd.arg(format!("--app={url}"))
                     .arg(format!("--user-data-dir={}", profile.display()))
                     .arg("--class=homelinter")
@@ -361,25 +362,27 @@ fn is_executable(path: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Per-run browser profile
+// Browser profile
 // ---------------------------------------------------------------------------
 
-/// A private, disposable browser profile directory.
+/// The reserved browser profile: one directory, reused by every invocation.
 ///
-/// It lives under `XDG_RUNTIME_DIR` (tmpfs) when available so nothing is
-/// written to the home directory this tool exists to inspect, and it is
-/// removed when the launcher exits.
-struct ProfileDir {
+/// It is neither the user's own browsing profile nor a throwaway directory.
+/// Sharing the user's profile would put the app's window into their real
+/// browsing session (cookies, history, extensions) and, worse, Chromium would
+/// hand the URL to an already running browser and exit at once, stopping the
+/// service under the window that stayed open. A fresh directory per run would
+/// throw away everything the browser keeps for the app (site data,
+/// permissions, window placement) on every launch. One reserved profile has
+/// neither problem; it sits under a hidden directory, so a default homelinter
+/// scan of the home directory does not walk it.
+struct BrowserData {
     path: PathBuf,
 }
 
-impl ProfileDir {
+impl BrowserData {
     fn create() -> Result<Self, String> {
-        let base = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
-        let path = base.join(format!("homelinter-app-{}", std::process::id()));
+        let path = profile_dir()?;
         std::fs::create_dir_all(&path).map_err(|e| {
             format!(
                 "cannot create the browser profile directory {}: {e}",
@@ -397,12 +400,89 @@ impl ProfileDir {
     fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The lock file sits beside the profile rather than inside it, so the
+    /// browser's own files stay untouched.
+    fn lock_path(&self) -> PathBuf {
+        self.path.with_extension("lock")
+    }
+
+    /// Take the single-instance lock. Exactly one launcher may use the
+    /// profile: a second one could only take over the window that is already
+    /// open, and its own service would then stop under it.
+    fn lock(&self) -> Result<InstanceLock, String> {
+        InstanceLock::acquire(&self.lock_path())
+    }
 }
 
-impl Drop for ProfileDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+/// Resolve the profile directory.
+///
+/// `HOMELINTER_BROWSER_DATA_DIR` wins, so an unpackaged or relocated install
+/// can put it elsewhere; otherwise it is `$XDG_DATA_HOME/homelinter/browser`
+/// (`~/.local/share/homelinter/browser` by default).
+fn profile_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("HOMELINTER_BROWSER_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
     }
+    let base = dirs::data_dir().ok_or_else(|| {
+        "cannot locate a data directory for the browser profile; set \
+         HOMELINTER_BROWSER_DATA_DIR to choose one"
+            .to_string()
+    })?;
+    Ok(base.join("homelinter").join("browser"))
+}
+
+/// An exclusive `flock` on the profile, held until the launcher exits. The
+/// kernel drops it with the process, so a killed launcher never blocks the
+/// next run.
+struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    fn acquire(path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::options()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| format!("cannot open the lock file {}: {e}", path.display()))?;
+        match lock_exclusive(&file) {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(LockError::Busy) => Err(format!(
+                "homelinter is already running; close its window before starting another \
+                 (browser profile: {})",
+                path.with_extension("").display()
+            )),
+            Err(LockError::Failed(e)) => Err(format!("cannot lock {}: {e}", path.display())),
+        }
+    }
+}
+
+/// Whether the profile lock could not be taken, and why.
+enum LockError {
+    /// Another launcher holds it.
+    Busy,
+    /// The lock could not be attempted at all.
+    Failed(std::io::Error),
+}
+
+#[cfg(unix)]
+fn lock_exclusive(file: &std::fs::File) -> Result<(), LockError> {
+    use rustix::fs::{flock, FlockOperation};
+
+    match flock(file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::WOULDBLOCK) => Err(LockError::Busy),
+        Err(e) => Err(LockError::Failed(e.into())),
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &std::fs::File) -> Result<(), LockError> {
+    // The AppImage is a Unix artifact; elsewhere the profile is shared
+    // without the cross-process guard rather than refusing to start.
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -518,5 +598,36 @@ mod tests {
     #[test]
     fn explicit_missing_path_is_not_found() {
         assert!(find_program("/nonexistent/homelinter/browser").is_none());
+    }
+
+    #[test]
+    fn the_lock_sits_beside_the_profile() {
+        let data = BrowserData {
+            path: PathBuf::from("/home/u/.local/share/homelinter/browser"),
+        };
+        assert_eq!(
+            data.lock_path(),
+            PathBuf::from("/home/u/.local/share/homelinter/browser.lock")
+        );
+    }
+
+    #[test]
+    fn only_one_instance_holds_the_profile() {
+        let dir = std::env::temp_dir().join(format!(
+            "homelinter-lock-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("browser.lock");
+
+        let first = InstanceLock::acquire(&path).unwrap();
+        assert!(InstanceLock::acquire(&path).is_err());
+        // The kernel releases the lock with the last handle to it.
+        drop(first);
+        assert!(InstanceLock::acquire(&path).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -51,10 +51,16 @@ chmod +x homelinter-0.2.0-x86_64.AppImage
 ```
 
 The launcher searches the `PATH` for, in order, `chromium`, `chromium-browser`, `google-chrome-stable`, `google-chrome`, `brave-browser`, `microsoft-edge-stable`, `vivaldi-stable`, `firefox`, and `firefox-esr`.
-Chromium-based browsers get `--app=<url>` plus a private profile, window size, no-first-run, and no-default-browser-check, so no tabs, bookmarks, or location bar appear.
-Firefox gets `--kiosk <url>` with its own profile.
+Chromium-based browsers get `--app=<url>` plus the reserved profile, window size, no-first-run, and no-default-browser-check, so no tabs, bookmarks, or location bar appear.
+Firefox gets `--kiosk <url>` with the same reserved profile.
 
-Each run creates a fresh browser profile under `XDG_RUNTIME_DIR` (or the temp directory) and deletes it on exit, so the window is always a new invocation rather than a tab handed to an already running browser.
+The app keeps its own browser profile in `~/.local/share/homelinter/browser` (`$XDG_DATA_HOME/homelinter/browser`), next to the service's cache and audit data.
+It is not your everyday browsing profile, so the app window starts clean and keeps no session shared with your own browsing, and it is not thrown away between runs, so the browser does not set itself up from scratch on every launch.
+Set `HOMELINTER_BROWSER_DATA_DIR` to put it elsewhere, and delete that directory to reset the app's browser state (site permissions, window placement) to a first launch.
+
+Because there is exactly one profile, only one homelinter window runs at a time; a second start reports `homelinter is already running` and exits with status 1 instead of hijacking the open window.
+The guard is an `flock` on `~/.local/share/homelinter/browser.lock`, released by the kernel when the app exits, so a crash never blocks the next start.
+
 Closing the window stops the service and exits the launcher; Ctrl-C or a `SIGTERM` does the same and also stops the browser tree.
 
 To pick a browser, or to reach one behind a wrapper:

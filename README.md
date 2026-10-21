@@ -67,6 +67,9 @@ The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` 
 Chromium-based browsers give a true app window with no location bar, bookmarks, or tabs.
 Set `HOMELINTER_BROWSER` to choose the browser or a wrapper for it.
 
+Its window uses the app's own browser profile, `~/.local/share/homelinter/browser` (`HOMELINTER_BROWSER_DATA_DIR` overrides it), never your everyday one, and reuses it across launches instead of starting from a temporary directory each time.
+One profile means one window: a second start reports `homelinter is already running` and exits rather than taking over the open window.
+
 `.github/workflows/linux-release.yml` builds the release AppImage on `ubuntu-22.04` (glibc 2.35 or newer: Ubuntu 22.04+, Debian 12+, Fedora 36+), smoke-tests it, and publishes it with install notes on `v*` tags.
 On NixOS it runs as-is with AppImage support enabled (`programs.appimage = { enable = true; binfmt = true; }`), or through `appimage-run` otherwise; the browser still comes from your profile.
 See [docs/linux-release.md](docs/linux-release.md) for the full guide.

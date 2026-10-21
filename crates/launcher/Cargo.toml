@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 homelinter-clients = { path = "../clients" }
 homelinter-service = { path = "../service" }
+dirs = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

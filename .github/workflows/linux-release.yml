@@ -102,6 +102,15 @@ jobs:
           A wrapper works too:
                HOMELINTER_BROWSER="flatpak run org.chromium.Chromium" ./homelinter-*.AppImage
 
+          Data:
+          - The app keeps its own browser profile in
+            ~/.local/share/homelinter/browser, never your everyday browsing
+            profile, and reuses it on every launch. Delete that directory to
+            reset the app's browser state; set HOMELINTER_BROWSER_DATA_DIR to
+            keep it somewhere else.
+          - Only one homelinter window runs at a time. A second start exits with
+            "homelinter is already running".
+
           NixOS:
           - With AppImage support enabled in the system configuration, the file
             runs directly:
