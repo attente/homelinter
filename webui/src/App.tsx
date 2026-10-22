@@ -5,6 +5,7 @@ import { ConfigView } from "./components/ConfigView";
 import { Header } from "./components/Header";
 import { RunView } from "./components/RunView";
 import { ScanForm, ScanFormValues } from "./components/ScanForm";
+import { ScanMeter } from "./components/ScanMeter";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
@@ -897,6 +898,9 @@ export default function App() {
             <span className="spinner" aria-hidden="true" />
             {stateLabel(state)} ...
           </span>
+          <ScanMeter progress={st.progress} />
+        </div>
+        <div className="run-status">
           {st.progress && (
             <span className="progress-line">
               {scanProgressLabel(st.progress)}

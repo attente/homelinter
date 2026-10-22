@@ -14,7 +14,9 @@ import {
 import {
   asciiOnly,
   cacheStatsLabel,
+  scanProgressFraction,
   scanProgressLabel,
+  scanProgressPercent,
   suggestionCountLabel,
   countsOf,
   countsSummary,
@@ -240,6 +242,22 @@ describe('format', () => {
         elapsed_ms: 30000,
       }),
     ).toBe('hashing scanned=9000, elapsed=30s');
+  });
+
+  it('turns a scan progress event into a meter fraction', () => {
+    // Known totals fill the bar.
+    expect(scanProgressFraction({ scanned: 0, total: 4000 })).toBe(0);
+    expect(scanProgressFraction({ scanned: 1000, total: 4000 })).toBe(0.25);
+    expect(scanProgressFraction({ scanned: 4000, total: 4000 })).toBe(1);
+    expect(scanProgressPercent({ scanned: 1000, total: 4000 })).toBe(25);
+    expect(scanProgressPercent({ scanned: 11263, total: 11263 })).toBe(100);
+    // Overrun and zero totals never produce a bar outside the track.
+    expect(scanProgressFraction({ scanned: 5, total: 4 })).toBe(1);
+    expect(scanProgressFraction({ scanned: 5, total: 0 })).toBeNull();
+    // Phases that discover their length as they run report no total, so the
+    // meter has to stay indeterminate rather than invent a percentage.
+    expect(scanProgressFraction({ scanned: 929280, total: null })).toBeNull();
+    expect(scanProgressPercent({ scanned: 929280, total: null })).toBeNull();
   });
 
   it('labels the filter-row suggestion counts', () => {

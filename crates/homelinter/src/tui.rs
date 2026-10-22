@@ -1441,6 +1441,14 @@ impl App {
                 " phase: {}{}   scanned: {}   elapsed: {} ms",
                 self.progress_phase, detail, scanned, self.progress_elapsed_ms
             )));
+            text.lines.push(Line::from(format!(
+                " {}",
+                progress_meter(
+                    self.progress_scanned,
+                    self.progress_total,
+                    self.progress_elapsed_ms
+                )
+            )));
         }
         if let Some(label) = self.metadata_label() {
             text.lines.push(Line::from(format!(" {label}")));
@@ -2115,6 +2123,41 @@ fn filter_matches_row(f: &Filter, r: &Row) -> bool {
     true
 }
 
+/// Width of the scan progress meter, in cells.
+const METER_WIDTH: usize = 32;
+/// Cells of the sliding segment shown while a phase cannot know its total.
+const METER_SEGMENT: usize = 8;
+
+/// ASCII progress meter for the scanning screen: `##########------` with the
+/// percentage once the phase knows its total, and a segment sliding along the
+/// track while it does not (the discovery and symlinks walks, which only learn
+/// their length when they stop). The slide is derived from the phase's elapsed
+/// time, so it moves with the one-second progress heartbeat instead of needing
+/// its own timer.
+fn progress_meter(scanned: u64, total: Option<u64>, elapsed_ms: u64) -> String {
+    match total {
+        Some(total) if total > 0 => {
+            let done = (scanned.min(total) as u128 * METER_WIDTH as u128 / total as u128) as usize;
+            let percent = (scanned.min(total) as u128 * 100 / total as u128) as usize;
+            format!(
+                "[{}{}] {:>3}%",
+                "#".repeat(done),
+                "-".repeat(METER_WIDTH - done),
+                percent
+            )
+        }
+        _ => {
+            let span = METER_WIDTH - METER_SEGMENT;
+            let pos = (elapsed_ms / 250) as usize % (span + 1);
+            let mut cells = vec!['-'; METER_WIDTH];
+            for cell in cells.iter_mut().skip(pos).take(METER_SEGMENT) {
+                *cell = '#';
+            }
+            format!("[{}]", cells.into_iter().collect::<String>())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2135,6 +2178,56 @@ mod tests {
                 {"type": "repair_symlink", "link_path": "/home/a/L", "replacement_target": "/home/a/Pictures/2024"}
             ]
         }))
+    }
+
+    #[test]
+    fn progress_meter_fills_to_the_known_fraction() {
+        assert_eq!(
+            progress_meter(0, Some(4000), 0),
+            format!("[{}] {:>3}%", "-".repeat(METER_WIDTH), 0)
+        );
+        let half = progress_meter(2000, Some(4000), 5_000);
+        assert_eq!(half.matches('#').count(), METER_WIDTH / 2);
+        assert!(half.starts_with('[') && half.ends_with(" 50%"), "{half}");
+        assert_eq!(
+            progress_meter(4000, Some(4000), 9_000),
+            format!("[{}] 100%", "#".repeat(METER_WIDTH))
+        );
+        // A count that runs past its total never overflows the track, and a
+        // zero total is treated as unknown rather than dividing by zero.
+        assert_eq!(
+            progress_meter(5000, Some(4000), 0),
+            format!("[{}] 100%", "#".repeat(METER_WIDTH))
+        );
+        assert_eq!(
+            progress_meter(7, Some(0), 0).matches('#').count(),
+            METER_SEGMENT
+        );
+    }
+
+    #[test]
+    fn progress_meter_slides_while_the_phase_has_no_total() {
+        let at = |elapsed_ms| progress_meter(929_280, None, elapsed_ms);
+        let start = at(0);
+        assert_eq!(start.len(), METER_WIDTH + 2);
+        assert_eq!(start.matches('#').count(), METER_SEGMENT);
+        assert!(start.starts_with("[#"), "{start}");
+        // No percentage is claimed for a phase whose length is unknown.
+        assert!(!start.contains('%'), "{start}");
+        // The segment advances with the phase's clock and wraps, so a long walk
+        // keeps moving even while its visited count stands still between
+        // reports.
+        assert_ne!(at(0), at(250));
+        assert_ne!(at(250), at(1000));
+        let positions = METER_WIDTH - METER_SEGMENT + 1;
+        assert_eq!(at(250 * positions as u64), at(0));
+        // It really reaches both ends of the track.
+        assert!(
+            at(250 * (positions as u64 - 1)).ends_with(&format!("{}]", "#".repeat(METER_SEGMENT)))
+        );
+        assert!(at(0)
+            .split('#')
+            .all(|s| s.chars().all(|c| c == '-' || c == '[' || c == ']')));
     }
 
     #[test]

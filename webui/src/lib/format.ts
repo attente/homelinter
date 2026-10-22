@@ -175,6 +175,29 @@ export function scanProgressLabel(p: {
 }
 
 
+/**
+ * Fraction of the current phase's work that is done, in `0..=1`, or null when
+ * the phase cannot know its total up front (the discovery and symlinks walks,
+ * and the hashing confirmation pass). Drives the progress meter, so it clamps
+ * rather than reporting a bar that overflows.
+ */
+export function scanProgressFraction(p: {
+  scanned: number;
+  total: number | null;
+}): number | null {
+  if (p.total == null || p.total === 0) return null;
+  return Math.min(1, Math.max(0, p.scanned / p.total));
+}
+
+/** Whole-percent form of `scanProgressFraction`, for the meter's label. */
+export function scanProgressPercent(p: {
+  scanned: number;
+  total: number | null;
+}): number | null {
+  const fraction = scanProgressFraction(p);
+  return fraction == null ? null : Math.round(fraction * 100);
+}
+
 export function stateLabel(state: string): string {
   const map: Record<string, string> = {
     idle: 'idle',

@@ -781,6 +781,61 @@ select optgroup {
   color: var(--dim);
 }
 
+/* Scan progress meter: the scanning view's bar fills to the phase's fraction
+   when the server reports a total, and slides a segment while the phase is
+   still discovering its length (the walks). */
+.scan-meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scan-meter-bar {
+  flex: 0 0 auto;
+  width: 220px;
+  max-width: 40vw;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.scan-meter-fill {
+  height: 100%;
+  background: var(--accent);
+  /* Smooth the one-second steps of a fast pass instead of jumping. */
+  transition: width 0.4s linear;
+}
+
+.scan-meter-bar.indeterminate .scan-meter-fill {
+  width: 40%;
+  animation: scan-meter-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes scan-meter-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-meter-fill {
+    transition: none;
+  }
+  .scan-meter-bar.indeterminate .scan-meter-fill {
+    animation-duration: 5s;
+  }
+}
+
+.scan-meter-percent {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .log {
   flex: 1 1 auto;
   min-height: 0;
