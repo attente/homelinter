@@ -59,6 +59,9 @@ struct Row {
     selected: bool,
     target: String,
     new_path: String,
+    /// The retained keeper for a duplicate delete (`metadata.duplicate_of`);
+    /// empty when absent.
+    duplicate_of: String,
     reason: String,
     rejection: String,
     dependents: Vec<String>,
@@ -110,6 +113,10 @@ impl Row {
             selected: v["selected"].as_bool().unwrap_or(false),
             target: str_field(v, "target"),
             new_path: str_field(v, "new_path"),
+            duplicate_of: v["metadata"]["duplicate_of"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             reason: str_field(v, "reason"),
             rejection: v["rejection_reason"].as_str().unwrap_or("").to_string(),
             pending_meta: v["metadata_pending"].as_bool().unwrap_or(false),
@@ -163,6 +170,11 @@ struct Filter {
     typ: Option<String>,
     kind: Option<String>,
     status: Option<String>,
+    /// Case-insensitive substring matched against each row's path fields
+    /// (source target, move destination, duplicate keeper). Persisted to
+    /// `[ui].path_filter` through the settings path, so it survives scans
+    /// and TUI restarts; the other dimensions reset with each scan.
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +210,7 @@ struct Confirm {
 enum PromptKind {
     ExportPath,
     ScanRoot,
+    PathFilter,
 }
 
 struct Prompt {
@@ -332,7 +345,11 @@ impl App {
         self.kinds.clear();
         self.cursor = 0;
         self.list_offset = 0;
-        self.filter = Filter::default();
+        // The type/kind/status filters reset with each scan; the path filter
+        // persists (live and via [ui].path_filter) until explicitly cleared.
+        self.filter.typ = None;
+        self.filter.kind = None;
+        self.filter.status = None;
         self.metadata_completed = 0;
         self.metadata_total = 0;
         self.cache_hits = 0;
@@ -624,22 +641,7 @@ impl App {
     // ------------------------------------------------------------------
 
     fn row_matches(&self, r: &Row) -> bool {
-        if let Some(t) = &self.filter.typ {
-            if r.typ != *t {
-                return false;
-            }
-        }
-        if let Some(k) = &self.filter.kind {
-            if r.kind != *k {
-                return false;
-            }
-        }
-        if let Some(s) = &self.filter.status {
-            if r.status != *s {
-                return false;
-            }
-        }
-        true
+        filter_matches_row(&self.filter, r)
     }
 
     fn filtered(&self) -> Vec<usize> {
@@ -1041,7 +1043,24 @@ impl App {
                     }
                 };
             }
-            KeyCode::Char('c') => self.filter = Filter::default(),
+            KeyCode::Char('c') => {
+                self.filter = Filter::default();
+                self.save_path_filter(None).await;
+            }
+            KeyCode::Char('/') => {
+                let value = self.filter.path.clone().unwrap_or_default();
+                self.prompt = Some(Prompt {
+                    title: "Path filter (empty = all)".to_string(),
+                    kind: PromptKind::PathFilter,
+                    value,
+                    cursor: self
+                        .filter
+                        .path
+                        .as_deref()
+                        .map(str::len)
+                        .unwrap_or_default(),
+                });
+            }
             KeyCode::Char('x') => {
                 let n = self.executable_count();
                 if n == 0 {
@@ -1200,7 +1219,7 @@ impl App {
                     self.hidden = !self.hidden;
                     p.title = self.scan_prompt_title();
                 }
-                PromptKind::ExportPath => {}
+                PromptKind::ExportPath | PromptKind::PathFilter => {}
             },
             KeyCode::Enter => {
                 let kind = p.kind;
@@ -1225,10 +1244,32 @@ impl App {
                             Err(e) => self.toast = Some(e),
                         }
                     }
+                    PromptKind::PathFilter => {
+                        // Empty applies no filter; the committed value is
+                        // persisted to [ui].path_filter for the next launch.
+                        let saved = if value.is_empty() {
+                            None
+                        } else {
+                            Some(value.clone())
+                        };
+                        self.filter.path = saved.clone();
+                        self.save_path_filter(saved.as_deref()).await;
+                    }
                 }
             }
             KeyCode::Esc => {}
             _ => self.prompt = Some(p),
+        }
+    }
+
+    /// Persist the path filter through the settings path (`[ui].path_filter`).
+    /// Purely client UI state: the save is excluded from the config hash, so
+    /// it never makes the running batch look stale. A failed save keeps the
+    /// live filter and only loses the value for the next launch.
+    async fn save_path_filter(&mut self, value: Option<&str>) {
+        let body = serde_json::json!({ "ui": { "path_filter": value } });
+        if let Err(e) = self.client.config_put(body).await {
+            self.toast = Some(format!("cannot save the path filter: {e}"));
         }
     }
 
@@ -1334,9 +1375,21 @@ impl App {
         let t = self.filter.typ.as_deref().unwrap_or("all");
         let k = self.filter.kind.as_deref().unwrap_or("all");
         let s = self.filter.status.as_deref().unwrap_or("all");
+        let p = match &self.filter.path {
+            Some(p) => {
+                let mut text: String = p.chars().take(21).collect();
+                if p.chars().count() > 21 {
+                    text.push_str("...");
+                }
+                text
+            }
+            None => "all".to_string(),
+        };
         Line::from(vec![
             Span::styled(" filter ", Style::new().fg(Color::Black).bg(Color::Blue)),
-            Span::raw(format!(" t:type={t}  k:kind={k}  u:status={s}  c:clear  ")),
+            Span::raw(format!(
+                " t:type={t}  k:kind={k}  u:status={s}  /:path={p}  c:clear  "
+            )),
             Span::styled("space", Style::new().fg(Color::Green)),
             Span::raw(" toggle  "),
             Span::styled("a", Style::new().fg(Color::Green)),
@@ -1618,7 +1671,7 @@ impl App {
 
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  m re-request  b rebuild  x execute  e export  n scan  g config  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/c filters  / path  m re-request  b rebuild  x execute  e export  n scan  g config  ? help  q quit",
         )];
         if let Some(w) = self.warnings.first() {
             let more = self.warnings.len().saturating_sub(1);
@@ -1685,6 +1738,9 @@ impl App {
             Line::from(" t                   cycle the type filter (all/move/delete)"),
             Line::from(" k                   cycle the asset-kind filter"),
             Line::from(" u                   cycle the status filter"),
+            Line::from(
+                " /                   edit the path filter (matches source, destination, keeper)",
+            ),
             Line::from(" c                   clear all filters"),
             Line::from(
                 " m                   re-request the highlighted suggestion's provider metadata",
@@ -1936,6 +1992,12 @@ pub async fn run(client: &Client) -> Result<u8, String> {
         .map_err(|e| format!("cannot start the terminal backend: {e}"))?;
 
     let mut app = App::new(client.clone(), root, hidden, target_paths);
+    // Re-apply the saved path filter ([ui].path_filter). It persists across
+    // scans, so the auto-started first scan is already filtered.
+    app.filter.path = cfg["ui"]["path_filter"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
     app.start_scan()
         .await
         .map_err(|e| format!("cannot start the initial scan: {e}"))?;
@@ -1999,6 +2061,43 @@ async fn read_sse(reader: &mut Option<SseReader>, client: &Client) -> Option<Sse
             },
         }
     }
+}
+
+/// The filter predicate, shared by the app state and the tests so the two
+/// copies cannot diverge. Empty string fields mean "absent".
+fn filter_matches_row(f: &Filter, r: &Row) -> bool {
+    if let Some(t) = &f.typ {
+        if r.typ != *t {
+            return false;
+        }
+    }
+    if let Some(k) = &f.kind {
+        if r.kind != *k {
+            return false;
+        }
+    }
+    if let Some(s) = &f.status {
+        if r.status != *s {
+            return false;
+        }
+    }
+    if let Some(p) = &f.path {
+        let new_path = if r.new_path.is_empty() {
+            None
+        } else {
+            Some(r.new_path.as_str())
+        };
+        let duplicate_of = if r.duplicate_of.is_empty() {
+            None
+        } else {
+            Some(r.duplicate_of.as_str())
+        };
+        if !homelinter_model::suggestion::path_filter_matches(&r.target, new_path, duplicate_of, p)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -2074,49 +2173,71 @@ mod tests {
     }
 
     #[test]
-    fn filter_predicate_on_type_kind_status() {
+    fn filter_predicate_on_type_kind_status_and_path() {
         let r = sample_row();
-        let matched = |f: &Filter| -> bool {
-            if let Some(t) = &f.typ {
-                if r.typ != *t {
-                    return false;
-                }
-            }
-            if let Some(k) = &f.kind {
-                if r.kind != *k {
-                    return false;
-                }
-            }
-            if let Some(s) = &f.status {
-                if r.status != *s {
-                    return false;
-                }
-            }
-            true
-        };
         let f = Filter {
             typ: Some("move".to_string()),
-            kind: None,
-            status: None,
+            ..Default::default()
         };
-        assert!(matched(&f));
+        assert!(filter_matches_row(&f, &r));
         let f2 = Filter {
             typ: Some("delete".to_string()),
             ..Default::default()
         };
-        assert!(!matched(&f2));
+        assert!(!filter_matches_row(&f2, &r));
         let f3 = Filter {
-            typ: None,
             kind: Some("audio".to_string()),
-            status: None,
+            ..Default::default()
         };
-        assert!(!matched(&f3));
+        assert!(!filter_matches_row(&f3, &r));
         let f4 = Filter {
-            typ: None,
-            kind: None,
             status: Some("executed".to_string()),
+            ..Default::default()
         };
-        assert!(!matched(&f4));
+        assert!(!filter_matches_row(&f4, &r));
+
+        // The path filter matches the source target, the move destination,
+        // and a duplicate delete's keeper, case-insensitively; an empty
+        // filter is unconstrained.
+        let f = Filter {
+            path: Some("IMG_1".to_string()),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&f, &r));
+        let f = Filter {
+            path: Some("pictures/2024".to_string()),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&f, &r));
+        let f = Filter {
+            path: Some("VIDEOS".to_string()),
+            ..Default::default()
+        };
+        assert!(!filter_matches_row(&f, &r));
+        let keeper = Row::from_json(&json!({
+            "id": "s-del",
+            "type": "delete",
+            "asset_kind": "photo",
+            "status": "pending",
+            "selected": false,
+            "target": "/home/a/copy.jpg",
+            "metadata": {"duplicate_of": "/home/a/Original.jpg"},
+        }));
+        let f = Filter {
+            path: Some("original".to_string()),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&f, &keeper));
+        let f = Filter {
+            path: Some("copy.jpg".to_string()),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&f, &keeper));
+        let f = Filter {
+            path: Some("".to_string()),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&f, &keeper));
     }
 
     #[test]

@@ -651,6 +651,36 @@ export function Browse(props: BrowseProps) {
   const showManualFilter = useCallback(() => {
     onFilterChange({ ...filter, manual: 'manual' });
   }, [filter, onFilterChange]);
+
+  // The path filter input is debounced (~250ms) so typing does not refetch
+  // per keystroke; committed values drive the page fetch and the URL.
+  const [pathDraft, setPathDraft] = useState(filter.path ?? '');
+  const pathTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    // External filter changes (reset, badge, URL sync) resync the draft and
+    // cancel any pending keystroke commit.
+    window.clearTimeout(pathTimerRef.current);
+    setPathDraft(filter.path ?? '');
+  }, [filter.path]);
+  useEffect(() => () => window.clearTimeout(pathTimerRef.current), []);
+  const commitPath = useCallback(
+    (value: string) => {
+      window.clearTimeout(pathTimerRef.current);
+      if ((filter.path ?? '') !== value) {
+        onFilterChange({ ...filter, path: value });
+      }
+    },
+    [filter, onFilterChange],
+  );
+  const scheduleCommitPath = (value: string) => {
+    setPathDraft(value);
+    window.clearTimeout(pathTimerRef.current);
+    pathTimerRef.current = window.setTimeout(() => commitPath(value), 250);
+  };
+  const clearPathFilter = () => {
+    setPathDraft('');
+    commitPath('');
+  };
   const filtersDefault = isDefaultFilter(filter);
   const openSuggestion = useMemo(
     () => suggestions.find((s) => s.id === openId) ?? null,
@@ -714,6 +744,18 @@ export function Browse(props: BrowseProps) {
     <main className="browse">
       <div className="toolbar-row">
         <div className="filters">
+          <input
+            className="filter-input"
+            type="text"
+            aria-label="path filter"
+            placeholder="filter paths"
+            title="Match the source, destination, or duplicate-keeper path; case-insensitive substring"
+            value={pathDraft}
+            onChange={(e) => scheduleCommitPath(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') clearPathFilter();
+            }}
+          />
           <select
             className="filter-select"
             aria-label="type filter"

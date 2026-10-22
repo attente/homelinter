@@ -8,7 +8,13 @@ import { ScanForm, ScanFormValues } from "./components/ScanForm";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
-import { ALL_FILTER, Filter, matchesFilter, mergeSuggestionEvents } from "./lib/filter";
+import {
+  Filter,
+  filterFromSearchParams,
+  filterToSearchParams,
+  matchesFilter,
+  mergeSuggestionEvents,
+} from "./lib/filter";
 import { elapsedLabel, metadataProgressLabel, opLine, stateLabel } from "./lib/format";
 import type {
   ExecutionReport,
@@ -48,6 +54,12 @@ const POLL_MS = 2000;
 /** Suggestions fetched per `GET /suggestions` request while browsing. */
 const PAGE_SIZE = 500;
 
+/** Initial filter, seeded from the page URL so a reload or a shared link
+ *  restores the filtered view; every filter change is written back. */
+function initialFilter(): Filter {
+  return filterFromSearchParams(new URLSearchParams(window.location.search));
+}
+
 /** Map the SPA's filter view onto the service's selection-filter body;
  *  `all` becomes an omitted (unconstrained) field. */
 function toApiFilter(f: Filter): SelectionFilter {
@@ -56,6 +68,7 @@ function toApiFilter(f: Filter): SelectionFilter {
     asset_kind: f.kind === "all" ? undefined : f.kind,
     status: f.status === "all" ? undefined : f.status,
     manual: f.manual === "manual" ? true : undefined,
+    path: f.path || undefined,
   };
 }
 
@@ -66,7 +79,7 @@ export default function App() {
     suggestions: [],
     suggestionsTotal: 0,
     kinds: [],
-    filter: ALL_FILTER,
+    filter: initialFilter(),
     progress: null,
     metadataProgress: null,
     runLog: [],
@@ -148,6 +161,7 @@ export default function App() {
       kind: filter.kind === "all" ? undefined : filter.kind,
       status: filter.status === "all" ? undefined : filter.status,
       manual: filter.manual === "manual" ? true : undefined,
+      path: filter.path || undefined,
       offset,
       limit: PAGE_SIZE,
     }),
@@ -207,6 +221,18 @@ export default function App() {
       loadingMoreRef.current = false;
     }
   }, [pageParams, pushToast]);
+
+  // Keep the URL in sync with the filter so a reload or a shared link
+  // restores the filtered view. There is no router, so the write-through
+  // uses history.replaceState and never pushes history entries.
+  useEffect(() => {
+    const q = filterToSearchParams(st.filter);
+    const qs = q.toString();
+    const url = qs
+      ? `${window.location.pathname}?${qs}`
+      : window.location.pathname;
+    window.history.replaceState(null, "", url);
+  }, [st.filter]);
 
   const applyFilter = useCallback(
     (filter: Filter) => {
@@ -486,7 +512,9 @@ export default function App() {
         if (cancelled) return;
         setSt((prev) => ({ ...prev, session }));
         if (session.state === "ready" || session.state === "done") {
-          await resetSuggestions(ALL_FILTER);
+          // Enter browse with the URL-restored filter so a reload or shared
+          // link lands on the same filtered view.
+          await resetSuggestions(stRef.current.filter);
           if (cancelled) return;
           setSt((prev) => ({
             ...prev,

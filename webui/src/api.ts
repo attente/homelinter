@@ -76,6 +76,8 @@ export interface SelectionFilter {
   selected?: boolean;
   /** `true` restricts to suggestions with a saved manual override. */
   manual?: boolean;
+  /** Case-insensitive substring over each suggestion's path fields. */
+  path?: string;
 }
 
 export const api = {
@@ -100,6 +102,8 @@ export const api = {
     status?: string;
     selected?: boolean;
     manual?: boolean;
+    /** Case-insensitive substring over each suggestion's path fields. */
+    path?: string;
     offset?: number;
     limit?: number;
   }): Promise<SuggestionList> {
@@ -110,6 +114,7 @@ export const api = {
     if (params?.selected !== undefined)
       q.set("selected", String(params.selected));
     if (params?.manual !== undefined) q.set("manual", String(params.manual));
+    if (params?.path) q.set("path", params.path);
     if (params?.offset !== undefined) q.set("offset", String(params.offset));
     if (params?.limit !== undefined) q.set("limit", String(params.limit));
     const qs = q.toString();

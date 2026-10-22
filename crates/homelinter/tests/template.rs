@@ -43,6 +43,7 @@ fn config_template_loads_and_validates() {
         "output",
         "cache",
         "limits",
+        "ui",
     ] {
         assert!(
             text.contains(&format!("[{section}]")),
@@ -91,6 +92,8 @@ fn config_template_loads_and_validates() {
         "provider_concurrency",
         "tool_timeout_seconds",
         "tool_stdout_max_bytes",
+        // [ui]
+        "path_filter",
     ] {
         assert!(
             text.contains(key),

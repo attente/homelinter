@@ -37,6 +37,10 @@ export interface Filter {
   status: 'all' | SuggestionStatus;
   /** `manual` keeps only suggestions backed by a saved manual override. */
   manual: 'all' | 'manual';
+  /** Case-insensitive substring matched against the suggestion's path
+   *  fields (source target, move destination, duplicate keeper). Absent or
+   *  empty is unconstrained. Mirrors the service's `path` filter parameter. */
+  path?: string;
 }
 
 export const ALL_FILTER: Filter = {
@@ -44,6 +48,7 @@ export const ALL_FILTER: Filter = {
   kind: 'all',
   status: 'all',
   manual: 'all',
+  path: '',
 };
 
 /** True when no dimension is constrained, so `clear` has nothing to do. */
@@ -52,8 +57,32 @@ export function isDefaultFilter(f: Filter): boolean {
     f.type === ALL_FILTER.type &&
     f.kind === ALL_FILTER.kind &&
     f.status === ALL_FILTER.status &&
-    f.manual === ALL_FILTER.manual
+    f.manual === ALL_FILTER.manual &&
+    (f.path ?? '') === ''
   );
+}
+
+/** The suggestion's path values a path filter matches against: the source
+ *  target, a move's destination, and a duplicate delete's retained keeper.
+ *  Matches the service-side field list (see the model's
+ *  `path_filter_matches`). Paths are matched in full, not in the truncated
+ *  display form, so a hit is never hidden by row truncation. */
+function suggestionPaths(s: Suggestion): string[] {
+  const dup = s.metadata?.duplicate_of;
+  return [
+    s.target,
+    s.new_path ?? undefined,
+    typeof dup === 'string' && dup.length > 0 ? dup : undefined,
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+}
+
+/** Case-insensitive substring test over a suggestion's path fields; an
+ *  empty needle is unconstrained. Must stay identical to the service-side
+ *  filter semantics so streamed deltas match the paged server window. */
+export function pathMatches(s: Suggestion, needle: string): boolean {
+  const n = needle.toLowerCase();
+  if (n === '') return true;
+  return suggestionPaths(s).some((p) => p.toLowerCase().includes(n));
 }
 
 export function matchesFilter(s: Suggestion, f: Filter): boolean {
@@ -69,7 +98,43 @@ export function matchesFilter(s: Suggestion, f: Filter): boolean {
   if (f.manual === 'manual' && (s.manual_overrides?.length ?? 0) === 0) {
     return false;
   }
+  if (f.path && !pathMatches(s, f.path)) {
+    return false;
+  }
   return true;
+}
+
+/** Read the filter from the page URL's query parameters, so a reload or a
+ *  shared link restores the filtered view. Missing or unrecognized values
+ *  fall back to the unconstrained defaults. */
+export function filterFromSearchParams(params: URLSearchParams): Filter {
+  const type = params.get('type');
+  const kind = params.get('kind');
+  const status = params.get('status');
+  const manual = params.get('manual');
+  const path = params.get('path');
+  const typeValue = TYPE_OPTIONS.find((o) => o.value === type)?.value;
+  const statusValue = STATUS_OPTIONS.find((o) => o.value === status)?.value;
+  return {
+    type: typeValue === 'move' || typeValue === 'delete' ? typeValue : 'all',
+    kind: kind && kind !== 'all' ? kind : 'all',
+    status:
+      statusValue && statusValue !== 'all' ? statusValue : 'all',
+    manual: manual === 'manual' ? 'manual' : 'all',
+    path: path ?? '',
+  };
+}
+
+/** Serialize a filter into query parameters for the page URL; unconstrained
+ *  dimensions are omitted, so a fully cleared filter yields no query string. */
+export function filterToSearchParams(f: Filter): URLSearchParams {
+  const q = new URLSearchParams();
+  if (f.type !== 'all') q.set('type', f.type);
+  if (f.kind !== 'all') q.set('kind', f.kind);
+  if (f.status !== 'all') q.set('status', f.status);
+  if (f.manual !== 'all') q.set('manual', f.manual);
+  if (f.path) q.set('path', f.path);
+  return q;
 }
 
 export interface SuggestionMerge {

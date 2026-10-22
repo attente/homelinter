@@ -100,6 +100,11 @@ struct Filter {
     /// metadata override; `false` keeps only the rest.
     #[serde(default)]
     manual: Option<bool>,
+    /// Case-insensitive substring matched against each suggestion's path
+    /// fields (target, move destination, duplicate keeper). Empty or absent
+    /// is unconstrained.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +119,8 @@ struct ListQuery {
     selected: Option<String>,
     #[serde(default)]
     manual: Option<bool>,
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
@@ -490,6 +497,16 @@ fn matches_filter(s: &Suggestion, f: &Filter) -> bool {
             return false;
         }
     }
+    if let Some(p) = &f.path {
+        if !homelinter_model::suggestion::path_filter_matches(
+            &s.target,
+            s.new_path.as_deref(),
+            s.metadata.get("duplicate_of").and_then(|v| v.as_str()),
+            p,
+        ) {
+            return false;
+        }
+    }
     true
 }
 
@@ -500,6 +517,7 @@ async fn suggestions_list(State(app): State<AppHandle>, Query(q): Query<ListQuer
         status: q.status,
         selected: q.selected.and_then(|s| s.parse().ok()),
         manual: q.manual,
+        path: q.path,
     };
     let offset = q.offset.unwrap_or(0);
     let limit = q.limit.unwrap_or(usize::MAX);

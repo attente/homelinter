@@ -256,6 +256,13 @@ select optgroup {
   font-size: 12px;
 }
 
+/* The path filter input sits with the selects; a modest width keeps the
+   toolbar compact while still fitting typical path fragments. */
+.filter-input {
+  width: 180px;
+  font-size: 12px;
+}
+
 .sep {
   width: 1px;
   height: 18px;

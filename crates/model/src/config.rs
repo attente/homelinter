@@ -588,6 +588,19 @@ pub struct LimitsConfig {
     pub tool_stdout_max_bytes: Option<u64>,
 }
 
+/// Client-side UI state persisted through the settings path. Holds no scan
+/// or planning behavior: it is excluded from the config hash, so saving a
+/// filter never makes a running batch look stale.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UiConfig {
+    /// The TUI suggestion browser's saved path filter (case-insensitive
+    /// substring over the suggestion's path fields). Absent or empty means
+    /// no filter. The SPA keeps its own filter in URL parameters instead.
+    #[serde(default)]
+    pub path_filter: Option<String>,
+}
+
 /// The complete merged configuration file content. Each section defaults to
 /// an absent section; accessor methods apply the documented defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -611,6 +624,8 @@ pub struct RawConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl RawConfig {
@@ -1882,6 +1897,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
         }),
     );
     out.insert(
+        "ui".into(),
+        serde_json::json!({ "path_filter": raw.ui.path_filter }),
+    );
+    out.insert(
         "warnings".into(),
         serde_json::to_value(config_warnings(raw).into_iter().collect::<BTreeMap<_, _>>())
             .unwrap_or(JsonValue::Null),
@@ -1910,7 +1929,13 @@ fn llm_backend_name(b: LlmBackend) -> &'static str {
 /// Config hash used by `GET /session` for change detection.
 pub fn config_hash(raw: &RawConfig) -> String {
     use sha2::{Digest, Sha256};
-    let json = effective_config_json(raw, None);
+    let mut json = effective_config_json(raw, None);
+    // The [ui] section is client-side view state, not scan or planning
+    // behavior: saving a TUI filter must not make the running batch look
+    // stale, so it never contributes to the hash.
+    if let Some(obj) = json.as_object_mut() {
+        obj.remove("ui");
+    }
     let text = serde_json::to_string(&json).unwrap_or_default();
     hex::encode(Sha256::digest(text.as_bytes()))
 }
@@ -2123,6 +2148,24 @@ mod tests {
             "[geocoder]\nenabled = true\nneighbourhood_cities = [\"Toronto\", \"Shibuya\"]\n",
         );
         assert!(ok.is_ok());
+
+        // [ui]: optional client-side filter state. An unknown key inside the
+        // section is rejected like every other section.
+        let err = parse("[ui]\ntheme = \"dark\"\n");
+        assert!(err.is_err());
+        let rc = parse("").unwrap();
+        assert_eq!(rc.ui.path_filter, None);
+        let rc = parse("[ui]\npath_filter = \"photos\"\n").unwrap();
+        assert_eq!(rc.ui.path_filter.as_deref(), Some("photos"));
+        // The ui section is visible in the effective document but excluded
+        // from the config hash, so saving a filter never marks a running
+        // batch stale.
+        let with = parse("[ui]\npath_filter = \"photos\"\n").unwrap();
+        assert_eq!(
+            effective_config_json(&with, None)["ui"]["path_filter"],
+            serde_json::json!("photos")
+        );
+        assert_eq!(config_hash(&with), config_hash(&parse("").unwrap()));
 
         // Unset resolves to the built-in templates (the default wording). An
         // override inherits the base entry's prompt when it sets none.

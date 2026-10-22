@@ -331,6 +331,29 @@ impl SessionState {
     }
 }
 
+/// Case-insensitive substring match over the path fields a suggestion
+/// carries: the source `target`, a move's `new_path`, and a duplicate
+/// delete's retained keeper. This is the single shared definition of "the
+/// suggestion's path fields" for the service filter (`GET /suggestions`
+/// `path` parameter) and the TUI's client-side filter; the SPA mirrors the
+/// semantics in `webui/src/lib/filter.ts`. An empty needle is
+/// unconstrained and matches everything.
+pub fn path_filter_matches(
+    target: &str,
+    new_path: Option<&str>,
+    duplicate_of: Option<&str>,
+    needle: &str,
+) -> bool {
+    let needle = needle.to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    [Some(target), new_path, duplicate_of]
+        .into_iter()
+        .flatten()
+        .any(|path| path.to_lowercase().contains(&needle))
+}
+
 /// Machine-code of a failure or cancellation reason attached to `failed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionFailure {
@@ -341,8 +364,49 @@ pub struct SessionFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::path_filter_matches;
     #[cfg(unix)]
     use super::*;
+
+    #[test]
+    fn path_filter_matches_fields() {
+        assert!(path_filter_matches("/home/a/IMG_1.jpg", None, None, "img"));
+        assert!(path_filter_matches(
+            "/home/a/IMG_1.jpg",
+            Some("/home/p/2024/x.jpg"),
+            None,
+            "2024"
+        ));
+        assert!(path_filter_matches(
+            "/home/a/copy.jpg",
+            None,
+            Some("/home/a/original.jpg"),
+            "original"
+        ));
+        // Case-insensitive on every platform; a search aid, not an identity
+        // comparison.
+        assert!(path_filter_matches(
+            "/home/Photos/x.jpg",
+            None,
+            None,
+            "PHOTOS"
+        ));
+        assert!(!path_filter_matches(
+            "/home/a/IMG_1.jpg",
+            Some("/home/p/x.jpg"),
+            None,
+            "videos"
+        ));
+        // An empty needle is unconstrained.
+        assert!(path_filter_matches("/home/a/x.jpg", None, None, ""));
+        // Non-ASCII input folds too.
+        assert!(path_filter_matches(
+            "/home/a/\u{c4}rger.jpg",
+            None,
+            None,
+            "\u{e4}rger"
+        ));
+    }
 
     #[cfg(unix)]
     #[test]

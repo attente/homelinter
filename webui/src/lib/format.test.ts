@@ -8,6 +8,8 @@ import {
   matchesFilter,
   mergeSuggestionEvents,
   uniqueKinds,
+  filterFromSearchParams,
+  filterToSearchParams,
 } from './filter';
 import {
   asciiOnly,
@@ -98,6 +100,56 @@ describe('filter', () => {
     expect(isDefaultFilter({ ...ALL_FILTER, status: 'failed' })).toBe(false);
     expect(isDefaultFilter({ ...ALL_FILTER, manual: 'manual' })).toBe(false);
     expect(isDefaultFilter({ ...ALL_FILTER, type: 'move' })).toBe(false);
+    expect(isDefaultFilter({ ...ALL_FILTER, path: '' })).toBe(true);
+    expect(isDefaultFilter({ ...ALL_FILTER, path: 'IMG' })).toBe(false);
+  });
+
+  it('matches the path filter against source, destination, and keeper', () => {
+    const s = sampleSuggestion();
+    // An empty (or absent) path filter is unconstrained.
+    expect(matchesFilter(s, { ...ALL_FILTER, path: '' })).toBe(true);
+    expect(matchesFilter(s, ALL_FILTER)).toBe(true);
+    // The source target ("from") and the move destination ("to") both match.
+    expect(matchesFilter(s, { ...ALL_FILTER, path: 'IMG_1' })).toBe(true);
+    expect(matchesFilter(s, { ...ALL_FILTER, path: 'pictures/2024' })).toBe(true);
+    // Matching is case-insensitive and substring-based.
+    expect(matchesFilter(s, { ...ALL_FILTER, path: 'img_1.jpg' })).toBe(true);
+    expect(matchesFilter(s, { ...ALL_FILTER, path: '/home/a' })).toBe(true);
+    expect(matchesFilter(s, { ...ALL_FILTER, path: 'VIDEOS' })).toBe(false);
+    // The retained keeper of a duplicate delete ("original") matches too.
+    const dup = sampleSuggestion({
+      type: 'delete',
+      target: '/home/a/copy.jpg',
+      new_path: undefined,
+      metadata: { duplicate_of: '/home/a/Original.jpg' },
+    });
+    expect(matchesFilter(dup, { ...ALL_FILTER, path: 'original' })).toBe(true);
+    expect(matchesFilter(dup, { ...ALL_FILTER, path: 'copy.jpg' })).toBe(true);
+    expect(matchesFilter(dup, { ...ALL_FILTER, path: 'pictures' })).toBe(false);
+  });
+
+  it('round-trips the filter through query parameters', () => {
+    const q = filterToSearchParams({ ...ALL_FILTER, type: 'move', path: '/photos/' });
+    expect(q.toString()).toBe('type=move&path=%2Fphotos%2F');
+    const restored = filterFromSearchParams(new URLSearchParams(q.toString()));
+    expect(restored.type).toBe('move');
+    expect(restored.path).toBe('/photos/');
+    expect(restored.kind).toBe('all');
+    expect(restored.status).toBe('all');
+    expect(restored.manual).toBe('all');
+    // Unrecognized values fall back to the defaults; an empty URL yields the
+    // fully unconstrained filter.
+    expect(filterFromSearchParams(new URLSearchParams(''))).toEqual(ALL_FILTER);
+    const junk = filterFromSearchParams(
+      new URLSearchParams('type=copy&kind=&status=nope&manual=true&path='),
+    );
+    expect(junk.type).toBe('all');
+    expect(junk.kind).toBe('all');
+    expect(junk.status).toBe('all');
+    expect(junk.manual).toBe('all');
+    expect(junk.path).toBe('');
+    // A fully cleared filter serializes to no query string at all.
+    expect(filterToSearchParams(ALL_FILTER).toString()).toBe('');
   });
 
   it('collects unique sorted kinds', () => {
