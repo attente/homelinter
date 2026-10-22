@@ -565,9 +565,10 @@ export default function App() {
     [pushToast, refreshSession, resetSuggestions],
   );
 
-  /** Select everything matching the active filter (the visible set), via
-   *  the service's filter-based add; the optimistic update mirrors it. */
-  const selectVisible = useCallback(
+  /** Select every suggestion matching the active filter (the whole filtered
+   *  set, not just the loaded window), via the service's filter-based add;
+   *  the optimistic update mirrors it across the loaded rows. */
+  const selectFiltered = useCallback(
     (filter: Filter) => {
       setSt((prev) => ({
         ...prev,
@@ -590,10 +591,10 @@ export default function App() {
     [pushToast, refreshSession, resetSuggestions],
   );
 
-  /** Deselect everything matching the active filter (the visible set),
-   *  leaving selections outside the filtered view untouched; with no filter
-   *  active this clears the whole selection. */
-  const clearVisible = useCallback(
+  /** Deselect every suggestion matching the active filter (again the whole
+   *  filtered set), leaving selections outside the filtered set untouched;
+   *  with no dimension constrained this clears the whole selection. */
+  const clearFiltered = useCallback(
     (filter: Filter) => {
       setSt((prev) => ({
         ...prev,
@@ -941,8 +942,8 @@ export default function App() {
           onFilterChange={applyFilter}
           onLoadMore={() => void loadMore()}
           onToggle={toggle}
-          onSelectVisible={selectVisible}
-          onClearVisible={clearVisible}
+          onSelectFiltered={selectFiltered}
+          onClearFiltered={clearFiltered}
           onRun={() => void run()}
           onExport={() => void exportPlan()}
           onRefreshMetadata={(id, clearOverrides) =>
