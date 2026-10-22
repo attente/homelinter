@@ -28,7 +28,7 @@ pub use doc_container::DocumentContainerExtractor;
 pub use doc_pdfinfo::PdfInfoExtractor;
 pub use exiftool::ExifToolExtractor;
 pub use extractor::{
-    merge_meta, EmbeddedMeta, ExtractTarget, ExtractionContext, MetadataExtractor,
+    merge_meta, EmbeddedMeta, ExtractTarget, ExtractionContext, FieldSet, MetadataExtractor,
 };
 pub use repo::{RepoAnalyzer, RepoMeta};
 pub use tool_runner::run_capture;
@@ -241,33 +241,51 @@ pub fn analyze(
         .enumerate()
         .filter_map(|(i, f)| classify_path(&f.path).map(|k| (i, k)))
         .collect();
-    let targets: Vec<ExtractTarget<'_>> = classified
-        .iter()
-        .map(|&(i, kind)| ExtractTarget {
-            path: &files[i].path,
-            kind,
-        })
-        .collect();
     let mut merged = vec![EmbeddedMeta::default(); classified.len()];
-    let managed = classified.len() as u64;
     for ex in &opts.extractors {
         if cancel() {
             break;
         }
-        // Each extractor re-reads the same managed files, so the count is
-        // the current extractor's own pass over them (named in `detail`),
-        // not a running total across passes: the numbers always read as
-        // "files of this pass out of managed files".
-        let batch = ex.extract_batch(&targets, &opts.ctx, &|done| {
+        // Only the files this extractor still has something to say about are
+        // handed to it: an earlier extractor that read the file answered for
+        // every field it can see (`settled`), and a returned value answers for
+        // its field too, so re-reading such a file (up to a bounded prefix of
+        // every photo, for the built-in EXIF reader) is pure cost. Extractors
+        // that do not declare `provides` keep the full set.
+        let pass: Vec<usize> = classified
+            .iter()
+            .enumerate()
+            .filter(|(ci, &(_, kind))| merged[*ci].needs(ex.provides(kind)))
+            .map(|(ci, _)| ci)
+            .collect();
+        if pass.is_empty() {
+            continue;
+        }
+        let batch_targets: Vec<ExtractTarget<'_>> = pass
+            .iter()
+            .map(|&ci| {
+                let (fi, kind) = classified[ci];
+                ExtractTarget {
+                    path: &files[fi].path,
+                    kind,
+                }
+            })
+            .collect();
+        // Each extractor re-reads a subset of the managed files, so the count
+        // is this pass's own work set (named in `detail`), not a running
+        // total across passes: the numbers always read as "files of this pass
+        // out of the files it has to read".
+        let total = batch_targets.len() as u64;
+        let batch = ex.extract_batch(&batch_targets, &opts.ctx, &|done| {
             progress(PhaseEvent {
                 phase: "metadata",
-                scanned: done,
-                total: Some(managed),
+                scanned: done.min(total),
+                total: Some(total),
                 detail: Some(ex.name()),
             });
         });
-        for (acc, m) in merged.iter_mut().zip(batch.iter()) {
-            merge_meta(acc, m);
+        for (&ci, m) in pass.iter().zip(batch.iter()) {
+            merge_meta(&mut merged[ci], m);
         }
     }
 
@@ -511,4 +529,284 @@ fn sort_oldest_first(a: &AnalyzedFile, b: &AnalyzedFile) -> std::cmp::Ordering {
     a_time
         .cmp(&b_time)
         .then_with(|| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// An extractor that declares the fields it can fill and records every
+    /// file it is actually asked to read.
+    struct Recording {
+        label: &'static str,
+        fields: FieldSet,
+        /// Fields this extractor settles for every file it reads, present or
+        /// not (the way a real reader answers for the tags it looks at).
+        settle: FieldSet,
+        /// Fields this extractor fills, keyed by file name.
+        values: fn(&std::path::Path) -> EmbeddedMeta,
+        seen: Mutex<Vec<PathBuf>>,
+    }
+
+    impl Recording {
+        fn new(
+            label: &'static str,
+            fields: FieldSet,
+            settle: FieldSet,
+            values: fn(&std::path::Path) -> EmbeddedMeta,
+        ) -> Arc<Self> {
+            Arc::new(Recording {
+                label,
+                fields,
+                settle,
+                values,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn seen(&self) -> Vec<String> {
+            let mut names: Vec<String> = self
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl MetadataExtractor for Arc<Recording> {
+        fn name(&self) -> &'static str {
+            self.label
+        }
+
+        fn provides(&self, _kind: AssetKind) -> FieldSet {
+            self.fields
+        }
+
+        fn extract(
+            &self,
+            path: &std::path::Path,
+            _kind: AssetKind,
+            _ctx: &ExtractionContext,
+        ) -> EmbeddedMeta {
+            self.seen.lock().unwrap().push(path.to_path_buf());
+            let mut meta = (self.values)(path);
+            meta.settled = meta.settled.union(self.settle);
+            meta
+        }
+    }
+
+    fn date_parts() -> DateParts {
+        DateParts {
+            year: 2024,
+            month: 3,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 45,
+        }
+    }
+
+    /// Every field a photo container can carry.
+    fn full_photo_meta() -> EmbeddedMeta {
+        EmbeddedMeta {
+            date_taken: Some(date_parts()),
+            date_offset: Some("+02:00".to_string()),
+            title: Some("Title".to_string()),
+            author: Some("Author".to_string()),
+            camera: Some("Camera".to_string()),
+            latitude: Some(48.0),
+            longitude: Some(2.0),
+            ..Default::default()
+        }
+    }
+
+    /// A photo-named file whose bytes are irrelevant to these tests.
+    fn write_photo(dir: &std::path::Path, name: &str) -> FileEntry {
+        let path = dir.join(name);
+        std::fs::write(&path, b"\xff\xd8\xff\xe0not-a-real-jpeg").unwrap();
+        FileEntry {
+            path,
+            size: 4,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            created: None,
+        }
+    }
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hl-analyze-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Run `analyze` over `files` with `extractors`, returning the analysis
+    /// and the progress events it published.
+    fn run(
+        files: &[FileEntry],
+        extractors: Vec<Box<dyn MetadataExtractor + Send + Sync>>,
+    ) -> (Analysis, Vec<PhaseEvent>) {
+        let opts = AnalyzeOptions {
+            extractors,
+            ..Default::default()
+        };
+        let events: Mutex<Vec<PhaseEvent>> = Mutex::new(Vec::new());
+        let analysis = analyze(files, &[], &opts, &|| false, &|e| {
+            events.lock().unwrap().push(e);
+        });
+        (analysis, events.into_inner().unwrap())
+    }
+
+    #[test]
+    fn an_extractor_is_skipped_for_files_earlier_extractors_completed() {
+        let dir = test_dir("skip");
+        let files = vec![write_photo(&dir, "a.jpg"), write_photo(&dir, "b.jpg")];
+
+        // Answers for every photo field, but only for `a.jpg` (it declines the
+        // file it could not read, the way a reader does on a parse failure).
+        let first = Recording::new("first", FieldSet::PHOTO, FieldSet::EMPTY, |path| {
+            if path.file_name().unwrap() == "a.jpg" {
+                EmbeddedMeta {
+                    settled: FieldSet::PHOTO,
+                    ..full_photo_meta()
+                }
+            } else {
+                EmbeddedMeta::default()
+            }
+        });
+        // Same fields, so it only has work left for `b.jpg`.
+        let second = Recording::new("second", FieldSet::PHOTO, FieldSet::PHOTO, |_| {
+            EmbeddedMeta {
+                camera: Some("SecondCamera".to_string()),
+                ..Default::default()
+            }
+        });
+        // Only the camera, which the second pass already answered for, so this
+        // whole pass is skipped.
+        let third = Recording::new("third", FieldSet::CAMERA, FieldSet::CAMERA, |_| {
+            EmbeddedMeta {
+                camera: Some("ThirdCamera".to_string()),
+                ..Default::default()
+            }
+        });
+
+        let (analysis, events) = run(
+            &files,
+            vec![
+                Box::new(first.clone()),
+                Box::new(second.clone()),
+                Box::new(third.clone()),
+            ],
+        );
+
+        let by_name = |name: &str| {
+            analysis
+                .files
+                .iter()
+                .find(|f| f.path.file_name().unwrap() == name)
+                .unwrap()
+                .clone()
+        };
+        // `a.jpg` was answered by the first extractor, so the second pass
+        // never read it; `b.jpg` was open and got the second's camera.
+        assert_eq!(first.seen(), vec!["a.jpg", "b.jpg"]);
+        assert_eq!(second.seen(), vec!["b.jpg"]);
+        assert_eq!(by_name("a.jpg").camera_model.as_deref(), Some("Camera"));
+        assert_eq!(
+            by_name("b.jpg").camera_model.as_deref(),
+            Some("SecondCamera")
+        );
+        // Nothing was left for the third extractor, so it read no file and
+        // published no report.
+        assert!(third.seen().is_empty());
+        assert!(!events.iter().any(|e| e.detail == Some("third")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_settled_field_is_not_hunted_for_by_later_extractors() {
+        // The distinction the fallback rests on: a reader that opened the
+        // container has answered for the tags it looks at, so a missing title
+        // means the file has none, not that the next reader should look too.
+        let dir = test_dir("settled");
+        let files = vec![write_photo(&dir, "a.jpg")];
+
+        let first = Recording::new("first", FieldSet::PHOTO, FieldSet::PHOTO, |_| {
+            EmbeddedMeta {
+                date_taken: Some(date_parts()),
+                ..Default::default()
+            }
+        });
+        let second = Recording::new("second", FieldSet::PHOTO, FieldSet::PHOTO, |_| {
+            EmbeddedMeta {
+                title: Some("Late title".to_string()),
+                ..Default::default()
+            }
+        });
+
+        let (analysis, events) = run(
+            &files,
+            vec![Box::new(first.clone()), Box::new(second.clone())],
+        );
+
+        assert_eq!(first.seen(), vec!["a.jpg"]);
+        assert!(second.seen().is_empty());
+        assert!(!events.iter().any(|e| e.detail == Some("second")));
+        assert_eq!(analysis.files[0].embedded_title, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn passes_report_their_own_work_set() {
+        let dir = test_dir("progress");
+        let files = vec![write_photo(&dir, "a.jpg"), write_photo(&dir, "b.jpg")];
+
+        let first = Recording::new("first", FieldSet::DATE, FieldSet::EMPTY, |path| {
+            if path.file_name().unwrap() == "a.jpg" {
+                EmbeddedMeta {
+                    date_taken: Some(date_parts()),
+                    ..Default::default()
+                }
+            } else {
+                EmbeddedMeta::default()
+            }
+        });
+        let second = Recording::new("second", FieldSet::DATE, FieldSet::DATE, |_| EmbeddedMeta {
+            date_taken: Some(date_parts()),
+            ..Default::default()
+        });
+
+        let (_analysis, events) = run(&files, vec![Box::new(first), Box::new(second)]);
+
+        // The second pass only had one file left to read, so its counts are
+        // `1/1` rather than `1/2` or `2/2`.
+        let second_pass: Vec<&PhaseEvent> = events
+            .iter()
+            .filter(|e| e.detail == Some("second"))
+            .collect();
+        assert!(!second_pass.is_empty());
+        assert!(second_pass.iter().all(|e| e.total == Some(1)));
+        assert_eq!(second_pass.last().unwrap().scanned, 1);
+        // The phase boundary closes at the full managed count with no detail.
+        let boundary = events
+            .iter()
+            .filter(|e| e.phase == "metadata")
+            .next_back()
+            .unwrap();
+        assert_eq!(boundary.detail, None);
+        assert_eq!(boundary.scanned, 2);
+        assert_eq!(boundary.total, Some(2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

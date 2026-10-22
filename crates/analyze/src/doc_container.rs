@@ -17,7 +17,7 @@ use quick_xml::Reader;
 use zip::ZipArchive;
 
 use crate::dateparse::parse_tag_date_parts;
-use crate::extractor::{EmbeddedMeta, ExtractionContext, MetadataExtractor};
+use crate::extractor::{EmbeddedMeta, ExtractionContext, FieldSet, MetadataExtractor};
 
 /// Built-in fallback document extractor (docx/odt/epub). Runs after the
 /// `pdfinfo` preferred tool,so its fields never override poppler's.
@@ -26,6 +26,14 @@ pub struct DocumentContainerExtractor;
 impl MetadataExtractor for DocumentContainerExtractor {
     fn name(&self) -> &'static str {
         "document-container"
+    }
+
+    fn provides(&self, kind: AssetKind) -> FieldSet {
+        if kind == AssetKind::Document {
+            FieldSet::DOCUMENT
+        } else {
+            FieldSet::EMPTY
+        }
     }
 
     fn extract(&self, path: &Path, kind: AssetKind, _ctx: &ExtractionContext) -> EmbeddedMeta {
@@ -77,6 +85,9 @@ impl MetadataExtractor for DocumentContainerExtractor {
             }
         };
         let fields = parse_meta_xml(&xml);
+        // The container XML was read, so the document fields are answered
+        // whether or not it declares them.
+        meta.settled = FieldSet::DOCUMENT;
         meta.title = fields.title;
         meta.author = fields.author;
         meta.date_taken = fields.date.as_deref().and_then(parse_tag_date_parts);

@@ -17,7 +17,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 
 use crate::dateparse::parse_tag_date_parts;
-use crate::extractor::{EmbeddedMeta, ExtractionContext, MetadataExtractor};
+use crate::extractor::{EmbeddedMeta, ExtractionContext, FieldSet, MetadataExtractor};
 
 /// Reads container tag metadata (title, artist, date) and audio
 /// properties (bitrate, duration).
@@ -26,6 +26,14 @@ pub struct BuiltinAudioExtractor;
 impl MetadataExtractor for BuiltinAudioExtractor {
     fn name(&self) -> &'static str {
         "lofty"
+    }
+
+    fn provides(&self, kind: AssetKind) -> FieldSet {
+        if matches!(kind, AssetKind::Audio | AssetKind::Video) {
+            FieldSet::MEDIA_STREAM
+        } else {
+            FieldSet::EMPTY
+        }
     }
 
     fn extract(&self, path: &Path, kind: AssetKind, _ctx: &ExtractionContext) -> EmbeddedMeta {
@@ -41,6 +49,9 @@ impl MetadataExtractor for BuiltinAudioExtractor {
             Ok(t) => t,
             Err(_) => return meta,
         };
+        // The container parsed, so every tag this reader looks for is
+        // answered, present or not.
+        meta.settled = FieldSet::MEDIA_STREAM;
 
         // A container may hold several tags (ID3v2 plus ID3v1, for
         // example); collect the first non-empty value for each field.

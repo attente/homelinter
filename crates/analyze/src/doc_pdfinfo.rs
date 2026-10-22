@@ -11,7 +11,7 @@ use std::path::Path;
 use homelinter_model::asset_kind::AssetKind;
 
 use crate::dateparse::DateParts;
-use crate::extractor::{EmbeddedMeta, ExtractionContext, MetadataExtractor};
+use crate::extractor::{EmbeddedMeta, ExtractionContext, FieldSet, MetadataExtractor};
 use crate::tool_runner::run_capture;
 
 /// Preferred PDF metadata extractor when `pdfinfo` is on the PATH.
@@ -20,6 +20,14 @@ pub struct PdfInfoExtractor;
 impl MetadataExtractor for PdfInfoExtractor {
     fn name(&self) -> &'static str {
         "pdfinfo"
+    }
+
+    fn provides(&self, kind: AssetKind) -> FieldSet {
+        if kind == AssetKind::Document {
+            FieldSet::DOCUMENT.union(FieldSet::PAGE_COUNT)
+        } else {
+            FieldSet::EMPTY
+        }
     }
 
     fn extract(&self, path: &Path, kind: AssetKind, ctx: &ExtractionContext) -> EmbeddedMeta {
@@ -60,6 +68,9 @@ impl MetadataExtractor for PdfInfoExtractor {
         let Some(bytes) = bytes else {
             return meta;
         };
+        // pdfinfo exited successfully on this PDF, so the fields it reports
+        // are answered whether or not the document carries them.
+        meta.settled = FieldSet::DOCUMENT.union(FieldSet::PAGE_COUNT);
         let text = String::from_utf8_lossy(&bytes);
         for (key, value) in parse_pairs(&text) {
             match key.as_str() {

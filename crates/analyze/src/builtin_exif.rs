@@ -12,7 +12,7 @@ use exif::{In, Reader, Tag, Value};
 use homelinter_model::asset_kind::AssetKind;
 
 use crate::dateparse::parse_exif_datetime;
-use crate::extractor::{EmbeddedMeta, ExtractionContext, MetadataExtractor};
+use crate::extractor::{EmbeddedMeta, ExtractionContext, FieldSet, MetadataExtractor};
 
 const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -21,6 +21,14 @@ pub struct BuiltinExifExtractor;
 impl MetadataExtractor for BuiltinExifExtractor {
     fn name(&self) -> &'static str {
         "kamadak-exif"
+    }
+
+    fn provides(&self, kind: AssetKind) -> FieldSet {
+        if kind == AssetKind::Photo {
+            FieldSet::PHOTO
+        } else {
+            FieldSet::EMPTY
+        }
     }
 
     fn extract(&self, path: &Path, kind: AssetKind, ctx: &ExtractionContext) -> EmbeddedMeta {
@@ -47,7 +55,12 @@ impl MetadataExtractor for BuiltinExifExtractor {
         };
 
         let field = |tag| exif.get_field(tag, In::PRIMARY);
-        let mut meta = EmbeddedMeta::default();
+        let mut meta = EmbeddedMeta {
+            // The container parsed, so every field this reader looks for is
+            // answered, present or not.
+            settled: FieldSet::PHOTO,
+            ..Default::default()
+        };
 
         let date = field(Tag::DateTimeOriginal).or_else(|| field(Tag::DateTime));
         meta.date_taken = date.and_then(|f| parse_exif_datetime(&value_text(&f.value)));
