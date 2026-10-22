@@ -63,8 +63,17 @@ The DMG is written to `crates/desktop/src-tauri/target/universal-apple-darwin/re
 
 `crates/launcher` builds `homelinter-app`, a small launcher that runs the same in-process service and opens the SPA in an app-mode window of the browser you already have.
 It is not a Tauri build: the bundle carries no WebKitGTK, GTK, or GStreamer, so it is one self-contained AppImage whose only library dependencies are glibc and libgcc.
-The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` with `--app` (Chromium, Chrome, Brave, Edge, Vivaldi) or `--kiosk` (Firefox), and stops the service when you close that window; Ctrl-C in the foreground or `SIGTERM` stops both, while a launch detached with `setsid ... &` keeps running after the terminal closes, because `setsid` starts it in a session with no controlling terminal and the launcher ignores `SIGHUP` as well.
-On NixOS, `appimage-run` wraps the bundle in a bubblewrap supervisor that exits on `SIGHUP` and takes the launcher with it, and `nohup ... &` does not help there because the shell resends `SIGHUP` to the job's process group, which contains the supervisor; start a detached launch with `setsid ./homelinter-<version>-x86_64.AppImage >/dev/null 2>&1 &` instead.
+The launcher binds an ephemeral loopback port, opens `http://127.0.0.1:<port>/` with `--app` (Chromium, Chrome, Brave, Edge, Vivaldi) or `--kiosk` (Firefox), and stops the service when you close that window; Ctrl-C in the foreground or `SIGTERM` stops both.
+To keep it running after the terminal closes, detach it with `setsid`:
+
+```
+setsid ./homelinter-<version>-x86_64.AppImage >~/homelinter.log 2>&1 </dev/null &
+```
+
+`setsid` starts it in a session with no controlling terminal, and the launcher ignores `SIGHUP` too, so the service and the app window stay up until you close the window or `SIGTERM` the launcher (`pkill -TERM -x homelinter-app`).
+The log names the URL it opened, and `pgrep -af usr/bin/homelinter-app` confirms it is running.
+Do not `SIGKILL` the launcher or kill the AppImage wrapper: the browser runs in its own process group and would survive as an orphan window on a stopped service.
+On NixOS, `appimage-run` wraps the bundle in a bubblewrap supervisor that exits on `SIGHUP` and takes the launcher with it, and `nohup ... &` does not help there because the shell resends `SIGHUP` to the job's process group, which contains the supervisor; `setsid ... &` avoids that by leaving the shell's session.
 Chromium-based browsers give a true app window with no location bar, bookmarks, or tabs.
 Set `HOMELINTER_BROWSER` to choose the browser or a wrapper for it.
 

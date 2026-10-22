@@ -91,6 +91,14 @@ jobs:
           stops the backend when you close that window. Chromium-based browsers
           give a true app window; Firefox opens its kiosk window instead.
 
+          Running it detached from the terminal (keeps going after the terminal
+          closes; setsid is required on NixOS, where the appimage-run sandbox
+          exits on the shell's hangup):
+               setsid ./homelinter-*.AppImage >~/homelinter.log 2>&1 </dev/null &
+          The log names the URL it opened. Close the window, or run
+               pkill -TERM -x homelinter-app
+          to stop the backend and the window together.
+
           Requirements:
           - glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+).
           - A Chromium-based browser (preferred) or Firefox on PATH.

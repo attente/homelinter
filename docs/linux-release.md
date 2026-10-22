@@ -62,16 +62,40 @@ Because there is exactly one profile, only one homelinter window runs at a time;
 The guard is an `flock` on `~/.local/share/homelinter/browser.lock`, released by the kernel when the app exits, so a crash never blocks the next start.
 
 Closing the window stops the service and exits the launcher; Ctrl-C in the foreground or a `SIGTERM` does the same and also stops the browser tree.
-The launcher ignores `SIGHUP`, so a launch detached from its terminal keeps the service and window running until one of those quit paths occurs.
-Detach it with `setsid`, which starts it in a new session with no controlling terminal, so closing the terminal or losing the SSH session delivers no hangup at all:
+
+### Running it detached
+
+To keep the app running after the terminal closes, start it in its own session with `setsid`:
 
 ```sh
 setsid ./homelinter-0.2.0-x86_64.AppImage >~/homelinter.log 2>&1 </dev/null &
 ```
 
+`setsid` starts the bundle in a new session with no controlling terminal, so closing the terminal or losing the SSH session delivers no hangup at all, and the launcher ignores `SIGHUP` on top of that.
+The command returns at once and the window opens a moment later.
+The log names the URL it opened:
+
+```sh
+grep -o 'http://127.0.0.1:[0-9]*' ~/homelinter.log | tail -n 1
+```
+
+Confirm the launcher is still up after the terminal is gone:
+
+```sh
+pgrep -af usr/bin/homelinter-app
+```
+
+A detached launch stops the same ways as a foreground one: close the app window, or send the launcher `SIGTERM`, which closes the browser tree and the service with it:
+
+```sh
+pkill -TERM -x homelinter-app
+```
+
+Do not `SIGKILL` the launcher or kill the AppImage wrapper process: the browser runs in its own process group, so it would survive as an orphan window pointed at a stopped service.
+
 On NixOS the AppImage runs through `appimage-run`, whose bubblewrap supervisor exits on `SIGHUP` before the launcher handles it.
 `nohup ... &` is not enough there: `nohup` only ignores `SIGHUP` in the process it starts, while the shell resends `SIGHUP` to the whole job process group on hangup, and the supervisor is in that group.
-Use `setsid ... &` on NixOS as well, and confirm the detached launch with `pgrep -af usr/bin/homelinter-app`; the port it bound is in the log the command writes.
+Use `setsid ... &` on NixOS as well.
 
 To pick a browser, or to reach one behind a wrapper:
 
