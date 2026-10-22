@@ -15,6 +15,13 @@ pub enum ServerEvent {
     ScanProgress {
         phase: &'static str,
         scanned: u64,
+        /// Work items of this phase when known up front (managed files for
+        /// extraction and hashing, repositories, units); `None` for phases
+        /// that cannot know their total ahead of time.
+        total: Option<u64>,
+        /// Name of the worker currently filling the phase (for example an
+        /// extractor behind `metadata`), when a phase has several.
+        detail: Option<&'static str>,
         elapsed_ms: u64,
     },
     ScanComplete {
@@ -82,9 +89,17 @@ impl ServerEvent {
             ServerEvent::ScanProgress {
                 phase,
                 scanned,
+                total,
+                detail,
                 elapsed_ms,
             } => {
-                json!({ "phase": phase, "scanned": scanned, "elapsed_ms": elapsed_ms })
+                json!({
+                    "phase": phase,
+                    "scanned": scanned,
+                    "total": total,
+                    "detail": detail,
+                    "elapsed_ms": elapsed_ms
+                })
             }
             ServerEvent::ScanComplete { summary } => {
                 json!({ "summary": serde_json::to_value(summary).unwrap_or(Value::Null) })

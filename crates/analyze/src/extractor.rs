@@ -9,6 +9,7 @@
 //! reverse geocoding implement the same shape in later phases.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use homelinter_model::asset_kind::AssetKind;
@@ -87,14 +88,26 @@ pub trait MetadataExtractor: Send + Sync {
     /// Extractors that can amortize per-process startup (for example
     /// `exiftool`, whose process launch dominates its work on a single
     /// file) override this to process the batch in a few invocations.
+    ///
+    /// `progress` is handed the number of files of this batch processed so
+    /// far (monotonic, called from worker threads, so calls may arrive out
+    /// of order for equal values). It exists so a long extraction pass shows
+    /// movement in clients; extractors that cannot count finer than one
+    /// invocation report after each invocation.
     fn extract_batch(
         &self,
         files: &[ExtractTarget<'_>],
         ctx: &ExtractionContext,
+        progress: &(dyn Fn(u64) + Sync),
     ) -> Vec<EmbeddedMeta> {
+        let done = AtomicU64::new(0);
         files
             .par_iter()
-            .map(|t| self.extract(t.path, t.kind, ctx))
+            .map(|t| {
+                let meta = self.extract(t.path, t.kind, ctx);
+                progress(done.fetch_add(1, Ordering::Relaxed) + 1);
+                meta
+            })
             .collect()
     }
 }

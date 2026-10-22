@@ -15,7 +15,12 @@ import {
   matchesFilter,
   mergeSuggestionEvents,
 } from "./lib/filter";
-import { elapsedLabel, metadataProgressLabel, opLine, stateLabel } from "./lib/format";
+import {
+  metadataProgressLabel,
+  opLine,
+  scanProgressLabel,
+  stateLabel,
+} from "./lib/format";
 import type {
   ExecutionReport,
   MetadataProgress,
@@ -883,11 +888,13 @@ export default function App() {
     body = (
       <main className="run-view">
         <div className="run-status">
-          <span className="state-busy">{stateLabel(state)} ...</span>
+          <span className="state-busy">
+            <span className="spinner" aria-hidden="true" />
+            {stateLabel(state)} ...
+          </span>
           {st.progress && (
             <span className="progress-line">
-              {st.progress.phase}, scanned={st.progress.scanned}, elapsed=
-              {elapsedLabel(st.progress.elapsed_ms)}
+              {scanProgressLabel(st.progress)}
             </span>
           )}
           {metadataLabel && (

@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use homelinter_analyze::{
     analyze, AnalyzeOptions, BuiltinAudioExtractor, BuiltinExifExtractor,
     DocumentContainerExtractor, ExifToolExtractor, ExtractionContext, MetadataExtractor,
-    PdfInfoExtractor,
+    PdfInfoExtractor, PhaseEvent,
 };
 use homelinter_model::config::{config_hash, RawConfig};
 use homelinter_model::suggestion::{
@@ -138,10 +138,18 @@ fn build_extractors(
     extractors
 }
 
-fn phase_progress(phase: &'static str, scanned: u64, start: Instant) -> ServerEvent {
+fn phase_progress(
+    phase: &'static str,
+    scanned: u64,
+    total: Option<u64>,
+    detail: Option<&'static str>,
+    start: Instant,
+) -> ServerEvent {
     ServerEvent::ScanProgress {
         phase,
         scanned,
+        total,
+        detail,
         elapsed_ms: start.elapsed().as_millis() as u64,
     }
 }
@@ -178,7 +186,8 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         },
         cfg.duplication.large_file_threshold,
     );
-    app.events.publish(phase_progress("discovery", 0, start));
+    app.events
+        .publish(phase_progress("discovery", 0, None, None, start));
 
     // Phase 1 + symlink pass: discovery. Runs on the blocking pool. The
     // probe is polled inside the walks (per entry) so a cancel lands
@@ -200,11 +209,18 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     if is_cancelled(&app, cancel_token) {
         return fail(app, "scan cancelled".into()).await;
     }
-    app.events
-        .publish(phase_progress("discovery", scan.primary_units, start));
+    app.events.publish(phase_progress(
+        "discovery",
+        scan.primary_units,
+        Some(scan.primary_units),
+        None,
+        start,
+    ));
     app.events.publish(phase_progress(
         "symlinks",
         scan.symlinks.entries.len() as u64,
+        Some(scan.symlinks.entries.len() as u64),
+        None,
         start,
     ));
 
@@ -228,8 +244,9 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
             move || is_cancelled(&app, cancel_token)
         };
         // Analysis progress: the blocking analysis loop reports completed
-        // work items (extracted files, hashed files, repositories); publish
-        // a `scan.progress` event at most every second so a long
+        // work items (extracted files per extractor, hashed files,
+        // repositories), each with the phase's total when known; publish a
+        // `scan.progress` event at most every second so a long
         // extraction/hashing pass shows movement in clients instead of the
         // frozen phase line left by the last phase-boundary event.
         let progress = {
@@ -238,13 +255,15 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
             // throttle state is a mutex; a lock is held only long enough to
             // read and update the last-publish instant.
             let last = std::sync::Mutex::new(start);
-            move |phase: &'static str, scanned: u64| {
+            move |ev: PhaseEvent| {
                 let now = Instant::now();
                 let mut last = last.lock().unwrap();
                 if now.duration_since(*last) >= std::time::Duration::from_secs(1) {
                     *last = now;
                     drop(last);
-                    app.events.publish(phase_progress(phase, scanned, start));
+                    app.events.publish(phase_progress(
+                        ev.phase, ev.scanned, ev.total, ev.detail, start,
+                    ));
                 }
             }
         };
@@ -263,6 +282,8 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     app.events.publish(phase_progress(
         "metadata",
         analysis.files.len() as u64,
+        Some(analysis.files.len() as u64),
+        None,
         start,
     ));
 
@@ -370,6 +391,8 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     app.events.publish(phase_progress(
         "suggestions",
         suggestions.len() as u64,
+        Some(suggestions.len() as u64),
+        None,
         start,
     ));
 

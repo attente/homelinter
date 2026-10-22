@@ -135,6 +135,12 @@ export interface ExecutionReport {
 export interface ScanProgress {
   phase: string;
   scanned: number;
+  /** Work items of this phase when the server knows the total up front;
+   * null for phases that cannot know it ahead of time. */
+  total: number | null;
+  /** Name of the worker currently filling the phase (for example an
+   * extractor behind `metadata`), when the phase has several. */
+  detail: string | null;
   elapsed_ms: number;
 }
 

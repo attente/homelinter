@@ -196,20 +196,35 @@ impl Default for AnalyzeOptions {
     }
 }
 
+/// One `scan.progress` report from an analysis pass: the phase label, the
+/// completed work items in that phase, the phase's total when it is known up
+/// front, and an optional detail naming the worker currently running (for
+/// example the extractor behind a `metadata` pass). Phase-boundary reports
+/// carry the phase's own count for `scanned` and `total` so clients can show
+/// a finished phase as `n/n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseEvent {
+    pub phase: &'static str,
+    pub scanned: u64,
+    pub total: Option<u64>,
+    pub detail: Option<&'static str>,
+}
+
 /// Analyze every discovered unit. `cancel` is a cooperative-cancellation
 /// probe polled between files (and between hashes and repositories): when
 /// it returns true, analysis stops early and returns the partial `Analysis`
 /// computed so far, which the caller discards once it observes the probe.
 /// `progress` reports completed work items so callers can publish live
-/// `scan.progress` events during a long analysis phase: it receives the
-/// phase label (`"metadata"`, `"hashing"`, or `"repos"`) and the number of
-/// items completed in that pass.
+/// `scan.progress` events during a long analysis phase: metadata extraction
+/// reports each extractor's own pass (named in `detail`, counting managed
+/// files), hashing reports hashed files, and repositories report analyzed
+/// repositories.
 pub fn analyze(
     files: &[FileEntry],
     repos: &[RepoEntry],
     opts: &AnalyzeOptions,
     cancel: &(dyn Fn() -> bool + Sync),
-    progress: &(dyn Fn(&'static str, u64) + Sync),
+    progress: &(dyn Fn(PhaseEvent) + Sync),
 ) -> Analysis {
     // Classify once, then hand every managed file to each extractor as one
     // batch. Built-in extractors parallelize internally and `exiftool`
@@ -234,11 +249,23 @@ pub fn analyze(
         })
         .collect();
     let mut merged = vec![EmbeddedMeta::default(); classified.len()];
+    let managed = classified.len() as u64;
     for ex in &opts.extractors {
         if cancel() {
             break;
         }
-        let batch = ex.extract_batch(&targets, &opts.ctx);
+        // Each extractor re-reads the same managed files, so the count is
+        // the current extractor's own pass over them (named in `detail`),
+        // not a running total across passes: the numbers always read as
+        // "files of this pass out of managed files".
+        let batch = ex.extract_batch(&targets, &opts.ctx, &|done| {
+            progress(PhaseEvent {
+                phase: "metadata",
+                scanned: done,
+                total: Some(managed),
+                detail: Some(ex.name()),
+            });
+        });
         for (acc, m) in merged.iter_mut().zip(batch.iter()) {
             merge_meta(acc, m);
         }
@@ -297,9 +324,14 @@ pub fn analyze(
         })
         .collect();
     let mut analyzed = analyzed;
-    // Progress: report extracted files so a long extraction batch shows
-    // movement in clients instead of a frozen phase line.
-    progress("metadata", analyzed.len() as u64);
+    // Boundary: extraction is complete for every managed file, so the phase
+    // line closes at `n/n` with no extractor name attached.
+    progress(PhaseEvent {
+        phase: "metadata",
+        scanned: analyzed.len() as u64,
+        total: Some(analyzed.len() as u64),
+        detail: None,
+    });
 
     let (groups, warnings) =
         dedup_groups(&mut analyzed, opts.large_file_threshold, cancel, progress);
@@ -315,7 +347,12 @@ pub fn analyze(
                 return None;
             }
             let meta = repo_analyzer.analyze(r);
-            progress("repos", repos_progress.fetch_add(1, Ordering::Relaxed) + 1);
+            progress(PhaseEvent {
+                phase: "repos",
+                scanned: repos_progress.fetch_add(1, Ordering::Relaxed) + 1,
+                total: Some(repos.len() as u64),
+                detail: None,
+            });
             Some((r.clone(), meta))
         })
         .collect();
@@ -351,9 +388,10 @@ fn dedup_groups(
     files: &mut [AnalyzedFile],
     threshold: u64,
     cancel: &(dyn Fn() -> bool + Sync),
-    progress: &(dyn Fn(&'static str, u64) + Sync),
+    progress: &(dyn Fn(PhaseEvent) + Sync),
 ) -> (Vec<DupGroup>, Vec<String>) {
     let hashed = AtomicU64::new(0);
+    let files_total = files.len() as u64;
     // Pass 1: full-hash every file below the threshold and fast-hash the
     // rest. Files are independent, so the pass runs in parallel; hashing
     // large media trees in full is the second-largest scan cost after
@@ -381,7 +419,12 @@ fn dedup_groups(
                     Err(_) => None,
                 }
             };
-            progress("hashing", hashed.fetch_add(1, Ordering::Relaxed) + 1);
+            progress(PhaseEvent {
+                phase: "hashing",
+                scanned: hashed.fetch_add(1, Ordering::Relaxed) + 1,
+                total: Some(files_total),
+                detail: None,
+            });
             result
         })
         .collect();
@@ -409,7 +452,15 @@ fn dedup_groups(
                     return None;
                 }
                 let h = hash::hash_file_full(&files_ref[i].path).ok();
-                progress("hashing", hashed.fetch_add(1, Ordering::Relaxed) + 1);
+                // The confirmation pass re-hashes candidates already counted
+                // in the first pass, so the running count can exceed the file
+                // total; it therefore carries no total and stays monotonic.
+                progress(PhaseEvent {
+                    phase: "hashing",
+                    scanned: hashed.fetch_add(1, Ordering::Relaxed) + 1,
+                    total: None,
+                    detail: None,
+                });
                 h.map(|h| (i, h))
             })
         })

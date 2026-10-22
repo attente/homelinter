@@ -14,6 +14,7 @@ import {
 import {
   asciiOnly,
   cacheStatsLabel,
+  scanProgressLabel,
   suggestionCountLabel,
   countsOf,
   countsSummary,
@@ -210,6 +211,37 @@ describe('filter', () => {
 });
 
 describe('format', () => {
+  it('renders the scan progress line with total and worker detail', () => {
+    expect(
+      scanProgressLabel({
+        phase: 'metadata',
+        scanned: 4312,
+        total: 11263,
+        detail: 'exiftool',
+        elapsed_ms: 12500,
+      }),
+    ).toBe('metadata (exiftool) 4312/11263, elapsed=12s');
+    expect(
+      scanProgressLabel({
+        phase: 'discovery',
+        scanned: 7,
+        total: null,
+        detail: null,
+        elapsed_ms: 0,
+      }),
+    ).toBe('discovery scanned=7, elapsed=0s');
+    // Old events without the newer optional fields degrade gracefully.
+    expect(
+      scanProgressLabel({
+        phase: 'hashing',
+        scanned: 9000,
+        total: null,
+        detail: undefined as unknown as null,
+        elapsed_ms: 30000,
+      }),
+    ).toBe('hashing scanned=9000, elapsed=30s');
+  });
+
   it('labels the filter-row suggestion counts', () => {
     expect(suggestionCountLabel(1234, 1234, false)).toBe('1234 suggestions');
     expect(suggestionCountLabel(1, 1, false)).toBe('1 suggestion');

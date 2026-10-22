@@ -154,6 +154,25 @@ export function elapsedLabel(ms: number): string {
   return m > 0 ? m + 'm' + secs + 's' : s + 's';
 }
 
+/**
+ * One scan-progress line for the scanning view, e.g.
+ * `metadata (exiftool) 4312/11263, elapsed=12s`. The total is shown as
+ * `scanned/total` when the phase knows it up front and as `scanned=N`
+ * otherwise; the detail names the worker filling the phase (for example an
+ * extractor) when the server reports one.
+ */
+export function scanProgressLabel(p: {
+  phase: string;
+  scanned: number;
+  total: number | null;
+  detail: string | null;
+  elapsed_ms: number;
+}): string {
+  const detail = p.detail ? ` (${p.detail})` : '';
+  const count =
+    p.total != null ? `${p.scanned}/${p.total}` : `scanned=${p.scanned}`;
+  return `${p.phase}${detail} ${count}, elapsed=${elapsedLabel(p.elapsed_ms)}`;
+}
 
 
 export function stateLabel(state: string): string {

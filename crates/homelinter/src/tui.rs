@@ -242,6 +242,8 @@ struct App {
     kinds: Vec<String>,
     progress_phase: String,
     progress_scanned: u64,
+    progress_total: Option<u64>,
+    progress_detail: Option<String>,
     progress_elapsed_ms: u64,
     metadata_completed: usize,
     metadata_total: usize,
@@ -291,6 +293,8 @@ impl App {
             kinds: Vec::new(),
             progress_phase: String::new(),
             progress_scanned: 0,
+            progress_total: None,
+            progress_detail: None,
             progress_elapsed_ms: 0,
             metadata_completed: 0,
             metadata_total: 0,
@@ -683,6 +687,8 @@ impl App {
                 if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
                     self.progress_phase = str_field(&v, "phase");
                     self.progress_scanned = v["scanned"].as_u64().unwrap_or(0);
+                    self.progress_total = v["total"].as_u64();
+                    self.progress_detail = v["detail"].as_str().map(|s| s.to_string());
                     self.progress_elapsed_ms = v["elapsed_ms"].as_u64().unwrap_or(0);
                 }
             }
@@ -1421,10 +1427,19 @@ impl App {
         ];
         let mut text = Text::from(lines);
         if !self.progress_phase.is_empty() {
+            let detail = self
+                .progress_detail
+                .as_deref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default();
+            let scanned = match self.progress_total {
+                Some(t) => format!("{}/{}", self.progress_scanned, t),
+                None => format!("{}", self.progress_scanned),
+            };
             text.lines.push(Line::from(""));
             text.lines.push(Line::from(format!(
-                " phase: {}   scanned: {}   elapsed: {} ms",
-                self.progress_phase, self.progress_scanned, self.progress_elapsed_ms
+                " phase: {}{}   scanned: {}   elapsed: {} ms",
+                self.progress_phase, detail, scanned, self.progress_elapsed_ms
             )));
         }
         if let Some(label) = self.metadata_label() {

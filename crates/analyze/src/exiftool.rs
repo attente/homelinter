@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use homelinter_model::asset_kind::AssetKind;
@@ -95,11 +96,13 @@ impl MetadataExtractor for ExifToolExtractor {
     /// `BATCH_SIZE` and each chunk is read with one exiftool invocation, the
     /// chunks themselves running in parallel. Non-applicable kinds and files
     /// exiftool skipped keep the default (empty) metadata, which matches the
-    /// per-file contract.
+    /// per-file contract. Progress is reported per finished chunk, the
+    /// finest granularity one exiftool invocation allows.
     fn extract_batch(
         &self,
         files: &[ExtractTarget<'_>],
         ctx: &ExtractionContext,
+        progress: &(dyn Fn(u64) + Sync),
     ) -> Vec<EmbeddedMeta> {
         let applicable: Vec<(usize, &str)> = files
             .iter()
@@ -111,11 +114,15 @@ impl MetadataExtractor for ExifToolExtractor {
         if applicable.is_empty() {
             return out;
         }
+        let done = AtomicU64::new(0);
         let parsed: Vec<(usize, Option<EmbeddedMeta>)> = applicable
             .par_chunks(BATCH_SIZE)
             .flat_map_iter(|chunk| {
                 let paths: Vec<&str> = chunk.iter().map(|(_, p)| *p).collect();
                 let by_path = extract_chunk(&paths, ctx);
+                progress(
+                    done.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64,
+                );
                 chunk
                     .iter()
                     .map(move |(i, p)| ((*i), by_path.get(*p).cloned()))

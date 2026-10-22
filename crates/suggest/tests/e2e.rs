@@ -81,7 +81,7 @@ fn duplicate_kept_moved_others_deleted() {
         &scan.repos,
         &AnalyzeOptions::default(),
         &|| false,
-        &|_, _| {},
+        &|_| {},
     );
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
@@ -142,7 +142,7 @@ fn metadata_preservation_warning_is_surfaced() {
         extractors: vec![Box::new(TitleFor(newer.clone()))],
         ..AnalyzeOptions::default()
     };
-    let analysis = analyze(&scan.files, &scan.repos, &opts, &|| false, &|_, _| {});
+    let analysis = analyze(&scan.files, &scan.repos, &opts, &|| false, &|_| {});
 
     // Suppressed group, but the reason is reported instead of dropped.
     assert!(analysis.groups.is_empty());
@@ -184,7 +184,7 @@ fn symlink_repair_attached_on_move() {
         &scan.repos,
         &AnalyzeOptions::default(),
         &|| false,
-        &|_, _| {},
+        &|_| {},
     );
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
@@ -235,7 +235,7 @@ fn delete_repairs_links_pointing_at_duplicate() {
         &scan.repos,
         &AnalyzeOptions::default(),
         &|| false,
-        &|_, _| {},
+        &|_| {},
     );
     let out = generate_suggestions(&GenerateInput {
         analysis: &analysis,
@@ -272,7 +272,7 @@ fn validation_marks_identity_degraded() {
         &scan.repos,
         &AnalyzeOptions::default(),
         &|| false,
-        &|_, _| {},
+        &|_| {},
     );
     // Simulate a non-unix degraded identity for all files.
     for f in &mut analysis.files {
@@ -305,7 +305,7 @@ fn noop_move_not_generated() {
         &scan.repos,
         &AnalyzeOptions::default(),
         &|| false,
-        &|_, _| {},
+        &|_| {},
     );
     // Title is "keep"; destination "keep.txt" resolves under a directory
     // named "keep.txt.txt", colliding back with the literal source name
