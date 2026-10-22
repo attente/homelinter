@@ -894,10 +894,7 @@ export default function App() {
     body = (
       <main className="run-view">
         <div className="run-status">
-          <span className="state-busy">
-            <span className="spinner" aria-hidden="true" />
-            {stateLabel(state)} ...
-          </span>
+          <span className="state-busy">{stateLabel(state)} ...</span>
           <ScanMeter progress={st.progress} />
         </div>
         <div className="run-status">

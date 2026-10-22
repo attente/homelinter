@@ -1407,17 +1407,13 @@ impl App {
 
     fn draw_scan(&mut self, f: &mut Frame) {
         let area = f.area();
-        let spinner = "-\\|/"
-            .chars()
-            .nth((self.frame % 4) as usize)
-            .unwrap_or('-');
         let lines = vec![
             Line::from(vec![Span::styled(
                 " Scanning files",
                 Style::new().fg(Color::Cyan).bold(),
             )]),
             Line::from(""),
-            Line::from(format!(" state: {}  {spinner}", self.state)),
+            Line::from(format!(" state: {}", self.state)),
             Line::from(format!(" root:  {}", self.root)),
             Line::from(format!(
                 " hidden: {}   target overrides: {}",
@@ -1426,6 +1422,15 @@ impl App {
             )),
         ];
         let mut text = Text::from(lines);
+        // The meter is this screen's busy indicator, so it is drawn even before
+        // the first phase event arrives; with no event yet it bounces a segment
+        // off the frame clock instead of the phase's elapsed time.
+        let meter_clock = if self.progress_phase.is_empty() {
+            self.frame * 250
+        } else {
+            self.progress_elapsed_ms
+        };
+        text.lines.push(Line::from(""));
         if !self.progress_phase.is_empty() {
             let detail = self
                 .progress_detail
@@ -1436,20 +1441,15 @@ impl App {
                 Some(t) => format!("{}/{}", self.progress_scanned, t),
                 None => format!("{}", self.progress_scanned),
             };
-            text.lines.push(Line::from(""));
             text.lines.push(Line::from(format!(
                 " phase: {}{}   scanned: {}   elapsed: {} ms",
                 self.progress_phase, detail, scanned, self.progress_elapsed_ms
             )));
-            text.lines.push(Line::from(format!(
-                " {}",
-                progress_meter(
-                    self.progress_scanned,
-                    self.progress_total,
-                    self.progress_elapsed_ms
-                )
-            )));
         }
+        text.lines.push(Line::from(format!(
+            " {}",
+            progress_meter(self.progress_scanned, self.progress_total, meter_clock)
+        )));
         if let Some(label) = self.metadata_label() {
             text.lines.push(Line::from(format!(" {label}")));
         }
@@ -2128,12 +2128,13 @@ const METER_WIDTH: usize = 32;
 /// Cells of the sliding segment shown while a phase cannot know its total.
 const METER_SEGMENT: usize = 8;
 
-/// ASCII progress meter for the scanning screen: `##########------` with the
-/// percentage once the phase knows its total, and a segment sliding along the
-/// track while it does not (the discovery and symlinks walks, which only learn
-/// their length when they stop). The slide is derived from the phase's elapsed
-/// time, so it moves with the one-second progress heartbeat instead of needing
-/// its own timer.
+/// ASCII progress meter for the scanning screen: a track with the percentage
+/// once the phase knows its total, and a segment travelling back and forth
+/// along the track while it does not (the discovery and symlinks walks, which
+/// only learn their length when they stop). The position is derived from the
+/// phase's elapsed time, so it moves with the one-second progress heartbeat
+/// instead of needing its own timer, and it reverses at each end rather than
+/// wrapping, so it never implies a direction or a completion.
 fn progress_meter(scanned: u64, total: Option<u64>, elapsed_ms: u64) -> String {
     match total {
         Some(total) if total > 0 => {
@@ -2148,7 +2149,8 @@ fn progress_meter(scanned: u64, total: Option<u64>, elapsed_ms: u64) -> String {
         }
         _ => {
             let span = METER_WIDTH - METER_SEGMENT;
-            let pos = (elapsed_ms / 250) as usize % (span + 1);
+            let step = (elapsed_ms / 250) as usize % (2 * span);
+            let pos = if step <= span { step } else { 2 * span - step };
             let mut cells = vec!['-'; METER_WIDTH];
             for cell in cells.iter_mut().skip(pos).take(METER_SEGMENT) {
                 *cell = '#';
@@ -2214,17 +2216,28 @@ mod tests {
         assert!(start.starts_with("[#"), "{start}");
         // No percentage is claimed for a phase whose length is unknown.
         assert!(!start.contains('%'), "{start}");
-        // The segment advances with the phase's clock and wraps, so a long walk
-        // keeps moving even while its visited count stands still between
-        // reports.
+        // The segment moves with the phase's clock, so a long walk keeps moving
+        // even while its visited count stands still between reports.
         assert_ne!(at(0), at(250));
         assert_ne!(at(250), at(1000));
-        let positions = METER_WIDTH - METER_SEGMENT + 1;
-        assert_eq!(at(250 * positions as u64), at(0));
-        // It really reaches both ends of the track.
-        assert!(
-            at(250 * (positions as u64 - 1)).ends_with(&format!("{}]", "#".repeat(METER_SEGMENT)))
-        );
+        // It bounces: one traverse to the far end, then back, repeating, instead
+        // of jumping to the left edge like a sweep would.
+        let span = METER_WIDTH - METER_SEGMENT;
+        let far_end = format!("{}]", "#".repeat(METER_SEGMENT));
+        assert!(at(250 * span as u64).ends_with(&far_end));
+        assert_eq!(at(250 * (2 * span) as u64), at(0));
+        for step in 1..span {
+            assert_eq!(
+                at(250 * step as u64),
+                at(250 * (2 * span - step) as u64),
+                "step {step} should mirror on the way back"
+            );
+            assert_eq!(
+                at(250 * (2 * span + step) as u64),
+                at(250 * step as u64),
+                "the next traverse repeats the first"
+            );
+        }
         assert!(at(0)
             .split('#')
             .all(|s| s.chars().all(|c| c == '-' || c == '[' || c == ']')));

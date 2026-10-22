@@ -810,15 +810,18 @@ select optgroup {
 
 .scan-meter-bar.indeterminate .scan-meter-fill {
   width: 40%;
-  animation: scan-meter-slide 1.4s ease-in-out infinite;
+  animation: scan-meter-bounce 1.2s ease-in-out infinite alternate;
 }
 
-@keyframes scan-meter-slide {
+/* A fixed-width segment travels to the right end of the track and back, so an
+   indeterminate meter reads as "working" without ever implying a direction or
+   a completion. */
+@keyframes scan-meter-bounce {
   from {
-    transform: translateX(-100%);
+    transform: translateX(0);
   }
   to {
-    transform: translateX(250%);
+    transform: translateX(150%);
   }
 }
 
