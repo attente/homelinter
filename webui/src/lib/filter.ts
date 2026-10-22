@@ -11,7 +11,7 @@ export interface FilterOption<T extends string> {
 }
 
 export const TYPE_OPTIONS: ReadonlyArray<FilterOption<'all' | SuggestionType>> = [
-  { value: 'all', label: 'any type' },
+  { value: 'all', label: 'move or delete' },
   { value: 'move', label: 'move' },
   { value: 'delete', label: 'delete' },
 ];
@@ -27,8 +27,8 @@ export const STATUS_OPTIONS: ReadonlyArray<FilterOption<'all' | SuggestionStatus
 ];
 
 export const MANUAL_OPTIONS: ReadonlyArray<FilterOption<'all' | 'manual'>> = [
-  { value: 'all', label: 'any metadata' },
-  { value: 'manual', label: 'manual only' },
+  { value: 'all', label: 'auto or manual' },
+  { value: 'manual', label: 'manual' },
 ];
 
 export interface Filter {

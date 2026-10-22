@@ -659,7 +659,7 @@ export function Browse(props: BrowseProps) {
     // Keep an active kind selectable even if the batch summary omits it.
     const active = filter.kind !== 'all' && !kinds.includes(filter.kind) ? [filter.kind] : [];
     return [
-      { value: 'all', label: 'any kind' },
+      { value: 'all', label: 'any type' },
       ...[...active, ...kinds].map((k) => ({ value: k, label: k })),
     ];
   }, [kinds, filter.kind]);
