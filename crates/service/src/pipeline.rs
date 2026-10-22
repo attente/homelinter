@@ -4,9 +4,12 @@
 //! scan phases (the discovery walks and the analysis loop poll the cancel
 //! flag per entry/file) and between top-level suggestions (execute), exactly
 //! as "Session Model > Cancellation" describes. Scan progress is published
-//! at phase boundaries and, during analysis, at most once per second as
-//! completed work items, so a long extraction or hashing pass shows live
-//! movement in clients instead of a frozen phase line.
+//! at phase boundaries, at most once per second as completed work items
+//! during analysis, and at most once per second as visited entries during the
+//! discovery and symlink walks; a one-second heartbeat repeats the latest
+//! phase event for as long as the scan runs, so the elapsed clock in clients
+//! advances even through a phase that reports nothing (suggestion generation,
+//! validation, or one slow extraction batch).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -138,19 +141,91 @@ fn build_extractors(
     extractors
 }
 
-fn phase_progress(
-    phase: &'static str,
-    scanned: u64,
-    total: Option<u64>,
-    detail: Option<&'static str>,
+/// Publishes `scan.progress` for one scan: worker reports are throttled to
+/// one event per second so a fast pass cannot flood the SSE stream, and a
+/// heartbeat re-publishes the latest state every second so clients always see
+/// the elapsed clock advance, even while a phase is silent.
+struct ProgressReporter {
+    app: AppHandle,
     start: Instant,
-) -> ServerEvent {
-    ServerEvent::ScanProgress {
-        phase,
-        scanned,
-        total,
-        detail,
-        elapsed_ms: start.elapsed().as_millis() as u64,
+    /// Last publish instant; guarded by a mutex because the analysis and walk
+    /// passes report from worker threads.
+    last_publish: std::sync::Mutex<Instant>,
+    /// Most recent phase state, re-published by the heartbeat.
+    latest: std::sync::Mutex<PhaseEvent>,
+}
+
+impl ProgressReporter {
+    fn new(app: AppHandle, start: Instant) -> Arc<ProgressReporter> {
+        Arc::new(ProgressReporter {
+            app,
+            start,
+            last_publish: std::sync::Mutex::new(start),
+            latest: std::sync::Mutex::new(PhaseEvent {
+                phase: "discovery",
+                scanned: 0,
+                total: None,
+                detail: None,
+            }),
+        })
+    }
+
+    /// Record a worker-thread report and publish it if a second has passed
+    /// since the last publish.
+    fn report(&self, ev: PhaseEvent) {
+        *self.latest.lock().unwrap() = ev;
+        let now = Instant::now();
+        let mut last = self.last_publish.lock().unwrap();
+        if now.duration_since(*last) >= std::time::Duration::from_secs(1) {
+            *last = now;
+            drop(last);
+            self.publish(ev);
+        }
+    }
+
+    /// Publish a phase-boundary state unconditionally; it also becomes the
+    /// state the heartbeat repeats.
+    fn report_now(&self, ev: PhaseEvent) {
+        *self.latest.lock().unwrap() = ev;
+        *self.last_publish.lock().unwrap() = Instant::now();
+        self.publish(ev);
+    }
+
+    /// Publish the latest state with a fresh elapsed reading.
+    fn publish_latest(&self) {
+        let ev = *self.latest.lock().unwrap();
+        self.publish(ev);
+    }
+
+    fn publish(&self, ev: PhaseEvent) {
+        self.app.events.publish(ServerEvent::ScanProgress {
+            phase: ev.phase,
+            scanned: ev.scanned,
+            total: ev.total,
+            detail: ev.detail,
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Start the once-per-second heartbeat. Dropping the returned sender stops
+    /// it, which happens on every exit path of `start_scan`.
+    fn heartbeat(self: &Arc<ProgressReporter>) -> tokio::sync::oneshot::Sender<()> {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+        let reporter = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick completes immediately; skip it so the heartbeat
+            // never duplicates the event published at scan start.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = tick.tick() => reporter.publish_latest(),
+                }
+            }
+        });
+        stop
     }
 }
 
@@ -175,6 +250,11 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     // scan bumps the counter.
     let provider_epoch = app.provider_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     let start = Instant::now();
+    // Phase progress for this scan; the heartbeat keeps the elapsed clock
+    // advancing through phases that report nothing. Dropping `_heartbeat` when
+    // this function returns stops it on every path, including failures.
+    let reporter = ProgressReporter::new(app.clone(), start);
+    let _heartbeat = reporter.heartbeat();
 
     let (scan_opts, threshold) = (
         DiscoveryOptions {
@@ -186,8 +266,12 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         },
         cfg.duplication.large_file_threshold,
     );
-    app.events
-        .publish(phase_progress("discovery", 0, None, None, start));
+    reporter.report_now(PhaseEvent {
+        phase: "discovery",
+        scanned: 0,
+        total: None,
+        detail: None,
+    });
 
     // Phase 1 + symlink pass: discovery. Runs on the blocking pool. The
     // probe is polled inside the walks (per entry) so a cancel lands
@@ -197,8 +281,19 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         let app = app.clone();
         move || is_cancelled(&app, cancel_token)
     };
+    let scan_reporter = Arc::clone(&reporter);
+    let scan_progress = move |stage: homelinter_scan::ScanStage, visited: u64| {
+        // Visited entries, not managed files: the walks have no total until
+        // they finish, so the count is reported without one.
+        scan_reporter.report(PhaseEvent {
+            phase: stage.phase(),
+            scanned: visited,
+            total: None,
+            detail: None,
+        });
+    };
     let scan_result = tokio::task::spawn_blocking(move || {
-        homelinter_scan::scan_root(&root, &home2, &scan_opts, &cancelled)
+        homelinter_scan::scan_root(&root, &home2, &scan_opts, &cancelled, &scan_progress)
     })
     .await;
     let scan = match scan_result {
@@ -209,20 +304,18 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     if is_cancelled(&app, cancel_token) {
         return fail(app, "scan cancelled".into()).await;
     }
-    app.events.publish(phase_progress(
-        "discovery",
-        scan.primary_units,
-        Some(scan.primary_units),
-        None,
-        start,
-    ));
-    app.events.publish(phase_progress(
-        "symlinks",
-        scan.symlinks.entries.len() as u64,
-        Some(scan.symlinks.entries.len() as u64),
-        None,
-        start,
-    ));
+    reporter.report_now(PhaseEvent {
+        phase: "discovery",
+        scanned: scan.primary_units,
+        total: Some(scan.primary_units),
+        detail: None,
+    });
+    reporter.report_now(PhaseEvent {
+        phase: "symlinks",
+        scanned: scan.symlinks.entries.len() as u64,
+        total: Some(scan.symlinks.entries.len() as u64),
+        detail: None,
+    });
 
     // Phase 2: analysis.
     let files = scan.files.clone();
@@ -250,22 +343,8 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         // extraction/hashing pass shows movement in clients instead of the
         // frozen phase line left by the last phase-boundary event.
         let progress = {
-            let app = app.clone();
-            // The analysis passes report from worker threads, so the
-            // throttle state is a mutex; a lock is held only long enough to
-            // read and update the last-publish instant.
-            let last = std::sync::Mutex::new(start);
-            move |ev: PhaseEvent| {
-                let now = Instant::now();
-                let mut last = last.lock().unwrap();
-                if now.duration_since(*last) >= std::time::Duration::from_secs(1) {
-                    *last = now;
-                    drop(last);
-                    app.events.publish(phase_progress(
-                        ev.phase, ev.scanned, ev.total, ev.detail, start,
-                    ));
-                }
-            }
+            let reporter = Arc::clone(&reporter);
+            move |ev: PhaseEvent| reporter.report(ev)
         };
         tokio::task::spawn_blocking(move || {
             analyze(&files, &repos, &analyze_opts, &cancelled, &progress)
@@ -279,13 +358,12 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     if is_cancelled(&app, cancel_token) {
         return fail(app, "scan cancelled".into()).await;
     }
-    app.events.publish(phase_progress(
-        "metadata",
-        analysis.files.len() as u64,
-        Some(analysis.files.len() as u64),
-        None,
-        start,
-    ));
+    reporter.report_now(PhaseEvent {
+        phase: "metadata",
+        scanned: analysis.files.len() as u64,
+        total: Some(analysis.files.len() as u64),
+        detail: None,
+    });
 
     // Manual metadata edits persisted by the user are keyed by content
     // identity and applied before suggestion generation, so an override wins
@@ -388,13 +466,12 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     if is_cancelled(&app, cancel_token) {
         return fail(app, "scan cancelled".into()).await;
     }
-    app.events.publish(phase_progress(
-        "suggestions",
-        suggestions.len() as u64,
-        Some(suggestions.len() as u64),
-        None,
-        start,
-    ));
+    reporter.report_now(PhaseEvent {
+        phase: "suggestions",
+        scanned: suggestions.len() as u64,
+        total: Some(suggestions.len() as u64),
+        detail: None,
+    });
 
     {
         let mut sess = app.session.lock().await;

@@ -34,6 +34,11 @@ impl VcsKind {
     }
 }
 
+/// How many visited entries pass between two `progress` reports from the
+/// walks. Reporting every entry would put a callback on the walk's hot path;
+/// the caller publishes at most once per second anyway.
+pub(crate) const PROGRESS_REPORT_EVERY: u64 = 256;
+
 /// A regular file discovered by the primary scan. Empty files are ignored
 /// entirely and never appear here.
 #[derive(Debug, Clone)]
@@ -230,9 +235,14 @@ fn is_vcs_marker_name(n: &std::ffi::OsStr) -> bool {
 /// cooperative-cancellation probe polled while walking: once it returns
 /// true the walk stops early and returns the partially-collected output,
 /// so a scan cancelled mid-discovery does not need to finish the tree.
+/// `progress` receives the running count of entries visited (files,
+/// directories, and skipped entries alike) so clients see the walk advance
+/// before the phase has a total; it is called from the walking thread and
+/// must be cheap.
 pub fn discover(
     opts: &DiscoveryOptions,
     cancel: &dyn Fn() -> bool,
+    progress: &(dyn Fn(u64) + Sync),
 ) -> Result<ScanOutput, DiscoveryError> {
     let root = opts.root.clone();
     if !root.is_dir() {
@@ -243,7 +253,17 @@ pub fn discover(
     }
     let excludes = ExcludeSet::compile(&opts.exclude_patterns, &opts.exclude_extensions)?;
     let mut out = ScanOutput::default();
-    walk_dir(&root, &root, opts, &excludes, cancel, &mut out)?;
+    let mut visited = 0u64;
+    walk_dir(
+        &root,
+        &root,
+        opts,
+        &excludes,
+        cancel,
+        &mut out,
+        &mut visited,
+        progress,
+    )?;
     // Deterministic order: repository roots before files keeps reporting
     // stable; each list is sorted by normalized absolute path.
     out.files.sort_by_key(|a| path::sort_key(&a.path));
@@ -252,6 +272,7 @@ pub fn discover(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_dir(
     root: &Path,
     dir: &Path,
@@ -259,6 +280,8 @@ fn walk_dir(
     excludes: &ExcludeSet,
     cancel: &dyn Fn() -> bool,
     out: &mut ScanOutput,
+    visited: &mut u64,
+    progress: &(dyn Fn(u64) + Sync),
 ) -> Result<(), DiscoveryError> {
     let entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.flatten().collect(),
@@ -297,6 +320,13 @@ fn walk_dir(
         if cancel() {
             return Ok(());
         }
+        // Report the walk's running count a few times per directory entry
+        // batch rather than once per entry: the caller throttles publishing,
+        // so an atomic-free cheap check keeps the walk's hot path clear.
+        *visited += 1;
+        if *visited % PROGRESS_REPORT_EVERY == 0 {
+            progress(*visited);
+        }
         let name = e.file_name();
         let name_str = name.to_string_lossy();
         if !opts.hidden && is_hidden_name(&name_str, opts.hidden_definition) {
@@ -326,7 +356,7 @@ fn walk_dir(
             if dir == root && root_repo.is_some() && is_vcs_marker_name(&name) {
                 continue;
             }
-            walk_dir(root, &abs, opts, excludes, cancel, out)?;
+            walk_dir(root, &abs, opts, excludes, cancel, out, visited, progress)?;
             out.dirs.push(abs);
         } else if meta.is_file() {
             if excludes.excludes_file(&rel, &name_str) {
@@ -384,7 +414,7 @@ mod tests {
             exclude_patterns: Vec::new(),
             exclude_extensions: Vec::new(),
         };
-        let out = discover(&opts, &|| false).unwrap();
+        let out = discover(&opts, &|| false, &|_| {}).unwrap();
         assert_eq!(out.files.len(), 2);
         assert_eq!(out.files_scanned, 2);
         let names: Vec<String> = out
@@ -399,9 +429,38 @@ mod tests {
             hidden: true,
             ..opts
         };
-        let out2 = discover(&opts_hidden, &|| false).unwrap();
+        let out2 = discover(&opts_hidden, &|| false, &|_| {}).unwrap();
         assert_eq!(out2.files.len(), 4);
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn progress_reports_visited_entries_monotonically() {
+        let root = tmpdir("progress");
+        std::fs::create_dir_all(root.join("bulk")).unwrap();
+        // Enough entries that the walk crosses its report interval at least
+        // twice; the exact counts depend on the filesystem's directory order.
+        for i in 0..700 {
+            std::fs::write(root.join("bulk").join(format!("f{i:04}.txt")), "x").unwrap();
+        }
+        let opts = DiscoveryOptions {
+            root: root.clone(),
+            hidden: false,
+            hidden_definition: HiddenDefinition::Explorer,
+            exclude_patterns: Vec::new(),
+            exclude_extensions: Vec::new(),
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let out = discover(&opts, &|| false, &|n| seen.lock().unwrap().push(n)).unwrap();
+        let seen = seen.into_inner().unwrap();
+        assert!(!seen.is_empty(), "walk reported no progress");
+        assert!(
+            seen.windows(2).all(|w| w[0] < w[1]),
+            "counts went backwards"
+        );
+        assert_eq!(*seen.last().unwrap(), 512);
+        assert!(out.files_scanned >= 700);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -422,7 +481,7 @@ mod tests {
             exclude_patterns: vec!["build/**".into(), "*.hs".into()],
             exclude_extensions: Vec::new(),
         };
-        let out = discover(&opts, &|| false).unwrap();
+        let out = discover(&opts, &|| false, &|_| {}).unwrap();
         let names: Vec<String> = out
             .files
             .iter()
@@ -452,7 +511,7 @@ mod tests {
             exclude_patterns: Vec::new(),
             exclude_extensions: vec![" .PNG ".into(), "png".into()],
         };
-        let out = discover(&opts, &|| false).unwrap();
+        let out = discover(&opts, &|| false, &|_| {}).unwrap();
         let mut names: Vec<String> = out
             .files
             .iter()
@@ -479,7 +538,7 @@ mod tests {
             exclude_patterns: Vec::new(),
             exclude_extensions: Vec::new(),
         };
-        let out = discover(&opts, &|| false).unwrap();
+        let out = discover(&opts, &|| false, &|_| {}).unwrap();
         assert_eq!(out.files.len(), 1); // outside.txt only
         assert_eq!(out.repos.len(), 1);
         assert_eq!(out.repos[0].vcs, VcsKind::Git);
@@ -503,11 +562,11 @@ mod tests {
             exclude_extensions: Vec::new(),
         };
         // A probe that fires immediately leaves the walk empty but succeeds.
-        let out = discover(&opts, &|| true).unwrap();
+        let out = discover(&opts, &|| true, &|_| {}).unwrap();
         assert_eq!(out.files.len(), 0);
         assert_eq!(out.repos.len(), 0);
         // A probe that never fires collects everything.
-        let out2 = discover(&opts, &|| false).unwrap();
+        let out2 = discover(&opts, &|| false, &|_| {}).unwrap();
         assert_eq!(out2.files.len(), 3);
 
         std::fs::remove_dir_all(root).ok();
@@ -532,7 +591,7 @@ mod tests {
                 exclude_patterns: Vec::new(),
                 exclude_extensions: Vec::new(),
             };
-            let out = discover(&opts, &|| false).unwrap();
+            let out = discover(&opts, &|| false, &|_| {}).unwrap();
             // real.txt + sub/inner.txt; empty.txt and symlinks are ignored.
             assert_eq!(out.files.len(), 2);
             assert!(!out.files.iter().any(|f| f.path.ends_with("empty.txt")));

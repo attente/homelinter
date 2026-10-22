@@ -1,9 +1,8 @@
 import { stateLabel } from '../lib/format';
-import type { EntryResult, ExecutionReport, ReportEntry, ScanProgress } from '../types';
+import type { EntryResult, ExecutionReport, ReportEntry } from '../types';
 
 interface RunViewProps {
   state: string;
-  progress: ScanProgress | null;
   log: string[];
   report: ExecutionReport | null;
   error: string | null;
@@ -15,18 +14,13 @@ interface RunViewProps {
 const TOTAL_RESULTS: EntryResult[] = ['executed', 'partial', 'failed', 'skipped'];
 
 export function RunView(props: RunViewProps) {
-  const { state, progress, log, report, error, cancelDisabled, onCancel, onDone } = props;
+  const { state, log, report, error, cancelDisabled, onCancel, onDone } = props;
   const spinner = '|/-\\'[Math.floor(Date.now() / 120) % 4];
 
   return (
     <main className="run-view">
       <div className="run-status">
         <span className="state-busy">{stateLabel(state)} {spinner}</span>
-        {progress && (
-          <span className="progress-line">
-            {progress.phase}, scanned={progress.scanned}, elapsed={progress.elapsed_ms}ms
-          </span>
-        )}
         <div className="toolbar">
           <button
             type="button"

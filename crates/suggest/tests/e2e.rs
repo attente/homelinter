@@ -74,7 +74,14 @@ fn duplicate_kept_moved_others_deleted() {
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
     filetime::set_file_mtime(&a, filetime::FileTime::from_system_time(old)).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     assert_eq!(scan.files.len(), 2);
     let analysis = analyze(
         &scan.files,
@@ -137,7 +144,14 @@ fn metadata_preservation_warning_is_surfaced() {
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
     filetime::set_file_mtime(&keeper, filetime::FileTime::from_system_time(old)).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     let opts = AnalyzeOptions {
         extractors: vec![Box::new(TitleFor(newer.clone()))],
         ..AnalyzeOptions::default()
@@ -178,7 +192,14 @@ fn symlink_repair_attached_on_move() {
     let link = home.join("link-to-photo.jpg");
     symlink(&f, &link).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     let analysis = analyze(
         &scan.files,
         &scan.repos,
@@ -229,7 +250,14 @@ fn delete_repairs_links_pointing_at_duplicate() {
     let link = home.join("preview.jpg");
     symlink(&dup, &link).unwrap();
 
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     let analysis = analyze(
         &scan.files,
         &scan.repos,
@@ -266,7 +294,14 @@ fn validation_marks_identity_degraded() {
     let downloads = root.join("Downloads");
     std::fs::create_dir_all(&downloads).unwrap();
     std::fs::write(downloads.join("doc.txt"), b"hello").unwrap();
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     let mut analysis = analyze(
         &scan.files,
         &scan.repos,
@@ -299,7 +334,14 @@ fn noop_move_not_generated() {
     std::fs::create_dir_all(&downloads).unwrap();
     let f = downloads.join("keep.txt");
     std::fs::write(&f, b"hello").unwrap();
-    let scan = scan_root(&root, &home, &discovery(&root, false), &|| false).unwrap();
+    let scan = scan_root(
+        &root,
+        &home,
+        &discovery(&root, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
     let analysis = analyze(
         &scan.files,
         &scan.repos,

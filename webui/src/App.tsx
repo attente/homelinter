@@ -349,10 +349,15 @@ export default function App() {
           break;
         }
         case "scan.progress":
+          // A scan in flight is never hidden behind the scan setup form: a
+          // window opened or reloaded mid-scan (or a scan started by another
+          // client) moves to the progress view, which carries the live phase
+          // line and the cancel button.
           setSt((prev) => ({
             ...prev,
             progress: d as unknown as ScanProgress,
             phase: prev.phase === "idle" ? "scanning" : prev.phase,
+            showScanForm: false,
           }));
           break;
         case "scan.complete":
@@ -483,7 +488,7 @@ export default function App() {
       setSt((prev) => ({ ...prev, metadataProgress: session.metadata_progress ?? null }));
     }
     const state = session.state;
-    if (state === "scanning" && cur.phase !== "scanning") {
+    if (state === "scanning" && (cur.phase !== "scanning" || cur.showScanForm)) {
       setSt((prev) => ({ ...prev, phase: "scanning", showScanForm: false }));
     } else if (
       (state === "ready" || state === "done") &&
@@ -916,7 +921,6 @@ export default function App() {
     body = (
       <RunView
         state={state}
-        progress={null}
         log={st.runLog}
         report={st.report}
         error={st.runError}

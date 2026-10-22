@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::discovery::PROGRESS_REPORT_EVERY;
+
 /// One indexed symlink. `raw_target` preserves the link's written form so
 /// repair can preserve relative vs absolute semantics.
 #[derive(Debug, Clone)]
@@ -37,12 +39,19 @@ impl SymlinkIndex {
     /// a cooperative-cancellation probe polled while walking: when it
     /// returns true the walk stops early and returns the partial index, so
     /// a cancelled scan does not need to finish the home-wide pass.
-    pub fn scan(home: &Path, cancel: &dyn Fn() -> bool) -> SymlinkIndex {
+    /// `progress` receives the running count of entries visited, so clients
+    /// see the pass advance while it has no total.
+    pub fn scan(
+        home: &Path,
+        cancel: &dyn Fn() -> bool,
+        progress: &(dyn Fn(u64) + Sync),
+    ) -> SymlinkIndex {
         let mut index = SymlinkIndex {
             home: Some(home.to_path_buf()),
             entries: Vec::new(),
         };
-        walk(home, cancel, &mut index.entries);
+        let mut visited = 0u64;
+        walk(home, cancel, &mut index.entries, &mut visited, progress);
         index.entries.sort_by(|a, b| {
             a.link_path
                 .to_string_lossy()
@@ -52,7 +61,13 @@ impl SymlinkIndex {
     }
 }
 
-fn walk(dir: &Path, cancel: &dyn Fn() -> bool, out: &mut Vec<SymlinkEntry>) {
+fn walk(
+    dir: &Path,
+    cancel: &dyn Fn() -> bool,
+    out: &mut Vec<SymlinkEntry>,
+    visited: &mut u64,
+    progress: &(dyn Fn(u64) + Sync),
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -61,6 +76,10 @@ fn walk(dir: &Path, cancel: &dyn Fn() -> bool, out: &mut Vec<SymlinkEntry>) {
         // Cooperative cancellation: polled per entry.
         if cancel() {
             return;
+        }
+        *visited += 1;
+        if *visited % PROGRESS_REPORT_EVERY == 0 {
+            progress(*visited);
         }
         let path = entry.path();
         let ft = match entry.file_type() {
@@ -80,7 +99,7 @@ fn walk(dir: &Path, cancel: &dyn Fn() -> bool, out: &mut Vec<SymlinkEntry>) {
             homelinter_model::identity::LinkKind::NotLink => {}
         }
         if ft.is_dir() {
-            walk(&path, cancel, out);
+            walk(&path, cancel, out, visited, progress);
         }
     }
 }
