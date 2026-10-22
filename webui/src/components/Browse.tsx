@@ -37,8 +37,8 @@ interface BrowseProps {
   onFilterChange: (filter: Filter) => void;
   onLoadMore: () => void;
   onToggle: (id: string, select: boolean) => void;
-  onSelectAll: (filter: Filter) => void;
-  onClearSelection: () => void;
+  onSelectVisible: (filter: Filter) => void;
+  onClearVisible: (filter: Filter) => void;
   onRun: () => void;
   onExport: () => void;
   onRefreshMetadata: (id: string, clearOverrides?: boolean) => void;
@@ -630,7 +630,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectAll, onClearSelection, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
+  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectVisible, onClearVisible, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
   const panesRef = useRef<HTMLDivElement | null>(null);
@@ -821,11 +821,11 @@ export function Browse(props: BrowseProps) {
           </button>
         </div>
         <div className="toolbar">
-          <button type="button" onClick={() => onSelectAll(filter)}>
-            select all
+          <button type="button" onClick={() => onSelectVisible(filter)}>
+            select visible
           </button>
-          <button type="button" onClick={() => onClearSelection()}>
-            select none
+          <button type="button" onClick={() => onClearVisible(filter)}>
+            clear visible
           </button>
           <span className="sep" />
           <span className="list-count">

@@ -565,7 +565,9 @@ export default function App() {
     [pushToast, refreshSession, resetSuggestions],
   );
 
-  const selectAll = useCallback(
+  /** Select everything matching the active filter (the visible set), via
+   *  the service's filter-based add; the optimistic update mirrors it. */
+  const selectVisible = useCallback(
     (filter: Filter) => {
       setSt((prev) => ({
         ...prev,
@@ -588,23 +590,31 @@ export default function App() {
     [pushToast, refreshSession, resetSuggestions],
   );
 
-  const clearSelection = useCallback(() => {
-    setSt((prev) => ({
-      ...prev,
-      suggestions: prev.suggestions.map((s) =>
-        s.selected ? { ...s, selected: false } : s,
-      ),
-    }));
-    void (async () => {
-      try {
-        await api.selectionPut([]);
-      } catch (e: unknown) {
-        pushToast(`selection update failed: ${resolveApiError(e)}`);
-        await resetSuggestions(stRef.current.filter);
-      }
-      void refreshSession();
-    })();
-  }, [pushToast, refreshSession, resetSuggestions]);
+  /** Deselect everything matching the active filter (the visible set),
+   *  leaving selections outside the filtered view untouched; with no filter
+   *  active this clears the whole selection. */
+  const clearVisible = useCallback(
+    (filter: Filter) => {
+      setSt((prev) => ({
+        ...prev,
+        suggestions: prev.suggestions.map((s) =>
+          s.selected && matchesFilter(s, filter)
+            ? { ...s, selected: false }
+            : s,
+        ),
+      }));
+      void (async () => {
+        try {
+          await api.selectionRemoveFilter(toApiFilter(filter));
+        } catch (e: unknown) {
+          pushToast(`selection update failed: ${resolveApiError(e)}`);
+          await resetSuggestions(stRef.current.filter);
+        }
+        void refreshSession();
+      })();
+    },
+    [pushToast, refreshSession, resetSuggestions],
+  );
 
   const startRun = useCallback(
     async (ids: string[]) => {
@@ -932,8 +942,8 @@ export default function App() {
           onFilterChange={applyFilter}
           onLoadMore={() => void loadMore()}
           onToggle={toggle}
-          onSelectAll={selectAll}
-          onClearSelection={clearSelection}
+          onSelectVisible={selectVisible}
+          onClearVisible={clearVisible}
           onRun={() => void run()}
           onExport={() => void exportPlan()}
           onRefreshMetadata={(id, clearOverrides) =>

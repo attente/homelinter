@@ -191,6 +191,16 @@ export const api = {
     });
   },
 
+  /** Remove every suggestion matching `filter` from the selection, without
+   *  shipping the ids (see DESIGN.md "Service API > Suggestions &
+   *  Selection"). */
+  async selectionRemoveFilter(filter: SelectionFilter): Promise<void> {
+    await request<void>("/selection/remove", {
+      method: "POST",
+      body: JSON.stringify({ filter }),
+    });
+  },
+
   async selectionRemove(ids: string[]): Promise<void> {
     await request<void>("/selection/remove", {
       method: "POST",
