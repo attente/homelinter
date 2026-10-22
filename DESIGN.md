@@ -621,7 +621,7 @@ The shell is built explicitly on macOS with the Tauri CLI.
 ### Linux
 
 The Linux deliverable is a single x86_64 AppImage named `homelinter-<version>-x86_64.AppImage`, assembled by `packaging/appimage/build.sh` and published by `.github/workflows/linux-release.yml` on `v*` tags.
-The workflow builds the SPA with pnpm, builds `homelinter-app` with Rust 1.85.0, lays out an AppDir (launcher, `usr/share/homelinter/webui`, desktop entry, 512x512 icon, and AppStream metadata), and runs `appimagetool` 1.9.1 (checksum-pinned) with `APPIMAGE_EXTRACT_AND_RUN=1`, so the runner needs no FUSE.
+The script builds `homelinter-app` itself (unless `BIN` names an explicit binary) before laying out the AppDir, because packaging a `target/release` binary left over from an earlier build silently ships an old service with the current SPA. The workflow builds the SPA with pnpm, builds `homelinter-app` with Rust 1.85.0, lays out an AppDir (launcher, `usr/share/homelinter/webui`, desktop entry, 512x512 icon, and AppStream metadata), and runs `appimagetool` 1.9.1 (checksum-pinned) with `APPIMAGE_EXTRACT_AND_RUN=1`, so the runner needs no FUSE.
 Builds run on `ubuntu-22.04`, giving a glibc floor of 2.35 (Ubuntu 22.04+, Debian 12+, Fedora 36+).
 A smoke test runs the finished AppImage with `HOMELINTER_BROWSER=true`, exercising the bundled SPA lookup, the in-process service, the health check, and the shutdown path without a display.
 The workflow publishes `INSTALL-Linux.txt` with the browser requirement, the FUSE fallback, and the NixOS instructions (`programs.appimage.enable` with `binfmt`, or `appimage-run`), and `docs/linux-release.md` carries the full guide.

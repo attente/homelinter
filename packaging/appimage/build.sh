@@ -28,6 +28,12 @@ if [ -z "$version" ]; then
   echo "cannot read the workspace version from $root/Cargo.toml" >&2
   exit 1
 fi
+# Build the launcher unless an explicit binary was handed in, so a bundle can
+# never carry a stale `target/release/homelinter-app` left over from an earlier
+# build (that silently shipped an old service in an otherwise fresh bundle).
+if [ -z "${BIN:-}" ]; then
+  ( cd "$root" && cargo build --release -p homelinter-app )
+fi
 if [ ! -x "$bin" ]; then
   echo "missing release binary: $bin" >&2
   echo "build it first: cargo build --release -p homelinter-app" >&2
