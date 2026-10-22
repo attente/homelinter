@@ -204,7 +204,11 @@ impl MetadataExtractor for ExifToolExtractor {
 /// The fixed, small exiftool tag list. `-n` requests raw numeric values,
 /// `-json` requests a structured array keyed by the input path, and `-m`
 /// ignores minor per-file errors so a single odd container does not make the
-/// whole batch exit non-zero.
+/// whole batch exit non-zero. The catalog tags (XMP `Description`/`Creator`,
+/// IPTC `Caption-Abstract`/`By-line`) and the timezone-aware QuickTime
+/// `CreationDate` are fallbacks consulted only when the tags they shadow are
+/// absent or unparseable, so they widen coverage without displacing any value
+/// the primary chain already produced.
 fn tag_args() -> Vec<&'static str> {
     vec![
         "-n",
@@ -215,6 +219,7 @@ fn tag_args() -> Vec<&'static str> {
         "-CreateDate",
         "-TrackCreateDate",
         "-MediaCreateDate",
+        "-CreationDate",
         "-OffsetTimeOriginal",
         "-OffsetTimeDigitized",
         "-OffsetTime",
@@ -225,9 +230,13 @@ fn tag_args() -> Vec<&'static str> {
         "-Model",
         "-Make",
         "-Artist",
+        "-Creator",
+        "-By-line",
         "-Title",
         "-XPTitle",
         "-ImageDescription",
+        "-Description",
+        "-Caption-Abstract",
         "-Bitrate",
         "-Duration",
     ]
@@ -297,6 +306,27 @@ fn row_is_clean(row: &serde_json::Map<String, Value>) -> bool {
     !row.contains_key("Error")
 }
 
+/// The trailing UTC offset of a timezone-aware tag value such as the QuickTime
+/// `CreationDate` ("2024:03:15 14:30:00+02:00"), returned verbatim as
+/// `+02:00` or `-05:00`. A value with no offset, a malformed offset, or one
+/// outside the plausible range yields `None`.
+fn trailing_utc_offset(value: &str) -> Option<String> {
+    // Slicing by byte offset can land inside a multi-byte character when a
+    // value is unexpectedly exotic; `get` refuses instead of panicking.
+    let start = value.len().checked_sub(6)?;
+    let off = value.get(start..)?;
+    let b = off.as_bytes();
+    if b[0] != b'+' && b[0] != b'-' {
+        return None;
+    }
+    if b[3] != b':' || ![b[1], b[2], b[4], b[5]].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let hours = (b[1] - b'0') * 10 + (b[2] - b'0');
+    let minutes = (b[4] - b'0') * 10 + (b[5] - b'0');
+    (hours < 24 && minutes < 60).then(|| off.to_string())
+}
+
 /// Parse one exiftool JSON row into the fields homelinter consumes.
 fn parse_row(row: &serde_json::Map<String, Value>) -> EmbeddedMeta {
     let mut meta = EmbeddedMeta::default();
@@ -308,7 +338,11 @@ fn parse_row(row: &serde_json::Map<String, Value>) -> EmbeddedMeta {
                 .and_then(|raw| raw.trim().parse::<f64>().ok())
         })
     };
-    let date = s("DateTimeOriginal")
+    let parseable = |raw: &Option<String>| {
+        raw.as_deref()
+            .is_some_and(|raw| parse_exif_datetime(raw).is_some())
+    };
+    let primary = s("DateTimeOriginal")
         .or_else(|| s("CreateDate"))
         .or_else(|| s("TrackCreateDate"))
         .or_else(|| s("MediaCreateDate"))
@@ -318,17 +352,52 @@ fn parse_row(row: &serde_json::Map<String, Value>) -> EmbeddedMeta {
         // only IFD0 carries. The unqualified `-DateTime` is deliberately not
         // requested: exiftool resolves it to the file's modification time.
         .or_else(|| s("ModifyDate"));
+    let creation = s("CreationDate");
+    // The timezone-aware QuickTime/`Keys` `CreationDate` is a final fallback
+    // consulted only when every primary tag is absent or unparseable (a
+    // zeroed container such as a stripped WhatsApp download, for example). It
+    // never displaces a date the primary chain already produced, so existing
+    // values cannot change; a file can only gain a date it lacked.
+    let from_creation = !parseable(&primary) && parseable(&creation);
+    let date = if from_creation {
+        creation.clone()
+    } else {
+        primary.clone()
+    };
     meta.date_taken = date.as_deref().and_then(parse_exif_datetime);
     meta.date_offset = s("OffsetTimeOriginal")
         .or_else(|| s("OffsetTimeDigitized"))
         .or_else(|| s("OffsetTime"))
         .map(|o| o.trim().to_string())
-        .filter(|o| !o.is_empty());
+        .filter(|o| !o.is_empty())
+        .or_else(|| {
+            // A `CreationDate` fallback carries the capture offset inside
+            // the value itself ("2024:03:15 14:30:00+02:00"). Keep it for
+            // inspection and ordering like the EXIF offset tags; it never
+            // rewrites the rendered filename. Taken only when the date
+            // actually came from `CreationDate`, so the offset always
+            // describes the date it accompanies.
+            if from_creation {
+                creation.as_deref().and_then(trailing_utc_offset)
+            } else {
+                None
+            }
+        });
     meta.title = s("XPTitle")
         .or_else(|| s("Title"))
         .or_else(|| s("ImageDescription"))
+        // Cataloging fallbacks: XMP `dc:description` (Lightroom and friends)
+        // and the IPTC caption. Consulted only when every photo-EXIF
+        // title/description tag is absent or blank, so they widen coverage
+        // without displacing an existing title.
+        .or_else(|| s("Description"))
+        .or_else(|| s("Caption-Abstract"))
         .filter(|t| !t.trim().is_empty());
-    meta.author = s("Artist");
+    meta.author = s("Artist")
+        // XMP `dc:creator` and the IPTC by-line: where photo cataloging
+        // tools record the author when no EXIF `Artist` tag exists.
+        .or_else(|| s("Creator"))
+        .or_else(|| s("By-line"));
     meta.camera = s("Model").or_else(|| s("Make"));
     meta.bitrate_kbps = f("Bitrate").map(|b| (b / 1000.0).round() as u32);
     meta.duration_secs = f("Duration").map(|d| d.max(0.0) as u64);
@@ -374,6 +443,180 @@ mod tests {
         // the file's modification time, so it must not appear.
         assert!(tag_args().contains(&"-ModifyDate"));
         assert!(!tag_args().contains(&"-DateTime"));
+    }
+
+    #[test]
+    fn the_tag_list_requests_catalog_and_creation_date_fallbacks() {
+        // The additive catalog tags (XMP/IPTC) and the timezone-aware
+        // QuickTime `CreationDate`: they widen coverage without displacing
+        // values the primary chain already produced.
+        for arg in [
+            "-Description",
+            "-Caption-Abstract",
+            "-Creator",
+            "-By-line",
+            "-CreationDate",
+        ] {
+            assert!(tag_args().contains(&arg), "missing {arg}");
+        }
+    }
+
+    #[test]
+    fn catalog_tags_only_fill_a_missing_title_or_author() {
+        // Every photo-EXIF tag outranks the catalog fallbacks; the XMP and
+        // IPTC values are consulted only when those are absent or blank.
+        let full: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "ImageDescription": "Exif description",
+                "Description": "Xmp description",
+                "Caption-Abstract": "Iptc caption",
+                "Artist": "Exif Artist",
+                "Creator": "Xmp Creator",
+                "By-line": "Iptc Byline"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&full);
+        assert_eq!(meta.title.as_deref(), Some("Exif description"));
+        assert_eq!(meta.author.as_deref(), Some("Exif Artist"));
+
+        // XMP `dc:description` and `dc:creator` outrank their IPTC twins.
+        let xmp: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "Description": "Xmp description",
+                "Caption-Abstract": "Iptc caption",
+                "Creator": "Xmp Creator",
+                "By-line": "Iptc Byline"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&xmp);
+        assert_eq!(meta.title.as_deref(), Some("Xmp description"));
+        assert_eq!(meta.author.as_deref(), Some("Xmp Creator"));
+
+        // IPTC only: the case cataloging software produces for photos
+        // stripped of EXIF.
+        let iptc: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "Caption-Abstract": "Iptc caption",
+                "By-line": "Iptc Byline"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&iptc);
+        assert_eq!(meta.title.as_deref(), Some("Iptc caption"));
+        assert_eq!(meta.author.as_deref(), Some("Iptc Byline"));
+    }
+
+    #[test]
+    fn creation_date_is_a_final_date_fallback() {
+        // A container whose primary tags are zeroed (a stripped WhatsApp
+        // download) gains a date from `CreationDate`.
+        let zeroed: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreateDate": "0000:00:00 00:00:00",
+                "CreationDate": "2024:03:15 14:30:00+02:00"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&zeroed);
+        assert_eq!(
+            meta.date_taken.map(|d| (d.year, d.month, d.day, d.hour)),
+            Some((2024, 3, 15, 14))
+        );
+
+        // A valid primary date is never displaced, even when `CreationDate`
+        // carries a timezone.
+        let both: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreateDate": "2023:11:05 19:11:38",
+                "CreationDate": "2024:03:15 14:30:00+02:00"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&both);
+        assert_eq!(
+            meta.date_taken.map(|d| d.year),
+            Some(2023),
+            "CreationDate must not displace a valid primary date"
+        );
+    }
+
+    #[test]
+    fn creation_date_offset_follows_the_date_it_supplies() {
+        // When `CreationDate` supplies the date, its embedded offset becomes
+        // `date_offset`, verbatim.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreationDate": "2024:03:15 14:30:00+02:00"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&row);
+        assert_eq!(meta.date_taken.map(|d| d.year), Some(2024));
+        assert_eq!(meta.date_offset.as_deref(), Some("+02:00"));
+
+        // Negative offsets are kept verbatim too.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreateDate": "0000:00:00 00:00:00",
+                "CreationDate": "2024:03:15 09:30:00-05:00"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parse_row(&row).date_offset.as_deref(), Some("-05:00"));
+
+        // An explicit offset tag outranks the embedded one.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreationDate": "2024:03:15 14:30:00+02:00",
+                "OffsetTimeOriginal": "+09:00"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parse_row(&row).date_offset.as_deref(), Some("+09:00"));
+
+        // When a primary tag supplies the date, the `CreationDate` offset is
+        // not paired with it: the offset would describe a different value.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreateDate": "2023:11:05 19:11:38",
+                "CreationDate": "2024:03:15 14:30:00+02:00"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parse_row(&row).date_offset, None);
+
+        // A `CreationDate` without an offset leaves `date_offset` empty.
+        let row: serde_json::Map<String, Value> = serde_json::from_str(
+            r#"{
+                "CreationDate": "2024:03:15 14:30:00"
+            }"#,
+        )
+        .unwrap();
+        let meta = parse_row(&row);
+        assert_eq!(meta.date_taken.map(|d| d.year), Some(2024));
+        assert_eq!(meta.date_offset, None);
+    }
+
+    #[test]
+    fn trailing_offset_accepts_only_wellformed_values() {
+        assert_eq!(
+            trailing_utc_offset("2024:03:15 14:30:00+02:00").as_deref(),
+            Some("+02:00")
+        );
+        assert_eq!(
+            trailing_utc_offset("14:30:00-05:00").as_deref(),
+            Some("-05:00")
+        );
+        // No offset, a malformed one, an out-of-range one, and a value whose
+        // tail is not even ASCII.
+        assert_eq!(trailing_utc_offset("2024:03:15 14:30:00"), None);
+        assert_eq!(trailing_utc_offset("2024:03:15 14:30:00+2a:00"), None);
+        assert_eq!(trailing_utc_offset("2024:03:15 14:30:00+26:00"), None);
+        assert_eq!(trailing_utc_offset("2024:03:15 14:30:00+02:99"), None);
+        assert_eq!(trailing_utc_offset("14:30:\u{e9}02:00"), None);
+        assert_eq!(trailing_utc_offset("short"), None);
     }
 
     #[test]

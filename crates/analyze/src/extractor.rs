@@ -37,17 +37,23 @@ pub struct ExtractionContext {
 /// `Some` across extractors per field.
 #[derive(Debug, Clone, Default)]
 pub struct EmbeddedMeta {
-    /// Date taken (photos: `DateTimeOriginal`, fallback `DateTime`).
+    /// Date taken (photos: `DateTimeOriginal`, fallback `DateTime`). exiftool
+    /// additionally falls back to the timezone-aware QuickTime
+    /// `CreationDate` when every primary date tag is absent or unparseable.
     pub date_taken: Option<DateParts>,
     /// UTC offset of the capture time when the file records one (EXIF
-    /// `OffsetTimeOriginal`, fallback `OffsetTimeDigitized`/`OffsetTime`),
-    /// e.g. `+09:00`. The EXIF date itself is a zone-less wall clock, so an
-    /// offset is the only way to recover the absolute instant; it is kept
-    /// for inspection and internal ordering and never rewrites the filename.
+    /// `OffsetTimeOriginal`, fallback `OffsetTimeDigitized`/`OffsetTime`;
+    /// exiftool also takes it from the offset embedded in a `CreationDate`
+    /// fallback when that fallback supplies the date), e.g. `+09:00`. The
+    /// EXIF date itself is a zone-less wall clock, so an offset is the only
+    /// way to recover the absolute instant; it is kept for inspection and
+    /// internal ordering and never rewrites the filename.
     pub date_offset: Option<String>,
-    /// Title (photos: XPTitle, fallback ImageDescription).
+    /// Title (photos: XPTitle, fallback ImageDescription; exiftool adds XMP
+    /// `Description` and the IPTC caption as cataloging fallbacks).
     pub title: Option<String>,
-    /// Author / artist (photos: EXIF Artist).
+    /// Author / artist (photos: EXIF Artist; exiftool adds XMP `Creator`
+    /// and the IPTC by-line as cataloging fallbacks).
     pub author: Option<String>,
     /// Camera model (photos: EXIF Model).
     pub camera: Option<String>,
