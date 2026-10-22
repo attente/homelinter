@@ -934,7 +934,6 @@ export default function App() {
         )}
         <Browse
           suggestions={st.suggestions}
-          total={st.suggestionsTotal}
           kinds={st.kinds}
           filter={st.filter}
           actionsDisabled={!canAct}

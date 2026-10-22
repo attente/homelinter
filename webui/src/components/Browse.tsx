@@ -27,8 +27,6 @@ type TabId = 'preview' | 'location' | 'metadata';
 
 interface BrowseProps {
   suggestions: Suggestion[];
-  /** Server total for the active filter; may exceed the loaded window. */
-  total: number;
   /** Complete set of asset kinds for the batch (from the report summary). */
   kinds: string[];
   filter: Filter;
@@ -630,7 +628,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, total, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectVisible, onClearVisible, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
+  const { suggestions, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectVisible, onClearVisible, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
   const panesRef = useRef<HTMLDivElement | null>(null);
@@ -827,10 +825,6 @@ export function Browse(props: BrowseProps) {
           <button type="button" onClick={() => onClearVisible(filter)}>
             clear visible
           </button>
-          <span className="sep" />
-          <span className="list-count">
-            {suggestions.length}/{total}
-          </span>
           <span className="sep" />
           <button
             type="button"

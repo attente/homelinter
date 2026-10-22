@@ -269,11 +269,6 @@ select optgroup {
   background: var(--line);
 }
 
-.list-count {
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-
 .grow {
   flex: 1;
 }
