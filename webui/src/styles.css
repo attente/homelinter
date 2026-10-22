@@ -66,17 +66,33 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 30vw;
+  /* Truncate from the left: the rtl line box overflows (and ellipsizes)
+     at its inline end, the left edge, while the inner span keeps the
+     path itself laid out left-to-right with its deepest segments
+     visible. */
+  direction: rtl;
+}
+
+.root-label-text {
+  direction: ltr;
+  unicode-bidi: plaintext;
 }
 
 .counts {
   color: var(--dim);
   margin-left: auto;
   white-space: nowrap;
+  /* Shrink with an ellipsis instead of pushing the header actions off
+     the right edge on narrow windows. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-actions {
   display: flex;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .state-ok {

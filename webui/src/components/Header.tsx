@@ -38,7 +38,7 @@ export function Header(props: HeaderProps) {
     <header className="header">
       <span className="title">homelinter</span>
       <span className={badgeClass}>{stateLabel(state)}{busy ? '...' : ''}</span>
-      <span className="root-label">{root ?? 'no scan root'}</span>
+      <span className="root-label"><span className="root-label-text">{root ?? 'no scan root'}</span></span>
       <span className="counts">
         {counts.suggestions} suggestions, {counts.shown} shown, {counts.selected} selected, {counts.manual} with manual overrides
       </span>
