@@ -848,12 +848,6 @@ export default function App() {
   const canScan = !inProgress(state);
   const canAct = state === "ready" || state === "done";
   const canCancel = inProgress(state);
-  const counts = {
-    suggestions: st.session?.suggestions_total ?? st.suggestionsTotal,
-    shown: st.suggestionsTotal,
-    selected: st.session?.selection_count ?? 0,
-    manual: st.session?.manual_overrides_total ?? 0,
-  };
   // Metadata progress and the provider-cache lookups behind it share one
   // label while a scan is being planned and analyzed.
   const metadataLabel = metadataProgressLabel(
@@ -937,6 +931,13 @@ export default function App() {
           suggestions={st.suggestions}
           kinds={st.kinds}
           filter={st.filter}
+          totalSuggestions={st.session?.suggestions_total ?? st.suggestionsTotal}
+          filteredSuggestions={st.suggestionsTotal}
+          selectedCount={st.session?.selection_count ?? 0}
+          manualCount={st.session?.manual_overrides_total ?? 0}
+          metadataProgress={st.metadataProgress}
+          cacheHits={st.session?.cache_hits ?? 0}
+          cacheMisses={st.session?.cache_misses ?? 0}
           actionsDisabled={!canAct}
           root={st.session?.scan_root ?? null}
           onFilterChange={applyFilter}
@@ -961,10 +962,6 @@ export default function App() {
       <Header
         state={state}
         root={st.session?.scan_root ?? null}
-        counts={counts}
-        metadataProgress={st.metadataProgress}
-        cacheHits={st.session?.cache_hits ?? 0}
-        cacheMisses={st.session?.cache_misses ?? 0}
         busy={st.busy}
         scanDisabled={!canScan}
         onNewScan={() =>

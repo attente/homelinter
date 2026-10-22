@@ -53,8 +53,8 @@ body {
   background: var(--bg2);
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
-  /* Wrap onto another line rather than crop the actions or crush a
-     label when the row cannot fit (see .counts below). */
+  /* Wrap onto another line rather than crop the actions when the row
+     cannot fit. */
   flex-wrap: wrap;
 }
 
@@ -79,24 +79,6 @@ body {
 .root-label-text {
   direction: ltr;
   unicode-bidi: plaintext;
-}
-
-.counts {
-  color: var(--dim);
-  margin-left: auto;
-  white-space: nowrap;
-  /* Shrink with an ellipsis instead of pushing the header actions off
-     the right edge on narrow windows. */
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The metadata progress and cache lookup label is never squeezed: it
-   reports live work, so it stays fully readable and the header wraps
-   instead. */
-.metadata-progress {
-  flex: 0 0 auto;
 }
 
 .header-actions {
@@ -250,7 +232,11 @@ select optgroup {
 .toolbar {
   display: flex;
   gap: 8px;
+  row-gap: 6px;
   align-items: center;
+  /* Wrap the bulk actions and the selected count instead of cropping
+     them on a narrow window. */
+  flex-wrap: wrap;
 }
 
 .toolbar-row {
@@ -264,7 +250,53 @@ select optgroup {
 .filters {
   display: flex;
   gap: 6px;
+  row-gap: 6px;
   align-items: center;
+  /* Wrap the filter controls and their counts instead of cropping them
+     on a narrow window. */
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* A count that sits beside the control it describes (the filter row's
+   filtered/total count, the bulk selection buttons' selected count, the
+   metadata filter's manual override count) instead of in the header. */
+.count-chip {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* Live provider work, above the list whose rows it fills in. The strip
+   only exists while there is something to report. */
+.activity-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--dim);
+  flex: 0 0 auto;
+}
+
+.activity-bar {
+  flex: 0 0 120px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.activity-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .filter-btn {

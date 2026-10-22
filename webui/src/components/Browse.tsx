@@ -15,8 +15,13 @@ import {
   TYPE_OPTIONS,
   isDefaultFilter,
 } from '../lib/filter';
-import { manualOverrideLabel, rowText } from '../lib/format';
-import type { Suggestion } from '../types';
+import {
+  manualOverrideLabel,
+  metadataProgressLabel,
+  rowText,
+  suggestionCountLabel,
+} from '../lib/format';
+import type { MetadataProgress, Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
 import { ExpandIcon } from './ExpandIcon';
@@ -30,6 +35,19 @@ interface BrowseProps {
   /** Complete set of asset kinds for the batch (from the report summary). */
   kinds: string[];
   filter: Filter;
+  /** Every suggestion in the batch, before filtering. */
+  totalSuggestions: number;
+  /** Suggestions matching the active filter, as counted by the service. */
+  filteredSuggestions: number;
+  /** Selected suggestions across the whole batch. */
+  selectedCount: number;
+  /** Suggestions with at least one saved manual metadata override. */
+  manualCount: number;
+  metadataProgress?: MetadataProgress | null;
+  /** Provider cache lookups for the current batch (0 until a provider
+   *  request is made; the pair is hidden while both are zero). */
+  cacheHits: number;
+  cacheMisses: number;
   actionsDisabled?: boolean;
   root?: string | null;
   onFilterChange: (filter: Filter) => void;
@@ -628,7 +646,7 @@ const SuggestionRow = memo(function SuggestionRow({
 });
 
 export function Browse(props: BrowseProps) {
-  const { suggestions, kinds, filter, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectFiltered, onClearFiltered, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
+  const { suggestions, kinds, filter, totalSuggestions, filteredSuggestions, selectedCount, manualCount, metadataProgress, cacheHits, cacheMisses, actionsDisabled, root, onFilterChange, onLoadMore, onToggle, onSelectFiltered, onClearFiltered, onRun, onExport, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [openId, setOpenId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
   const panesRef = useRef<HTMLDivElement | null>(null);
@@ -680,6 +698,16 @@ export function Browse(props: BrowseProps) {
     commitPath('');
   };
   const filtersDefault = isDefaultFilter(filter);
+  // Live provider work belongs next to the rows it fills in, not in the
+  // header: one strip carries the metadata progress and the cache lookups
+  // behind it, and disappears when there is nothing to report.
+  const metadataTotal = metadataProgress?.total ?? 0;
+  const metadataLabel = metadataProgressLabel(
+    metadataProgress?.completed ?? 0,
+    metadataTotal,
+    cacheHits,
+    cacheMisses,
+  );
   const openSuggestion = useMemo(
     () => suggestions.find((s) => s.id === openId) ?? null,
     [suggestions, openId],
@@ -809,6 +837,9 @@ export function Browse(props: BrowseProps) {
               </option>
             ))}
           </select>
+          <span className="count-chip" title="suggestions with saved manual metadata overrides">
+            {manualCount} manual
+          </span>
           <button
             type="button"
             className="filter-btn"
@@ -817,6 +848,9 @@ export function Browse(props: BrowseProps) {
           >
             reset
           </button>
+          <span className="count-chip">
+            {suggestionCountLabel(totalSuggestions, filteredSuggestions, !filtersDefault)}
+          </span>
         </div>
         <div className="toolbar">
           <button type="button" onClick={() => onSelectFiltered(filter)}>
@@ -825,6 +859,7 @@ export function Browse(props: BrowseProps) {
           <button type="button" onClick={() => onClearFiltered(filter)}>
             clear filtered
           </button>
+          <span className="count-chip">{selectedCount} selected</span>
           <span className="sep" />
           <button
             type="button"
@@ -844,6 +879,19 @@ export function Browse(props: BrowseProps) {
           </button>
         </div>
       </div>
+      {metadataLabel && (
+        <div className="activity-strip" role="status">
+          {metadataTotal > 0 && (
+            <div className="activity-bar" aria-hidden="true">
+              <div
+                className="activity-fill"
+                style={{ width: `${Math.round((((metadataProgress?.completed ?? 0) / metadataTotal) * 100))}%` }}
+              />
+            </div>
+          )}
+          <span className="activity-text">{metadataLabel}</span>
+        </div>
+      )}
       <div
         className="browse-panes"
         ref={panesRef}

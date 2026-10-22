@@ -186,11 +186,12 @@ export function cacheStatsLabel(hits: number, misses: number): string {
 }
 
 /**
- * Metadata progress and provider-cache counters share one header label,
- * e.g. `metadata: 4/9, 3 hits, 6 misses`. A hit or a miss only means
- * something next to the progress it advanced, and one combined label keeps
- * the header from growing a counter per phase. Empty when there is nothing
- * to report yet.
+ * Metadata progress and provider-cache counters share one label,
+ * e.g. `metadata: 4/9, 3 hits, 6 misses`, shown in the browsing view's
+ * activity strip above the list and inline in the scanning view. A hit or a
+ * miss only means something next to the progress it advanced, and one
+ * combined label keeps the view from growing a counter per phase. Empty when
+ * there is nothing to report yet.
  */
 export function metadataProgressLabel(
   completed: number,
@@ -202,4 +203,17 @@ export function metadataProgressLabel(
   if (total > 0) parts.push(`metadata: ${completed}/${total}`);
   if (hits + misses > 0) parts.push(cacheStatsLabel(hits, misses));
   return parts.join(', ');
+}
+/**
+ * Count label for the filter row: `1234 suggestions` while no dimension is
+ * constrained, `42 of 1234 suggestions` while the list shows a filtered
+ * subset of the batch.
+ */
+export function suggestionCountLabel(
+  total: number,
+  matched: number,
+  filtered: boolean,
+): string {
+  const noun = total === 1 ? 'suggestion' : 'suggestions';
+  return filtered ? `${matched} of ${total} ${noun}` : `${total} ${noun}`;
 }
