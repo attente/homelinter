@@ -275,13 +275,22 @@ impl Client {
     /// cached provider metadata and re-request it. Returns the suggestion
     /// marked pending under `{"item": ...}`.
     pub async fn refresh_metadata(&self, id: &str) -> Result<Value, ClientsError> {
-        let (_, v) = self
-            .json(
-                Method::POST,
-                &format!("/api/v1/suggestions/{id}/refresh"),
-                None,
-            )
-            .await?;
+        self.refresh_metadata_with(id, false).await
+    }
+
+    /// Re-request provider metadata. `clear_overrides` first discards saved
+    /// manual overrides for the same fields, so the provider values win.
+    pub async fn refresh_metadata_with(
+        &self,
+        id: &str,
+        clear_overrides: bool,
+    ) -> Result<Value, ClientsError> {
+        let path = if clear_overrides {
+            format!("/api/v1/suggestions/{id}/refresh?clear_overrides=true")
+        } else {
+            format!("/api/v1/suggestions/{id}/refresh")
+        };
+        let (_, v) = self.json(Method::POST, &path, None).await?;
         Ok(v)
     }
 

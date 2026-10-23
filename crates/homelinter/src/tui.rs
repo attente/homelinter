@@ -8,10 +8,12 @@
 //!
 //! Screens: a scanning/progress screen while the batch is generated, a
 //! two-pane suggestion browser with client-side filtering and server-side
-//! selection, a live operation log during execution, a
-//! report view when a run finishes, and a read-only configuration view with a
-//! metadata-cache viewer. Confirmation and text-input dialogs are
-//! modal overlays. A terminal of at least 80x24 is required.
+//! selection, a manual metadata editor dialog, an editable scan-settings
+//! form that saves through the configuration API, a live operation log
+//! during execution, a report view when a run finishes, and a read-only
+//! configuration view with a metadata-cache viewer. Confirmation and
+//! text-input dialogs are modal overlays. A terminal of at least 80x24 is
+//! required.
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -66,6 +68,13 @@ struct Row {
     rejection: String,
     dependents: Vec<String>,
     pending_meta: bool,
+    /// Destination fields backed by saved manual overrides (empty for
+    /// deletes and for moves with no saved edits).
+    manual_overrides: Vec<String>,
+    /// Effective metadata values the manual editor starts from.
+    metadata_location: String,
+    metadata_subject: String,
+    metadata_author: String,
 }
 
 impl Row {
@@ -120,6 +129,17 @@ impl Row {
             reason: str_field(v, "reason"),
             rejection: v["rejection_reason"].as_str().unwrap_or("").to_string(),
             pending_meta: v["metadata_pending"].as_bool().unwrap_or(false),
+            manual_overrides: v["manual_overrides"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            metadata_location: v["metadata"]["location"].as_str().unwrap_or("").to_string(),
+            metadata_subject: v["metadata"]["subject"].as_str().unwrap_or("").to_string(),
+            metadata_author: v["metadata"]["author"].as_str().unwrap_or("").to_string(),
             dependents,
         }
     }
@@ -170,6 +190,9 @@ struct Filter {
     typ: Option<String>,
     kind: Option<String>,
     status: Option<String>,
+    /// `Some(true)` keeps only suggestions with saved manual overrides,
+    /// `Some(false)` keeps only the rest.
+    manual: Option<bool>,
     /// Case-insensitive substring matched against each row's path fields
     /// (source target, move destination, duplicate keeper). Persisted to
     /// `[ui].path_filter` through the settings path, so it survives scans
@@ -181,6 +204,7 @@ struct Filter {
 enum Phase {
     Scan,
     Browse,
+    Settings,
     Run,
     Report,
     Config,
@@ -198,6 +222,7 @@ enum ConfirmAction {
     Quit,
     Run,
     ProceedStale,
+    ClearOverrides(String),
 }
 
 struct Confirm {
@@ -209,8 +234,9 @@ struct Confirm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptKind {
     ExportPath,
-    ScanRoot,
     PathFilter,
+    /// Edit one scan-settings field by index.
+    SettingText(usize),
 }
 
 struct Prompt {
@@ -227,6 +253,379 @@ struct RunView {
     failed_message: Option<String>,
 }
 
+/// One persisted scan phase row. A phase returning after another phase ran
+/// in between starts a new row, and the service's one-second heartbeat
+/// updates the active row in place instead of appending a duplicate.
+#[derive(Debug, Clone)]
+struct ScanStage {
+    phase: String,
+    detail: Option<String>,
+    scanned: u64,
+    total: Option<u64>,
+    elapsed_ms: u64,
+    done: bool,
+}
+
+impl ScanStage {
+    fn label(&self) -> String {
+        let detail = self
+            .detail
+            .as_deref()
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default();
+        let scanned = match self.total {
+            Some(t) => format!("{}/{}", self.scanned, t),
+            None => format!("{}", self.scanned),
+        };
+        format!(
+            "{}{}  {}, elapsed={}s",
+            self.phase,
+            detail,
+            scanned,
+            self.elapsed_ms / 1000
+        )
+    }
+}
+
+/// One row in the scan-settings form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingKind {
+    Text,
+    Bool,
+    Secret,
+}
+
+#[derive(Debug, Clone)]
+struct SettingField {
+    section: &'static str,
+    label: &'static str,
+    path: String,
+    kind: SettingKind,
+    value: String,
+    original: String,
+    bool_value: bool,
+    original_bool: bool,
+}
+
+/// Editable view of the durable scan configuration. Only fields that changed
+/// are written back through `PUT /config`; blank optional fields are sent as
+/// null so the key is deleted and the built-in default applies again.
+struct SettingsForm {
+    fields: Vec<SettingField>,
+    cursor: usize,
+    offset: usize,
+}
+
+impl SettingsForm {
+    fn from_config(doc: &Value) -> SettingsForm {
+        let mut fields = Vec::new();
+        macro_rules! text {
+            ($section:expr, $label:expr, $path:expr $(,)?) => {{
+                let value = setting_text(doc, $path);
+                fields.push(SettingField {
+                    section: $section,
+                    label: $label,
+                    path: $path.to_string(),
+                    kind: SettingKind::Text,
+                    original: value.clone(),
+                    value,
+                    bool_value: false,
+                    original_bool: false,
+                });
+            }};
+        }
+        macro_rules! secret {
+            ($section:expr, $label:expr, $path:expr $(,)?) => {{
+                fields.push(SettingField {
+                    section: $section,
+                    label: $label,
+                    path: $path.to_string(),
+                    kind: SettingKind::Secret,
+                    value: String::new(),
+                    original: String::new(),
+                    bool_value: false,
+                    original_bool: false,
+                });
+            }};
+        }
+        macro_rules! toggle {
+            ($section:expr, $label:expr, $path:expr, $default:expr $(,)?) => {{
+                let value = cfg_get(doc, $path)
+                    .and_then(Value::as_bool)
+                    .unwrap_or($default);
+                fields.push(SettingField {
+                    section: $section,
+                    label: $label,
+                    path: $path.to_string(),
+                    kind: SettingKind::Bool,
+                    value: String::new(),
+                    original: String::new(),
+                    bool_value: value,
+                    original_bool: value,
+                });
+            }};
+        }
+
+        text!("Scan", "root", "scan.root");
+        toggle!("Scan", "hidden", "scan.hidden", false);
+        text!("Scan", "exclude paths (one per line)", "scan.exclude_paths");
+        text!("Scan", "exclude extensions", "scan.exclude_extensions");
+        toggle!(
+            "Scan",
+            "default exclusions",
+            "scan.default_exclusions",
+            true
+        );
+
+        for (kind, label) in [
+            ("document", "document destination"),
+            ("photo", "photo destination"),
+            ("video", "video destination"),
+            ("audio", "audio destination"),
+            ("repository", "repository destination"),
+            ("archive", "archive destination"),
+        ] {
+            text!("Destination paths", label, &format!("target_paths.{kind}"),);
+        }
+
+        toggle!("Geocoder", "enabled", "geocoder.enabled", false);
+        text!("Geocoder", "service", "geocoder.service");
+        text!("Geocoder", "endpoint", "geocoder.endpoint");
+        secret!("Geocoder", "api key (write-only)", "geocoder.api_key");
+        text!("Geocoder", "language", "geocoder.language");
+        text!("Geocoder", "contact", "geocoder.user_agent_contact");
+        text!(
+            "Geocoder",
+            "neighbourhood cities",
+            "geocoder.neighbourhood_cities",
+        );
+        text!("Geocoder", "rate limit (ms)", "geocoder.rate_limit_ms");
+
+        toggle!("Description", "enabled", "description.enabled", false);
+        text!("Description", "service", "description.service");
+        text!("Description", "endpoint", "description.endpoint");
+        text!("Description", "model", "description.model");
+        secret!("Description", "api key (write-only)", "description.api_key");
+        text!("Description", "max words", "description.max_words");
+        text!(
+            "Description",
+            "rate limit (ms)",
+            "description.rate_limit_ms"
+        );
+
+        text!(
+            "Limits",
+            "large-file threshold",
+            "duplication.large_file_threshold",
+        );
+        text!(
+            "Limits",
+            "provider timeout (s)",
+            "limits.provider_timeout_seconds",
+        );
+        text!(
+            "Limits",
+            "provider concurrency",
+            "limits.provider_concurrency",
+        );
+        text!("Limits", "tool timeout (s)", "limits.tool_timeout_seconds");
+        text!(
+            "Limits",
+            "tool stdout max (bytes)",
+            "limits.tool_stdout_max_bytes",
+        );
+        toggle!("Limits", "cache enabled", "cache.enabled", true);
+
+        // Show the built-in service defaults the way the SPA form does, so
+        // an untouched field does not look unset when the service applies a
+        // fallback anyway.
+        for (path, default) in [
+            ("geocoder.service", "nominatim"),
+            ("description.service", "ollama"),
+        ] {
+            if let Some(field) = fields.iter_mut().find(|f| f.path == path) {
+                if field.value.is_empty() {
+                    field.value = default.to_string();
+                    field.original = default.to_string();
+                }
+            }
+        }
+
+        for fmt in ["pdf", "docx", "odt", "epub"] {
+            let path = format!("document_extraction.{fmt}");
+            let value = extraction_text(doc, fmt);
+            fields.push(SettingField {
+                section: "Document extraction",
+                label: match fmt {
+                    "pdf" => "pdf (blank = default, - = disabled)",
+                    "docx" => "docx (blank = default, - = disabled)",
+                    "odt" => "odt (blank = default, - = disabled)",
+                    _ => "epub (blank = default, - = disabled)",
+                },
+                path,
+                kind: SettingKind::Text,
+                original: value.clone(),
+                value,
+                bool_value: false,
+                original_bool: false,
+            });
+        }
+
+        SettingsForm {
+            fields,
+            cursor: 0,
+            offset: 0,
+        }
+    }
+
+    fn current(&self) -> Option<&SettingField> {
+        self.fields.get(self.cursor)
+    }
+}
+
+fn cfg_get<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = doc;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
+}
+
+fn setting_text(doc: &Value, path: &str) -> String {
+    match cfg_get(doc, path) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Array(items)) => {
+            let sep = if path == "scan.exclude_paths" {
+                "\n"
+            } else {
+                ", "
+            };
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(sep)
+        }
+        _ => String::new(),
+    }
+}
+
+fn extraction_text(doc: &Value, format: &str) -> String {
+    match cfg_get(doc, &format!("document_extraction.{format}")) {
+        Some(Value::Array(items)) if items.is_empty() => "-".to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+/// Insert `value` at a dotted path, creating intermediate objects.
+fn set_json_path(root: &mut Value, path: &str, value: Value) {
+    let mut parts = path.split('.').peekable();
+    let mut cur = root;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            if let Value::Object(map) = cur {
+                map.insert(part.to_string(), value);
+            }
+            return;
+        }
+        let next = cur
+            .as_object_mut()
+            .expect("settings path parent is an object");
+        cur = next
+            .entry(part.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+}
+
+/// Convert one text field's form value to the JSON the configuration API
+/// expects. Blank optional values become null (delete the key); lists are
+/// split on lines or commas; numeric fields are validated locally so a typo
+/// does not reach the service.
+fn setting_value(path: &str, text: &str) -> Result<Value, String> {
+    let trimmed = text.trim();
+    if let Some(_format) = path.strip_prefix("document_extraction.") {
+        if trimmed.is_empty() {
+            return Ok(Value::Null);
+        }
+        if trimmed == "-" {
+            return Ok(serde_json::json!([]));
+        }
+        return Ok(serde_json::json!(trimmed
+            .split_whitespace()
+            .collect::<Vec<_>>()));
+    }
+    if path == "scan.exclude_paths" {
+        let items: Vec<String> = trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        return Ok(if items.is_empty() {
+            Value::Null
+        } else {
+            serde_json::json!(items)
+        });
+    }
+    if path == "scan.exclude_extensions" || path == "geocoder.neighbourhood_cities" {
+        let items: Vec<String> = trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        return Ok(if items.is_empty() {
+            Value::Null
+        } else {
+            serde_json::json!(items)
+        });
+    }
+    const NUMERIC: [&str; 9] = [
+        "geocoder.rate_limit_ms",
+        "description.max_words",
+        "description.rate_limit_ms",
+        "duplication.large_file_threshold",
+        "limits.provider_timeout_seconds",
+        "limits.provider_concurrency",
+        "limits.tool_timeout_seconds",
+        "limits.tool_stdout_max_bytes",
+        "description.max_image_dimension",
+    ];
+    if NUMERIC.contains(&path) {
+        let n: u64 = trimmed
+            .parse()
+            .map_err(|_| format!("{path} must be a whole number"))?;
+        return Ok(serde_json::json!(n));
+    }
+    Ok(if trimmed.is_empty() {
+        Value::Null
+    } else {
+        Value::String(trimmed.to_string())
+    })
+}
+
+/// Manual metadata editor over one move suggestion's location, subject, and
+/// author. The service's `PUT /suggestions/{id}/metadata` body is a full
+/// replacement, so every field is sent and a blank one clears it.
+struct MetadataEditor {
+    id: String,
+    focus: usize,
+    fields: [String; 3],
+    cursors: [usize; 3],
+}
+
+const METADATA_LABELS: [&str; 3] = ["Location (%l)", "Subject (%s, %t)", "Author (%a)"];
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -240,13 +639,10 @@ struct App {
     target_paths: BTreeMap<String, String>,
     rows: Vec<Row>,
     kinds: Vec<String>,
-    progress_phase: String,
-    progress_scanned: u64,
-    progress_total: Option<u64>,
-    progress_detail: Option<String>,
-    progress_elapsed_ms: u64,
+    scan_stages: Vec<ScanStage>,
     metadata_completed: usize,
     metadata_total: usize,
+    manual_total: usize,
     /// Provider cache lookups for the current batch, as reported by the
     /// service's `cache_hits`/`cache_misses` session counters.
     cache_hits: u64,
@@ -254,6 +650,8 @@ struct App {
     filter: Filter,
     cursor: usize,
     list_offset: usize,
+    settings: Option<SettingsForm>,
+    editor: Option<MetadataEditor>,
     confirm: Option<Confirm>,
     prompt: Option<Prompt>,
     help: bool,
@@ -291,18 +689,17 @@ impl App {
             target_paths,
             rows: Vec::new(),
             kinds: Vec::new(),
-            progress_phase: String::new(),
-            progress_scanned: 0,
-            progress_total: None,
-            progress_detail: None,
-            progress_elapsed_ms: 0,
+            scan_stages: Vec::new(),
             metadata_completed: 0,
             metadata_total: 0,
+            manual_total: 0,
             cache_hits: 0,
             cache_misses: 0,
             filter: Filter::default(),
             cursor: 0,
             list_offset: 0,
+            settings: None,
+            editor: None,
             confirm: None,
             prompt: None,
             help: false,
@@ -329,33 +726,26 @@ impl App {
     // API actions
     // ------------------------------------------------------------------
 
+    /// Start a scan against the service's current settings. Durable settings
+    /// are saved first by the scan-settings form, never silently here.
     async fn start_scan(&mut self) -> Result<(), String> {
-        // Root, hidden, and target paths are runtime settings, not per-scan
-        // parameters: persist the form's values, then scan against the
-        // service's current settings.
-        let mut settings = serde_json::json!({
-            "scan": { "root": self.root, "hidden": self.hidden },
-        });
-        if !self.target_paths.is_empty() {
-            settings["target_paths"] = serde_json::json!(self.target_paths);
-        }
-        self.client
-            .config_put(settings)
-            .await
-            .map_err(|e| format!("cannot save scan settings: {e}"))?;
         self.phase = Phase::Scan;
         self.state = "scanning".to_string();
         self.rows.clear();
         self.kinds.clear();
         self.cursor = 0;
         self.list_offset = 0;
-        // The type/kind/status filters reset with each scan; the path filter
-        // persists (live and via [ui].path_filter) until explicitly cleared.
+        self.scan_stages.clear();
+        self.editor = None;
+        // The type/kind/status/manual filters reset with each scan; the path
+        // filter persists (live and via [ui].path_filter) until cleared.
         self.filter.typ = None;
         self.filter.kind = None;
         self.filter.status = None;
+        self.filter.manual = None;
         self.metadata_completed = 0;
         self.metadata_total = 0;
+        self.manual_total = 0;
         self.cache_hits = 0;
         self.cache_misses = 0;
         self.client
@@ -363,6 +753,216 @@ impl App {
             .await
             .map_err(|e| format!("cannot start scan: {e}"))?;
         Ok(())
+    }
+
+    /// Open the editable scan-settings form, seeded from the service's
+    /// effective configuration so another client's changes are never
+    /// clobbered by a stale local copy.
+    async fn open_settings(&mut self) {
+        match self.client.config().await {
+            Ok(doc) => {
+                self.settings = Some(SettingsForm::from_config(&doc));
+                self.config_doc = Some(doc);
+                self.phase = Phase::Settings;
+            }
+            Err(e) => self.toast = Some(format!("cannot read settings: {e}")),
+        }
+    }
+
+    /// Build the minimal partial configuration for the fields the user
+    /// changed, plus the scan root and hidden-file setting (always persisted
+    /// with a scan, as the SPA does).
+    fn settings_partial(&self) -> Result<Value, String> {
+        let form = self
+            .settings
+            .as_ref()
+            .ok_or_else(|| "the settings form is not open".to_string())?;
+        let mut body = Value::Object(serde_json::Map::new());
+        let mut root = String::new();
+        for f in &form.fields {
+            match f.kind {
+                SettingKind::Bool => {
+                    if f.path == "scan.hidden" || f.bool_value != f.original_bool {
+                        set_json_path(&mut body, &f.path, Value::Bool(f.bool_value));
+                    }
+                }
+                SettingKind::Secret => {
+                    if !f.value.trim().is_empty() {
+                        set_json_path(
+                            &mut body,
+                            &f.path,
+                            Value::String(f.value.trim().to_string()),
+                        );
+                    }
+                }
+                SettingKind::Text => {
+                    if f.path == "scan.root" {
+                        root = f.value.clone();
+                        continue;
+                    }
+                    if f.value == f.original {
+                        continue;
+                    }
+                    let value = setting_value(&f.path, &f.value)?;
+                    set_json_path(&mut body, &f.path, value);
+                }
+            }
+        }
+        let resolved = if root.trim().is_empty() {
+            homelinter_model::path::home_dir()
+                .ok_or_else(|| "cannot determine home directory".to_string())?
+        } else {
+            self.resolve_path(&root)?
+        };
+        let root = resolved.to_string_lossy().into_owned();
+        set_json_path(&mut body, "scan.root", Value::String(root));
+        Ok(body)
+    }
+
+    /// Persist the settings form and, when the save succeeds, start the scan
+    /// under the configuration that was just saved.
+    async fn save_settings_and_scan(&mut self) {
+        let partial = match self.settings_partial() {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = self.client.config_put(partial).await {
+            self.toast = Some(format!("cannot save scan settings: {e}"));
+            return;
+        }
+        // Re-read the saved configuration so the header and target-path
+        // count reflect what the server actually stored.
+        if let Ok(doc) = self.client.config().await {
+            if let Some(root) = doc["scan"]["root"].as_str() {
+                self.root = root.to_string();
+            }
+            self.hidden = doc["scan"]["hidden"].as_bool().unwrap_or(self.hidden);
+            self.target_paths = doc["target_paths"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.config_doc = Some(doc);
+        }
+        self.settings = None;
+        if let Err(e) = self.start_scan().await {
+            self.toast = Some(e);
+            self.phase = Phase::Browse;
+        }
+    }
+
+    /// Apply one scan progress event to the persisted stage list.
+    fn push_scan_stage(
+        &mut self,
+        phase: String,
+        detail: Option<String>,
+        scanned: u64,
+        total: Option<u64>,
+        elapsed_ms: u64,
+    ) {
+        if let Some(last) = self.scan_stages.last_mut() {
+            if last.phase == phase {
+                last.detail = detail;
+                last.scanned = scanned;
+                last.total = total;
+                last.elapsed_ms = elapsed_ms;
+                return;
+            }
+            last.done = true;
+        }
+        self.scan_stages.push(ScanStage {
+            phase,
+            detail,
+            scanned,
+            total,
+            elapsed_ms,
+            done: false,
+        });
+    }
+
+    /// Cancel an in-progress scan or run but stay in the TUI, returning to
+    /// the suggestion browser.
+    async fn cancel_and_stay(&mut self) {
+        self.cancel_in_flight().await;
+        self.phase = Phase::Browse;
+        self.toast = Some("cancelled in-flight work".to_string());
+        if let Err(e) = self.refresh_rows().await {
+            self.toast = Some(format!("cancelled; cannot refresh suggestions: {e}"));
+        }
+    }
+
+    /// Open the manual metadata editor for the highlighted move suggestion.
+    fn open_metadata_editor(&mut self) {
+        let Some(idx) = self.filtered_index(self.cursor) else {
+            return;
+        };
+        let row = &self.rows[idx];
+        if row.typ != "move" {
+            self.toast = Some("manual metadata edits apply to move suggestions".to_string());
+            return;
+        }
+        if row.pending_meta {
+            self.toast = Some("wait for the provider metadata to resolve first".to_string());
+            return;
+        }
+        let fields = [
+            row.metadata_location.clone(),
+            row.metadata_subject.clone(),
+            row.metadata_author.clone(),
+        ];
+        let cursors = [fields[0].len(), fields[1].len(), fields[2].len()];
+        self.editor = Some(MetadataEditor {
+            id: row.id.clone(),
+            focus: 0,
+            fields,
+            cursors,
+        });
+    }
+
+    async fn save_metadata_editor(&mut self) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        let blank = |s: &str| {
+            let t = s.trim();
+            if t.is_empty() {
+                Value::Null
+            } else {
+                Value::String(t.to_string())
+            }
+        };
+        let body = serde_json::json!({
+            "location": blank(&editor.fields[0]),
+            "subject": blank(&editor.fields[1]),
+            "author": blank(&editor.fields[2]),
+        });
+        match self.client.set_suggestion_metadata(&editor.id, body).await {
+            Ok(v) => {
+                if v["item"].is_null() {
+                    self.rows.retain(|r| r.id != editor.id);
+                    self.kinds = self.unique_kinds();
+                    if self.cursor >= self.rows.len() {
+                        self.cursor = self.rows.len().saturating_sub(1);
+                    }
+                    self.toast =
+                        Some("metadata saved; the suggestion no longer applies".to_string());
+                } else {
+                    self.upsert_row(&v["item"]);
+                    self.toast = Some("metadata saved".to_string());
+                }
+            }
+            Err(e) => {
+                // Keep the user's edits so a failed save can be retried.
+                self.editor = Some(editor);
+                self.toast = Some(format!("cannot save metadata: {e}"));
+            }
+        }
     }
 
     async fn refresh_rows(&mut self) -> Result<(), String> {
@@ -455,13 +1055,37 @@ impl App {
         let Some(idx) = self.filtered_index(self.cursor) else {
             return;
         };
-        let (id, typ) = (self.rows[idx].id.clone(), self.rows[idx].typ.clone());
-        if typ != "move" {
+        let row = &self.rows[idx];
+        if row.typ != "move" {
             self.toast = Some("provider metadata does not shape a delete suggestion".to_string());
             return;
         }
-        match self.client.refresh_metadata(&id).await {
-            Ok(_) => self.refresh_after_mutation().await,
+        if !row.manual_overrides.is_empty() {
+            let fields = row.manual_overrides.join(", ");
+            self.confirm = Some(Confirm {
+                title: "Clear manual metadata overrides?".to_string(),
+                message: format!(
+                    "Fetching metadata clears the manual overrides for {fields} and re-requests the provider values."
+                ),
+                yes: ConfirmAction::ClearOverrides(row.id.clone()),
+            });
+            return;
+        }
+        let id = row.id.clone();
+        self.refresh_metadata_id(&id, false).await;
+    }
+
+    async fn refresh_metadata_id(&mut self, id: &str, clear_overrides: bool) {
+        match self.client.refresh_metadata_with(id, clear_overrides).await {
+            Ok(_) => {
+                let note = if clear_overrides {
+                    "manual overrides cleared; provider metadata requested"
+                } else {
+                    "provider metadata requested"
+                };
+                self.refresh_after_mutation().await;
+                self.toast = Some(note.to_string());
+            }
             Err(e) => self.toast = Some(format!("re-request failed: {e}")),
         }
     }
@@ -505,10 +1129,13 @@ impl App {
         }
     }
 
+    /// Clear the selected suggestions that match the active filter, like the
+    /// SPA's `clear filtered`; a selection made under another filter survives.
     async fn clear_selection(&mut self) {
         let ids: Vec<String> = self
-            .rows
-            .iter()
+            .filtered()
+            .into_iter()
+            .map(|i| &self.rows[i])
             .filter(|r| r.selected)
             .map(|r| r.id.clone())
             .collect();
@@ -685,11 +1312,13 @@ impl App {
             }
             "scan.progress" => {
                 if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                    self.progress_phase = str_field(&v, "phase");
-                    self.progress_scanned = v["scanned"].as_u64().unwrap_or(0);
-                    self.progress_total = v["total"].as_u64();
-                    self.progress_detail = v["detail"].as_str().map(|s| s.to_string());
-                    self.progress_elapsed_ms = v["elapsed_ms"].as_u64().unwrap_or(0);
+                    self.push_scan_stage(
+                        str_field(&v, "phase"),
+                        v["detail"].as_str().map(|s| s.to_string()),
+                        v["scanned"].as_u64().unwrap_or(0),
+                        v["total"].as_u64(),
+                        v["elapsed_ms"].as_u64().unwrap_or(0),
+                    );
                 }
             }
             "metadata.progress" => {
@@ -766,6 +1395,7 @@ impl App {
             self.metadata_completed =
                 sess["metadata_progress"]["completed"].as_u64().unwrap_or(0) as usize;
             self.metadata_total = sess["metadata_progress"]["total"].as_u64().unwrap_or(0) as usize;
+            self.manual_total = sess["manual_overrides_total"].as_u64().unwrap_or(0) as usize;
             self.cache_hits = sess["cache_hits"].as_u64().unwrap_or(0);
             self.cache_misses = sess["cache_misses"].as_u64().unwrap_or(0);
             self.warnings = sess["warnings"]
@@ -780,11 +1410,17 @@ impl App {
         match self.phase {
             Phase::Scan => {
                 if self.state == "ready" {
+                    if let Some(last) = self.scan_stages.last_mut() {
+                        last.done = true;
+                    }
                     if self.rows.is_empty() {
                         let _ = self.refresh_rows().await;
                     }
                     self.phase = Phase::Browse;
                 } else if self.state == "failed" {
+                    if let Some(last) = self.scan_stages.last_mut() {
+                        last.done = true;
+                    }
                     self.phase = Phase::Browse;
                     self.toast = Some(match &self.failure_reason {
                         Some(reason) => format!("scan failed: {reason}"),
@@ -901,6 +1537,10 @@ impl App {
             }
             return;
         }
+        if self.editor.is_some() {
+            self.on_editor_key(key).await;
+            return;
+        }
         if let KeyCode::Char('c') = key.code {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 self.cancel_in_flight().await;
@@ -911,12 +1551,16 @@ impl App {
         match self.phase {
             Phase::Scan => match key.code {
                 KeyCode::Char('?') => self.help = true,
+                KeyCode::Char('c') => self.cancel_and_stay().await,
                 KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
                 _ => {}
             },
             Phase::Browse => self.on_browse_key(key).await,
+            Phase::Settings => self.on_settings_key(key).await,
             Phase::Run => match key.code {
-                // Ignore all keys except a quit request during a run.
+                // A run continues in the background only after a cancel;
+                // quitting cancels it first.
+                KeyCode::Char('c') => self.cancel_and_stay().await,
                 KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
                 _ => {}
             },
@@ -1049,6 +1693,13 @@ impl App {
                     }
                 };
             }
+            KeyCode::Char('f') => {
+                self.filter.manual = match self.filter.manual {
+                    None => Some(true),
+                    Some(true) => Some(false),
+                    Some(false) => None,
+                };
+            }
             KeyCode::Char('c') => {
                 self.filter = Filter::default();
                 self.save_path_filter(None).await;
@@ -1095,17 +1746,124 @@ impl App {
             }
             KeyCode::Char('g') => self.open_config().await,
             KeyCode::Char('m') => self.refresh_metadata_current().await,
+            KeyCode::Char('M') => self.open_metadata_editor(),
             KeyCode::Char('b') => self.rebuild_current().await,
-            KeyCode::Char('n') => {
-                self.prompt = Some(Prompt {
-                    title: self.scan_prompt_title(),
-                    kind: PromptKind::ScanRoot,
-                    value: self.root.clone(),
-                    cursor: self.root.len(),
-                });
-            }
+            KeyCode::Char('n') => self.open_settings().await,
             KeyCode::Char('?') => self.help = true,
             KeyCode::Esc | KeyCode::Char('q') => self.ask_quit(),
+            _ => {}
+        }
+    }
+
+    async fn on_settings_key(&mut self, key: KeyEvent) {
+        let Some(form) = self.settings.as_mut() else {
+            self.phase = Phase::Browse;
+            return;
+        };
+        match key.code {
+            KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if form.cursor + 1 < form.fields.len() {
+                    form.cursor += 1;
+                }
+            }
+            KeyCode::Home => form.cursor = 0,
+            KeyCode::End => form.cursor = form.fields.len().saturating_sub(1),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let Some(f) = form.current() else { return };
+                let (idx, kind, title, value) = (
+                    form.cursor,
+                    f.kind,
+                    format!("{}: {}", f.section, f.label),
+                    f.value.clone(),
+                );
+                if kind == SettingKind::Bool {
+                    form.fields[idx].bool_value = !form.fields[idx].bool_value;
+                } else {
+                    self.prompt = Some(Prompt {
+                        title,
+                        kind: PromptKind::SettingText(idx),
+                        cursor: value.len(),
+                        value,
+                    });
+                }
+            }
+            KeyCode::Char('s') => self.save_settings_and_scan().await,
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Esc | KeyCode::Char('q') => self.phase = Phase::Browse,
+            _ => {}
+        }
+    }
+
+    async fn on_editor_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.editor = None;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            self.save_metadata_editor().await;
+            return;
+        }
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => editor.focus = (editor.focus + 1) % 3,
+            KeyCode::BackTab | KeyCode::Up => editor.focus = (editor.focus + 2) % 3,
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    let focus = editor.focus;
+                    let text = &mut editor.fields[focus];
+                    let cursor = &mut editor.cursors[focus];
+                    if text.is_char_boundary(*cursor) {
+                        text.insert(*cursor, ch);
+                        *cursor += ch.len_utf8();
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                let focus = editor.focus;
+                let text = &mut editor.fields[focus];
+                let cursor = &mut editor.cursors[focus];
+                if *cursor > 0 && text.is_char_boundary(*cursor) {
+                    if let Some(prev) = text[..*cursor].char_indices().last() {
+                        text.remove(prev.0);
+                        *cursor = prev.0;
+                    }
+                }
+            }
+            KeyCode::Delete => {
+                let focus = editor.focus;
+                let text = &mut editor.fields[focus];
+                let cursor = &mut editor.cursors[focus];
+                if *cursor < text.len() && text.is_char_boundary(*cursor) {
+                    text.remove(*cursor);
+                }
+            }
+            KeyCode::Left => {
+                let focus = editor.focus;
+                let text = &editor.fields[focus];
+                let cursor = &mut editor.cursors[focus];
+                if let Some(prev) = text[..*cursor].char_indices().last() {
+                    *cursor = prev.0;
+                }
+            }
+            KeyCode::Right => {
+                let focus = editor.focus;
+                let text = &editor.fields[focus];
+                let cursor = &mut editor.cursors[focus];
+                if let Some(next) = text[*cursor..].chars().next() {
+                    *cursor += next.len_utf8();
+                }
+            }
+            KeyCode::Home => {
+                let focus = editor.focus;
+                editor.cursors[focus] = 0;
+            }
+            KeyCode::End => {
+                let focus = editor.focus;
+                editor.cursors[focus] = editor.fields[focus].len();
+            }
             _ => {}
         }
     }
@@ -1123,13 +1881,6 @@ impl App {
             .count()
     }
 
-    fn scan_prompt_title(&self) -> String {
-        format!(
-            "Scan root (empty = home) [hidden: {}; Tab toggles]",
-            if self.hidden { "yes" } else { "no" }
-        )
-    }
-
     async fn on_confirm_key(&mut self, c: Confirm, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => match c.yes {
@@ -1141,6 +1892,9 @@ impl App {
                     if let Err(e) = self.run_selected().await {
                         self.toast = Some(e);
                     }
+                }
+                ConfirmAction::ClearOverrides(id) => {
+                    self.refresh_metadata_id(&id, true).await;
                 }
                 ConfirmAction::ProceedStale => {
                     let action = self.stale_action.take();
@@ -1221,33 +1975,18 @@ impl App {
                 self.prompt = Some(p);
             }
             KeyCode::Tab => match p.kind {
-                PromptKind::ScanRoot => {
-                    self.hidden = !self.hidden;
-                    p.title = self.scan_prompt_title();
-                }
-                PromptKind::ExportPath | PromptKind::PathFilter => {}
+                PromptKind::ExportPath | PromptKind::PathFilter | PromptKind::SettingText(_) => {}
             },
             KeyCode::Enter => {
                 let kind = p.kind;
                 let value = p.value;
                 match kind {
                     PromptKind::ExportPath => self.export_selected(value).await,
-                    PromptKind::ScanRoot => {
-                        let resolved = if value.trim().is_empty() {
-                            homelinter_model::path::home_dir()
-                                .ok_or_else(|| "cannot determine home directory".to_string())
-                        } else {
-                            self.resolve_path(&value)
-                        };
-                        match resolved {
-                            Ok(root) => {
-                                self.root = root.to_string_lossy().into_owned();
-                                if let Err(e) = self.start_scan().await {
-                                    self.toast = Some(e);
-                                    self.phase = Phase::Browse;
-                                }
+                    PromptKind::SettingText(idx) => {
+                        if let Some(form) = self.settings.as_mut() {
+                            if let Some(f) = form.fields.get_mut(idx) {
+                                f.value = value;
                             }
-                            Err(e) => self.toast = Some(e),
                         }
                     }
                     PromptKind::PathFilter => {
@@ -1297,12 +2036,15 @@ impl App {
         match self.phase {
             Phase::Scan => self.draw_scan(f),
             Phase::Browse => self.draw_browse(f),
+            Phase::Settings => self.draw_settings(f),
             Phase::Run => self.draw_run(f),
             Phase::Report => self.draw_report(f),
             Phase::Config => self.draw_config(f),
             Phase::Cache => self.draw_cache(f),
         }
-        if let Some(p) = &self.prompt {
+        if let Some(e) = &self.editor {
+            self.draw_metadata_editor(f, e);
+        } else if let Some(p) = &self.prompt {
             self.draw_prompt(f, p);
         } else if let Some(c) = &self.confirm {
             self.draw_confirm(f, c);
@@ -1356,10 +2098,11 @@ impl App {
             Span::styled(self.state.clone(), Style::new().fg(state_color).bold()),
             Span::raw(format!("  root: {}  ", shorten(&self.root, 30))),
             Span::raw(format!(
-                "batch: {}  shown: {}  selected: {}",
+                "batch: {}  shown: {}  selected: {}  manual: {}",
                 self.rows.len(),
                 self.filtered_len(),
-                selected
+                selected,
+                self.manual_total
             )),
         ];
         if let Some(label) = self.metadata_label() {
@@ -1381,6 +2124,11 @@ impl App {
         let t = self.filter.typ.as_deref().unwrap_or("all");
         let k = self.filter.kind.as_deref().unwrap_or("all");
         let s = self.filter.status.as_deref().unwrap_or("all");
+        let m = match self.filter.manual {
+            Some(true) => "manual",
+            Some(false) => "auto",
+            None => "all",
+        };
         let p = match &self.filter.path {
             Some(p) => {
                 let mut text: String = p.chars().take(21).collect();
@@ -1394,7 +2142,7 @@ impl App {
         Line::from(vec![
             Span::styled(" filter ", Style::new().fg(Color::Black).bg(Color::Blue)),
             Span::raw(format!(
-                " t:type={t}  k:kind={k}  u:status={s}  /:path={p}  c:clear  "
+                " t:type={t}  k:kind={k}  u:status={s}  f:metadata={m}  /:path={p}  c:clear  "
             )),
             Span::styled("space", Style::new().fg(Color::Green)),
             Span::raw(" toggle  "),
@@ -1420,36 +2168,38 @@ impl App {
                 if self.hidden { "yes" } else { "no" },
                 self.target_paths.len()
             )),
+            Line::from(""),
         ];
         let mut text = Text::from(lines);
-        // The meter is this screen's busy indicator, so it is drawn even before
-        // the first phase event arrives; with no event yet it bounces a segment
-        // off the frame clock instead of the phase's elapsed time.
-        let meter_clock = if self.progress_phase.is_empty() {
-            self.frame * 250
-        } else {
-            self.progress_elapsed_ms
-        };
-        text.lines.push(Line::from(""));
-        if !self.progress_phase.is_empty() {
-            let detail = self
-                .progress_detail
-                .as_deref()
-                .map(|d| format!(" ({d})"))
-                .unwrap_or_default();
-            let scanned = match self.progress_total {
-                Some(t) => format!("{}/{}", self.progress_scanned, t),
-                None => format!("{}", self.progress_scanned),
-            };
+        if self.scan_stages.is_empty() {
             text.lines.push(Line::from(format!(
-                " phase: {}{}   scanned: {}   elapsed: {} ms",
-                self.progress_phase, detail, scanned, self.progress_elapsed_ms
+                " {} {}",
+                progress_meter(0, None, self.frame * 250),
+                "waiting for the first phase"
             )));
+        } else {
+            for stage in &self.scan_stages {
+                let clock = stage.elapsed_ms;
+                let meter = if stage.done {
+                    progress_meter(
+                        stage.total.unwrap_or(1),
+                        Some(stage.total.unwrap_or(1)),
+                        clock,
+                    )
+                } else {
+                    progress_meter(stage.scanned, stage.total, clock)
+                };
+                let style = if stage.done {
+                    Style::new().fg(Color::DarkGray)
+                } else {
+                    Style::new().fg(Color::White)
+                };
+                text.lines.push(Line::from(Span::styled(
+                    format!(" {meter} {}", stage.label()),
+                    style,
+                )));
+            }
         }
-        text.lines.push(Line::from(format!(
-            " {}",
-            progress_meter(self.progress_scanned, self.progress_total, meter_clock)
-        )));
         if let Some(label) = self.metadata_label() {
             text.lines.push(Line::from(format!(" {label}")));
         }
@@ -1461,8 +2211,13 @@ impl App {
         }
         text.lines.push(Line::from(""));
         text.lines
-            .push(Line::from(" q/Esc: cancel and quit   ?: help"));
-        f.render_widget(Paragraph::new(text).block(block("Scanning")), area);
+            .push(Line::from(" c: cancel   q/Esc: cancel and quit   ?: help"));
+        f.render_widget(
+            Paragraph::new(text)
+                .block(block("Scanning"))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     fn draw_browse(&mut self, f: &mut Frame) {
@@ -1536,6 +2291,140 @@ impl App {
         );
 
         self.draw_foot(f, foot);
+    }
+
+    fn draw_settings(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let [head, list_area, foot] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(3),
+        ])
+        .areas(area);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                " Scan settings",
+                Style::new().fg(Color::Cyan).bold(),
+            )])),
+            head,
+        );
+        let Some(form) = self.settings.as_mut() else {
+            return;
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        let mut cursor_line = 0usize;
+        let mut last_section = "";
+        for (i, field) in form.fields.iter().enumerate() {
+            if field.section != last_section {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", field.section),
+                    Style::new().fg(Color::DarkGray).bold(),
+                )));
+                last_section = field.section;
+            }
+            if i == form.cursor {
+                cursor_line = lines.len();
+            }
+            let value = match field.kind {
+                SettingKind::Bool => {
+                    if field.bool_value {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    }
+                }
+                SettingKind::Secret => {
+                    if field.value.trim().is_empty() {
+                        "(unset)".to_string()
+                    } else {
+                        "(hidden)".to_string()
+                    }
+                }
+                SettingKind::Text => {
+                    if field.value.trim().is_empty() {
+                        "(default)".to_string()
+                    } else {
+                        field.value.replace('\n', " | ")
+                    }
+                }
+            };
+            let marker = if i == form.cursor { ">" } else { " " };
+            let style = if i == form.cursor {
+                Style::new().fg(Color::Yellow).bold()
+            } else {
+                Style::new().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {:<28} {}", field.label, value),
+                style,
+            )));
+        }
+        let vis = list_area.height.max(1) as usize;
+        if cursor_line < form.offset {
+            form.offset = cursor_line;
+        }
+        if cursor_line >= form.offset + vis {
+            form.offset = cursor_line + 1 - vis;
+        }
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block("Configuration (changes apply to the next scan)"))
+                .scroll((form.offset as u16, 0)),
+            list_area,
+        );
+        let foot_text = Text::from(vec![
+            Line::from(" Up/Down move  Enter edit/toggle  s save and scan  Esc cancel  ? help"),
+            Line::from(
+                " Blank optional values clear the key and restore the built-in default; a blank extraction command does the same and '-' disables that format.",
+            ),
+            Line::from(" API keys are write-only: type one to store it; leave blank to keep the saved key."),
+        ]);
+        f.render_widget(Paragraph::new(foot_text).wrap(Wrap { trim: false }), foot);
+    }
+
+    fn draw_metadata_editor(&self, f: &mut Frame, editor: &MetadataEditor) {
+        let area = f.area();
+        let rect = centered_rect(80, 16, area);
+        let block = Block::bordered().title("Edit metadata");
+        let inner = block.inner(rect);
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        let mut lines = vec![
+            Line::from("Edit the destination metadata for this suggestion."),
+            Line::from("A blank field clears the override and falls back to the provider or embedded value."),
+            Line::from(""),
+        ];
+        for (i, label) in METADATA_LABELS.iter().enumerate() {
+            lines.push(Line::from(Span::styled(
+                format!(" {label}"),
+                Style::new().fg(Color::DarkGray),
+            )));
+            let marker = if i == editor.focus { ">" } else { " " };
+            let style = if i == editor.focus {
+                Style::new().fg(Color::Yellow).bold()
+            } else {
+                Style::new().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {}", editor.fields[i]),
+                style,
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            " Tab/Up/Down: next field   Enter: save   Esc: cancel",
+        ));
+        f.render_widget(Paragraph::new(Text::from(lines)), inner);
+        let row = 3 + editor.focus * 2;
+        if row < inner.height as usize {
+            let col = (2 + editor.cursors[editor.focus]) as u16;
+            f.set_cursor_position(Position::new(
+                inner
+                    .x
+                    .saturating_add(col.min(inner.width.saturating_sub(1))),
+                inner.y.saturating_add(row as u16),
+            ));
+        }
     }
 
     fn draw_run(&mut self, f: &mut Frame) {
@@ -1694,7 +2583,7 @@ impl App {
 
     fn draw_foot(&self, f: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(
-            " j/arrows move  space select  a all  A clear  t/k/u/c filters  / path  m re-request  b rebuild  x execute  e export  n scan  g config  ? help  q quit",
+            " j/arrows move  space select  a all  A clear  t/k/u/f/c filters  / path  m re-request  M metadata  b rebuild  x execute  e export  n settings+scan  g config  ? help  q quit",
         )];
         if let Some(w) = self.warnings.first() {
             let more = self.warnings.len().saturating_sub(1);
@@ -1757,23 +2646,28 @@ impl App {
             Line::from(" PageUp/PageDown      page through the list"),
             Line::from(" space               toggle the highlighted suggestion"),
             Line::from(" a                   select all filtered suggestions"),
-            Line::from(" A                   clear the selection"),
+            Line::from(" A                   clear the selected suggestions matching the filter"),
             Line::from(" t                   cycle the type filter (all/move/delete)"),
             Line::from(" k                   cycle the asset-kind filter"),
             Line::from(" u                   cycle the status filter"),
+            Line::from(" f                   cycle the metadata filter (all/manual/auto)"),
             Line::from(
                 " /                   edit the path filter (matches source, destination, keeper)",
             ),
             Line::from(" c                   clear all filters"),
             Line::from(
-                " m                   re-request the highlighted suggestion's provider metadata",
+                " m                   re-request provider metadata (clears overrides after confirming)",
             ),
+            Line::from(" M                   edit the move's location, subject, and author"),
+            Line::from(" b                   rebuild a move's destination from current metadata"),
             Line::from(" x                   execute selection (asks to confirm)"),
             Line::from(" e                   export selection as a shell script"),
-            Line::from(" n                   scan another root (Tab toggles hidden)"),
+            Line::from(" n                   edit scan settings, then scan"),
             Line::from(" g                   view the configuration (read-only)"),
             Line::from(" v / l               view the metadata cache (from config)"),
             Line::from(" ?                   show this help"),
+            Line::from(" c                   cancel in-flight work and stay in the browser"),
+            Line::from(" C                   clear the metadata cache (asks to confirm)"),
             Line::from(" q / Esc / Ctrl-C     quit"),
             Line::from(""),
             Line::from(" Filtering affects navigation and bulk selection only."),
@@ -1862,8 +2756,13 @@ fn row_label(r: &Row, root: &str, frame: u64) -> Line<'static> {
     } else {
         " [rejected]".to_string()
     };
+    let manual = if r.manual_overrides.is_empty() {
+        String::new()
+    } else {
+        " [manual]".to_string()
+    };
     let text = format!(
-        "{marker} {:<6} {:<8} {name} -> {dest}{status}{reject}",
+        "{marker} {:<6} {:<8} {name} -> {dest}{status}{reject}{manual}",
         r.typ, r.kind
     );
     Line::from(Span::styled(text, Style::new().fg(color)))
@@ -1927,6 +2826,27 @@ fn detail_text(r: &Row) -> Text<'static> {
     }
     if !r.reason.is_empty() {
         lines.push(mk("reason", &r.reason));
+    }
+    if !r.metadata_location.is_empty() {
+        lines.push(mk("location", &r.metadata_location));
+    }
+    if !r.metadata_subject.is_empty() {
+        lines.push(mk("subject", &r.metadata_subject));
+    }
+    if !r.metadata_author.is_empty() {
+        lines.push(mk("author", &r.metadata_author));
+    }
+    if !r.manual_overrides.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("manual: ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{} (M to edit, m to clear and re-request)",
+                    r.manual_overrides.join(", ")
+                ),
+                Style::new().fg(Color::Yellow),
+            ),
+        ]));
     }
     for d in &r.dependents {
         lines.push(Line::from(vec![
@@ -2101,6 +3021,11 @@ fn filter_matches_row(f: &Filter, r: &Row) -> bool {
     }
     if let Some(s) = &f.status {
         if r.status != *s {
+            return false;
+        }
+    }
+    if let Some(manual) = f.manual {
+        if r.manual_overrides.is_empty() == manual {
             return false;
         }
     }
@@ -2441,6 +3366,138 @@ mod tests {
         assert_eq!(p.cursor, 0);
         edit_test(&mut p, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(p.cursor, p.value.len());
+    }
+
+    #[test]
+    fn manual_filter_selects_overridden_and_plain_rows() {
+        let mut overridden = sample_row();
+        overridden.manual_overrides = vec!["subject".to_string()];
+        let plain = sample_row();
+        let manual = Filter {
+            manual: Some(true),
+            ..Default::default()
+        };
+        assert!(filter_matches_row(&manual, &overridden));
+        assert!(!filter_matches_row(&manual, &plain));
+        let auto = Filter {
+            manual: Some(false),
+            ..Default::default()
+        };
+        assert!(!filter_matches_row(&auto, &overridden));
+        assert!(filter_matches_row(&auto, &plain));
+        assert!(filter_matches_row(&Filter::default(), &overridden));
+        let label = row_label(&overridden, "/home/a", 0).to_string();
+        assert!(label.ends_with(" [manual]"), "{label}");
+    }
+
+    #[test]
+    fn scan_stage_rows_merge_heartbeats_and_advance() {
+        let mut app = App::new(
+            Client::new(1),
+            PathBuf::from("/home/a"),
+            false,
+            BTreeMap::new(),
+        );
+        app.push_scan_stage("walking".to_string(), None, 0, Some(10), 0);
+        app.push_scan_stage(
+            "walking".to_string(),
+            Some("sub".to_string()),
+            5,
+            Some(10),
+            1000,
+        );
+        assert_eq!(app.scan_stages.len(), 1);
+        assert_eq!(app.scan_stages[0].scanned, 5);
+        app.push_scan_stage("analyzing".to_string(), None, 1, None, 2000);
+        assert_eq!(app.scan_stages.len(), 2);
+        assert!(app.scan_stages[0].done);
+        assert!(!app.scan_stages[1].done);
+        // A phase that returns starts a fresh row rather than editing the
+        // older completed one.
+        app.push_scan_stage("walking".to_string(), None, 0, Some(2), 3000);
+        assert_eq!(app.scan_stages.len(), 3);
+        assert!(app.scan_stages[1].done);
+    }
+
+    #[test]
+    fn setting_values_are_typed_and_blank_clears() {
+        assert_eq!(
+            setting_value("scan.exclude_paths", "\n/home/a/b\n  /home/c  \n").unwrap(),
+            json!(["/home/a/b", "/home/c"])
+        );
+        assert_eq!(
+            setting_value("scan.exclude_paths", "   ").unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            setting_value("scan.exclude_extensions", "tmp, ,part").unwrap(),
+            json!(["tmp", "part"])
+        );
+        assert_eq!(
+            setting_value("document_extraction.pdf", "").unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            setting_value("document_extraction.pdf", "pdftotext -layout {path} -").unwrap(),
+            json!(["pdftotext", "-layout", "{path}", "-"])
+        );
+        assert_eq!(
+            setting_value("document_extraction.pdf", "-").unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            setting_value("geocoder.rate_limit_ms", " 250 ").unwrap(),
+            json!(250)
+        );
+        assert!(setting_value("geocoder.rate_limit_ms", "soon").is_err());
+        assert_eq!(
+            setting_value("target_paths.photo", " /p/%Y ").unwrap(),
+            json!("/p/%Y")
+        );
+        assert_eq!(
+            setting_value("geocoder.endpoint", "  ").unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn settings_form_reads_effective_config_and_writes_only_changes() {
+        let doc = json!({
+            "scan": {
+                "root": "/home/a",
+                "hidden": true,
+                "exclude_paths": ["/home/a/skip"],
+            },
+            "target_paths": {"photo": "/home/a/Photos"},
+            "geocoder": {"enabled": false, "rate_limit_ms": 1000},
+            "document_extraction": {"pdf": null, "docx": []},
+        });
+        let mut form = SettingsForm::from_config(&doc);
+        assert_eq!(setting_text(&doc, "scan.hidden"), "true");
+        assert_eq!(extraction_text(&doc, "docx"), "-");
+        let root = form.fields.iter().find(|f| f.path == "scan.root").unwrap();
+        assert_eq!(root.value, "/home/a");
+
+        let mut app = App::new(
+            Client::new(1),
+            PathBuf::from("/home/a"),
+            true,
+            BTreeMap::new(),
+        );
+        // Only the rate limit changes; unchanged fields stay out of the body.
+        for field in &mut form.fields {
+            if field.path == "geocoder.rate_limit_ms" {
+                field.value = "500".to_string();
+            }
+        }
+        app.settings = Some(form);
+        let body = app.settings_partial().unwrap();
+        assert_eq!(body["geocoder"]["rate_limit_ms"], json!(500));
+        assert_eq!(body["scan"]["root"], json!("/home/a"));
+        assert_eq!(body["scan"]["hidden"], json!(true));
+        assert!(body["target_paths"].get("photo").is_none());
+        assert!(body["scan"].get("exclude_paths").is_none());
+        assert!(body["document_extraction"].is_null());
     }
 
     fn edit_test(p: &mut Prompt, key: KeyEvent) {
