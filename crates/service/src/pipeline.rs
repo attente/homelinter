@@ -318,8 +318,15 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     });
 
     // Phase 2: analysis.
-    let files = scan.files.clone();
-    let repos = scan.repos.clone();
+    // Total files scanned comes from discovery, not analysis, which keeps
+    // only managed files (unmanaged files are never extracted or hashed).
+    // Capture the totals before moving the discovery vectors into the
+    // blocking analysis task: nothing else below needs them, so cloning a
+    // potentially large file list would be pure overhead.
+    let total_files = scan.files.len() as u64;
+    let total_symlinks = scan.symlinks.entries.len() as u64;
+    let files = scan.files;
+    let repos = scan.repos;
     let analyze_opts = AnalyzeOptions {
         large_file_threshold: threshold,
         toolset: ToolSet::detect(),
@@ -399,11 +406,6 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
         Err(e) => return fail(app.clone(), format!("suggestion task panicked: {e}")).await,
     };
 
-    // Total files scanned comes from discovery, not analysis, which keeps
-    // only managed files (unmanaged files are never extracted or hashed).
-    let total_files = scan.files.len() as u64;
-    let total_symlinks = scan.symlinks.entries.len() as u64;
-
     // Plan provider work before batch validation: suggestions whose unit
     // has outstanding provider requests are marked `metadata_pending` first
     // so validation defers them. Their destinations are built on fallback
@@ -444,25 +446,23 @@ pub async fn start_scan(app: AppHandle, root: PathBuf, cfg: RawConfig) {
     // suggestions are excluded (their destinations are provisional); every
     // rejection of the rest carries the machine-readable reason, which is
     // copied onto the suggestion so clients can show why it was rejected.
-    let rejected: Vec<RejectedId> = {
-        let mut pending_snapshot = suggestions.clone();
-        let ids = homelinter_suggest::validate_batch(&mut pending_snapshot, true);
-        ids.into_iter()
-            .filter_map(|id| pending_snapshot.iter().find(|s| s.id == id))
-            .filter_map(|s| {
-                s.rejection_reason.as_ref().map(|reason| RejectedId {
-                    id: s.id.clone(),
-                    reason: reason.clone(),
-                })
+    // Validation marks the rejected suggestions in place (and leaves the
+    // pending ones untouched), so the batch itself is the source of the
+    // published reasons: validating a deep copy of every suggestion just to
+    // copy the same reasons back would double the batch's memory churn.
+    let rejected_ids = homelinter_suggest::validate_batch(&mut suggestions, true);
+    let rejected_set: std::collections::HashSet<&str> =
+        rejected_ids.iter().map(String::as_str).collect();
+    let rejected: Vec<RejectedId> = suggestions
+        .iter()
+        .filter(|s| rejected_set.contains(s.id.as_str()))
+        .filter_map(|s| {
+            s.rejection_reason.as_ref().map(|reason| RejectedId {
+                id: s.id.clone(),
+                reason: reason.clone(),
             })
-            .collect()
-    };
-    for s in suggestions.iter_mut() {
-        if let Some(r) = rejected.iter().find(|r| r.id == s.id) {
-            s.status = SuggestionStatus::Rejected;
-            s.rejection_reason = Some(r.reason.clone());
-        }
-    }
+        })
+        .collect();
     if is_cancelled(&app, cancel_token) {
         return fail(app, "scan cancelled".into()).await;
     }

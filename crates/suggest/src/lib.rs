@@ -279,8 +279,8 @@ fn build_move_suggestion(
     // location-with-map, and metadata tabs). Only inserted when present. A
     // manual override replaces the provider or embedded value, so the pane
     // shows the value that actually shaped the destination.
-    let effective_location = f.overrides.location.clone().or_else(|| f.location.clone());
-    if let Some(loc) = &effective_location {
+    let effective_location = f.overrides.location.as_ref().or(f.location.as_ref());
+    if let Some(loc) = effective_location {
         metadata.insert("location".into(), serde_json::Value::String(loc.clone()));
     }
     if let Some(lat) = f.latitude {
@@ -299,18 +299,14 @@ fn build_move_suggestion(
     let effective_title = f
         .overrides
         .subject
-        .clone()
-        .or_else(|| f.embedded_title.clone())
-        .or_else(|| f.subject.clone());
-    if let Some(t) = &effective_title {
+        .as_ref()
+        .or(f.embedded_title.as_ref())
+        .or(f.subject.as_ref());
+    if let Some(t) = effective_title {
         metadata.insert("title".into(), serde_json::Value::String(t.clone()));
     }
-    let effective_author = f
-        .overrides
-        .author
-        .clone()
-        .or_else(|| f.embedded_author.clone());
-    if let Some(a) = &effective_author {
+    let effective_author = f.overrides.author.as_ref().or(f.embedded_author.as_ref());
+    if let Some(a) = effective_author {
         metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
     // A move re-verifies content when analysis recorded a full-content hash:
