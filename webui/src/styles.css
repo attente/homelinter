@@ -370,7 +370,7 @@ select optgroup {
 }
 
 /* Monospace is reserved for machine-readable content: file paths, code,
-   config documents, cache hashes, and the run log. */
+   config documents, and cache hashes. */
 .detail-path,
 .file-preview-text {
   font-family: var(--mono);
