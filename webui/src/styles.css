@@ -842,7 +842,7 @@ select optgroup {
   }
 }
 
-/* Fixed-width status column (`42%`, `done`, or blank while indeterminate),
+/* Fixed-width status column (`42%`, `100%`, or blank while indeterminate),
    so the descriptions after it align across rows. */
 .scan-stage-status {
   flex: 0 0 3.5em;
@@ -855,6 +855,18 @@ select optgroup {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--dim);
+}
+
+/* Every row reserves the cancel button's box, even the completed rows that do
+   not show one, so all rows share one height and the meters stay on rhythm. */
+.scan-stage-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.scan-stage-actions .slot {
+  visibility: hidden;
 }
 
 /* A completed row's full bar dims so the active row stays visually

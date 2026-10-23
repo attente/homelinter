@@ -17,11 +17,12 @@ interface ScanStagesProps {
  * is one row: the meter on the left, a fixed-width track identical in every
  * row so the bars align, and the phase's description on the right. Completed
  * rows stay on screen frozen at their last reported counts with a full bar
- * and a `done` marker; only the active row - the last one - carries the
- * cancel button, since cancelling is about the work still running. Before the
- * first event arrives the list opens with one indeterminate placeholder row,
- * so a scan never starts without a moving meter (see DESIGN.md
- * "GUI via SPA").
+ * labelled `100%`; only the active row - the last one - shows the cancel
+ * button, since cancelling is about the work still running, though every row
+ * reserves that button's box so completed rows are exactly as tall as the
+ * active one. Before the first event arrives the list opens with one
+ * indeterminate placeholder row, so a scan never starts without a moving
+ * meter (see DESIGN.md "GUI via SPA").
  */
 export function ScanStages({
   stages,
@@ -67,10 +68,10 @@ function StageRow({
   cancelDisabled: boolean;
   onCancel: () => void;
 }) {
-  // A completed row fills its bar and reads `done` even when the phase could
+  // A completed row fills its bar and reads `100%` even when the phase could
   // not know its total while running; the active row keeps the live fraction.
   const fraction = stage.complete ? 1 : scanProgressFraction(stage);
-  const percent = stage.complete ? null : scanProgressPercent(stage);
+  const percent = stage.complete ? 100 : scanProgressPercent(stage);
   return (
     <div className={stage.complete ? 'scan-stage done' : 'scan-stage'}>
       <div
@@ -89,23 +90,24 @@ function StageRow({
         />
       </div>
       <span className="scan-stage-status">
-        {stage.complete ? 'done' : percent != null ? `${percent}%` : ''}
+        {percent != null ? `${percent}%` : ''}
       </span>
       <span className="scan-stage-label">{scanProgressLabel(stage)}</span>
-      {active && (
-        <div className="toolbar">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={cancelDisabled}
-            title={
-              cancelDisabled ? 'nothing is in progress to cancel' : undefined
-            }
-          >
-            cancel
-          </button>
-        </div>
-      )}
+      <div className="scan-stage-actions">
+        <button
+          type="button"
+          className={active ? undefined : 'slot'}
+          onClick={onCancel}
+          disabled={!active || cancelDisabled}
+          tabIndex={active ? undefined : -1}
+          aria-hidden={active ? undefined : true}
+          title={
+            cancelDisabled ? 'nothing is in progress to cancel' : undefined
+          }
+        >
+          cancel
+        </button>
+      </div>
     </div>
   );
 }
