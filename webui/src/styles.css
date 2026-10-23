@@ -781,13 +781,21 @@ select optgroup {
   color: var(--dim);
 }
 
-/* Scan progress meter: the scanning view's bar fills to the phase's fraction
-   when the server reports a total, and slides a segment while the phase is
-   still discovering its length (the walks). */
-.scan-meter {
+/* Scanning view stage list: one row per scan phase. Completed rows stay
+   frozen at their last reported counts with a full bar and a `done` marker,
+   and only the active (last) row carries the cancel button. Every row
+   reserves the same meter width so the bars align down the list, with the
+   description to the right of its meter. */
+.scan-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scan-stage {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -834,9 +842,25 @@ select optgroup {
   }
 }
 
-.scan-meter-percent {
+/* Fixed-width status column (`42%`, `done`, or blank while indeterminate),
+   so the descriptions after it align across rows. */
+.scan-stage-status {
+  flex: 0 0 3.5em;
+  text-align: right;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
+}
+
+.scan-stage-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dim);
+}
+
+/* A completed row's full bar dims so the active row stays visually
+   dominant. */
+.scan-stage.done .scan-meter-fill {
+  opacity: 0.45;
 }
 
 .log {

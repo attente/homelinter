@@ -13,6 +13,7 @@ import {
 } from './filter';
 import {
   asciiOnly,
+  appendScanStage,
   cacheStatsLabel,
   scanProgressFraction,
   scanProgressLabel,
@@ -258,6 +259,97 @@ describe('format', () => {
     // meter has to stay indeterminate rather than invent a percentage.
     expect(scanProgressFraction({ scanned: 929280, total: null })).toBeNull();
     expect(scanProgressPercent({ scanned: 929280, total: null })).toBeNull();
+  });
+
+  it('folds scan progress events into persisted stage rows', () => {
+    // The first event opens the first row.
+    let rows = appendScanStage([], {
+      phase: 'discovery',
+      scanned: 1,
+      total: null,
+      detail: null,
+      elapsed_ms: 1000,
+    });
+    expect(rows).toEqual([
+      {
+        phase: 'discovery',
+        scanned: 1,
+        total: null,
+        detail: null,
+        elapsed_ms: 1000,
+        complete: false,
+      },
+    ]);
+    // The heartbeat's republication of the same phase updates the row in
+    // place instead of appending a duplicate stage.
+    rows = appendScanStage(rows, {
+      phase: 'discovery',
+      scanned: 7,
+      total: null,
+      detail: null,
+      elapsed_ms: 2000,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ phase: 'discovery', scanned: 7 });
+    // A new phase completes the previous row (frozen at its last counts) and
+    // appends the new active row at the end.
+    rows = appendScanStage(rows, {
+      phase: 'symlinks',
+      scanned: 3,
+      total: 3,
+      detail: null,
+      elapsed_ms: 3000,
+    });
+    expect(rows).toEqual([
+      {
+        phase: 'discovery',
+        scanned: 7,
+        total: null,
+        detail: null,
+        elapsed_ms: 2000,
+        complete: true,
+      },
+      {
+        phase: 'symlinks',
+        scanned: 3,
+        total: 3,
+        detail: null,
+        elapsed_ms: 3000,
+        complete: false,
+      },
+    ]);
+    // A phase returning after other phases ran in between starts a new row;
+    // only the last row is active, every row before it is complete.
+    rows = appendScanStage(rows, {
+      phase: 'metadata',
+      scanned: 10,
+      total: 10,
+      detail: 'exiftool',
+      elapsed_ms: 4000,
+    });
+    rows = appendScanStage(rows, {
+      phase: 'hashing',
+      scanned: 1,
+      total: 1,
+      detail: null,
+      elapsed_ms: 5000,
+    });
+    rows = appendScanStage(rows, {
+      phase: 'metadata',
+      scanned: 10,
+      total: 10,
+      detail: null,
+      elapsed_ms: 6000,
+    });
+    expect(rows.map((r) => r.phase)).toEqual([
+      'discovery',
+      'symlinks',
+      'metadata',
+      'hashing',
+      'metadata',
+    ]);
+    expect(rows.slice(0, -1).every((r) => r.complete)).toBe(true);
+    expect(rows[rows.length - 1].complete).toBe(false);
   });
 
   it('labels the filter-row suggestion counts', () => {

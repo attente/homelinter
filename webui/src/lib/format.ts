@@ -1,7 +1,7 @@
 // Display formatting helpers shared by components. ASCII only, matching
 // the house style and the TUI's rendering conventions.
 
-import type { ReportEntry, Suggestion } from '../types';
+import type { ReportEntry, ScanProgress, ScanStage, Suggestion } from '../types';
 
 /**
  * A path as shown in a suggestion row: made relative to the scan root when
@@ -196,6 +196,31 @@ export function scanProgressPercent(p: {
 }): number | null {
   const fraction = scanProgressFraction(p);
   return fraction == null ? null : Math.round(fraction * 100);
+}
+
+/**
+ * Fold one `scan.progress` event into the scanning view's stage list. Stages
+ * are identified by phase name only: an event for the phase already in the
+ * last row updates that row in place (the service re-publishes the last phase
+ * on its heartbeat, so equal consecutive phases are continuation, not a new
+ * stage), and an event for a new phase marks the previous row complete - the
+ * service sends no per-phase completion event, so completion is inferred
+ * from the transition - and appends the new active row at the end. A phase
+ * returning after other phases ran in between (metadata extraction,
+ * repository scans, and the hashing pass all run inside one analysis loop)
+ * starts a new row.
+ */
+export function appendScanStage(
+  rows: ScanStage[],
+  event: ScanProgress,
+): ScanStage[] {
+  const active: ScanStage = { ...event, complete: false };
+  const last = rows[rows.length - 1];
+  if (last && last.phase === event.phase) {
+    return [...rows.slice(0, -1), active];
+  }
+  if (!last) return [active];
+  return [...rows.slice(0, -1), { ...last, complete: true }, active];
 }
 
 export function stateLabel(state: string): string {

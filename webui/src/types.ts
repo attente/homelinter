@@ -144,6 +144,13 @@ export interface ScanProgress {
   elapsed_ms: number;
 }
 
+/** One persisted row in the scanning view's stage list: a `scan.progress`
+ * phase with its last reported counts. A row is marked complete when a later
+ * phase starts, because the service sends no per-phase completion event. */
+export interface ScanStage extends ScanProgress {
+  complete: boolean;
+}
+
 /** Progress of outstanding provider metadata requests: `completed`
  * suggestions have had every request resolve, over `total` suggestions
  * that originally had any. `total` is 0 when the batch has none. */

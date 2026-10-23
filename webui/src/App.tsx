@@ -5,7 +5,7 @@ import { ConfigView } from "./components/ConfigView";
 import { Header } from "./components/Header";
 import { RunView } from "./components/RunView";
 import { ScanForm, ScanFormValues } from "./components/ScanForm";
-import { ScanMeter } from "./components/ScanMeter";
+import { ScanStages } from "./components/ScanStages";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText } from "./lib/download";
@@ -17,15 +17,16 @@ import {
   mergeSuggestionEvents,
 } from "./lib/filter";
 import {
+  appendScanStage,
   metadataProgressLabel,
   opLine,
-  scanProgressLabel,
   stateLabel,
 } from "./lib/format";
 import type {
   ExecutionReport,
   MetadataProgress,
   ScanProgress,
+  ScanStage,
   Session,
   SseEvent,
   Suggestion,
@@ -44,7 +45,7 @@ interface AppState {
    *  not contain every kind, so this comes from the report summary. */
   kinds: string[];
   filter: Filter;
-  progress: ScanProgress | null;
+  stages: ScanStage[];
   metadataProgress: MetadataProgress | null;
   runLog: string[];
   report: ExecutionReport | null;
@@ -86,7 +87,7 @@ export default function App() {
     suggestionsTotal: 0,
     kinds: [],
     filter: initialFilter(),
-    progress: null,
+    stages: [],
     metadataProgress: null,
     runLog: [],
     report: null,
@@ -293,7 +294,7 @@ export default function App() {
         phase: "scanning",
         showScanForm: false,
         suggestions: [],
-        progress: null,
+        stages: [],
         metadataProgress: null,
         report: null,
         runLog: [],
@@ -352,17 +353,17 @@ export default function App() {
         case "scan.progress":
           // A scan in flight is never hidden behind the scan setup form: a
           // window opened or reloaded mid-scan (or a scan started by another
-          // client) moves to the progress view, which carries the live phase
-          // line and the cancel button.
+          // client) moves to the progress view, which carries the live stage
+          // list and the cancel button.
           setSt((prev) => ({
             ...prev,
-            progress: d as unknown as ScanProgress,
+            stages: appendScanStage(prev.stages, d as unknown as ScanProgress),
             phase: prev.phase === "idle" ? "scanning" : prev.phase,
             showScanForm: false,
           }));
           break;
         case "scan.complete":
-          setSt((prev) => ({ ...prev, progress: null }));
+          setSt((prev) => ({ ...prev, stages: [] }));
           // If the user is on the scan setup page, the completed scan was
           // started elsewhere; leave them where they are. The new batch is
           // already applied via suggestion.batch and waiting on resume.
@@ -509,7 +510,7 @@ export default function App() {
         ...prev,
         phase: "idle",
         showScanForm: true,
-        progress: null,
+        stages: [],
         metadataProgress: null,
       }));
     }
@@ -895,27 +896,15 @@ export default function App() {
       <main className="run-view">
         <div className="run-status">
           <span className="state-busy">{stateLabel(state)} ...</span>
-          <ScanMeter progress={st.progress} />
         </div>
-        <div className="run-status">
-          {st.progress && (
-            <span className="progress-line">
-              {scanProgressLabel(st.progress)}
-            </span>
-          )}
-          {metadataLabel && (
-            <span className="progress-line">{metadataLabel}</span>
-          )}
-          <div className="toolbar">
-            <button
-              type="button"
-              onClick={() => void cancel()}
-              disabled={!canCancel}
-            >
-              cancel
-            </button>
-          </div>
-        </div>
+        <ScanStages
+          stages={st.stages}
+          cancelDisabled={!canCancel}
+          onCancel={() => void cancel()}
+        />
+        {metadataLabel && (
+          <span className="progress-line">{metadataLabel}</span>
+        )}
       </main>
     );
   } else if (st.phase === "running" || st.phase === "report") {
