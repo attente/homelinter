@@ -675,6 +675,7 @@ export function Browse(props: BrowseProps) {
   // per keystroke; committed values drive the page fetch and the URL.
   const [pathDraft, setPathDraft] = useState(filter.path ?? '');
   const pathTimerRef = useRef<number | undefined>(undefined);
+  const pathInputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     // External filter changes (reset, badge, URL sync) resync the draft and
     // cancel any pending keystroke commit.
@@ -773,18 +774,35 @@ export function Browse(props: BrowseProps) {
     <main className="browse">
       <div className="toolbar-row">
         <div className="filters">
-          <input
-            className="filter-input"
-            type="text"
-            aria-label="path filter"
-            placeholder="filter by path"
-            title="Match the source, destination, or duplicate-keeper path; case-insensitive substring"
-            value={pathDraft}
-            onChange={(e) => scheduleCommitPath(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') clearPathFilter();
-            }}
-          />
+          <div className="filter-input-wrap">
+            <input
+              ref={pathInputRef}
+              className="filter-input"
+              type="text"
+              aria-label="path filter"
+              placeholder="filter by path"
+              title="Match the source, destination, or duplicate-keeper path; case-insensitive substring"
+              value={pathDraft}
+              onChange={(e) => scheduleCommitPath(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') clearPathFilter();
+              }}
+            />
+            {pathDraft !== '' && (
+              <button
+                type="button"
+                className="filter-input-clear"
+                aria-label="clear path filter"
+                title="clear path filter"
+                onClick={() => {
+                  clearPathFilter();
+                  pathInputRef.current?.focus();
+                }}
+              >
+                <CloseIcon />
+              </button>
+            )}
+          </div>
           <select
             className="filter-select"
             aria-label="type filter"

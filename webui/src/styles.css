@@ -316,10 +316,48 @@ select optgroup {
 }
 
 /* The path filter input sits with the selects; a modest width keeps the
-   toolbar compact while still fitting typical path fragments. */
-.filter-input {
+   toolbar compact while still fitting typical path fragments. The wrapper
+   carries the width so the input can leave room for the clear button. */
+.filter-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
   width: 180px;
+}
+
+.filter-input {
+  width: 100%;
   font-size: 12px;
+  /* Keep typed text clear of the overlaid clear button. */
+  padding-right: 26px;
+}
+
+/* Clear button overlaid at the input's trailing edge; it only renders when
+   the input has text. */
+.filter-input-clear {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--dim);
+}
+
+.filter-input-clear:hover:not(:disabled) {
+  border: none;
+  color: var(--accent);
+}
+
+.filter-input-clear svg {
+  display: block;
 }
 
 .sep {
