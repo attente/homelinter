@@ -782,8 +782,9 @@ select optgroup {
 }
 
 /* Scanning view stage list: one row per scan phase. Completed rows stay
-   frozen at their last reported counts with a full bar and a `done` marker,
-   and only the active (last) row carries the cancel button. Every row
+   frozen at their last reported counts with a full bar and a `100%` label.
+   The cancel button is not in the list: it sits once in the scanning header
+   beside the `scanning ...` label, so every row is the same height. Every row
    reserves the same meter width so the bars align down the list, with the
    description to the right of its meter. */
 .scan-stages {
@@ -855,18 +856,6 @@ select optgroup {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--dim);
-}
-
-/* Every row reserves the cancel button's box, even the completed rows that do
-   not show one, so all rows share one height and the meters stay on rhythm. */
-.scan-stage-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-}
-
-.scan-stage-actions .slot {
-  visibility: hidden;
 }
 
 /* A completed row's full bar dims so the active row stays visually

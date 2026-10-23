@@ -8,8 +8,6 @@ import type { ScanStage } from '../types';
 interface ScanStagesProps {
   /** Stage rows accumulated from `scan.progress` events; may be empty. */
   stages: ScanStage[];
-  cancelDisabled: boolean;
-  onCancel: () => void;
 }
 
 /**
@@ -17,18 +15,13 @@ interface ScanStagesProps {
  * is one row: the meter on the left, a fixed-width track identical in every
  * row so the bars align, and the phase's description on the right. Completed
  * rows stay on screen frozen at their last reported counts with a full bar
- * labelled `100%`; only the active row - the last one - shows the cancel
- * button, since cancelling is about the work still running, though every row
- * reserves that button's box so completed rows are exactly as tall as the
- * active one. Before the first event arrives the list opens with one
- * indeterminate placeholder row, so a scan never starts without a moving
- * meter (see DESIGN.md "GUI via SPA").
+ * labelled `100%`. The cancel button is not part of the list: it lives once,
+ * in the scanning header beside the `scanning ...` label, so no row needs a
+ * reserved button slot and every row is the same height. Before the first
+ * event arrives the list opens with one indeterminate placeholder row, so a
+ * scan never starts without a moving meter (see DESIGN.md "GUI via SPA").
  */
-export function ScanStages({
-  stages,
-  cancelDisabled,
-  onCancel,
-}: ScanStagesProps) {
+export function ScanStages({ stages }: ScanStagesProps) {
   return (
     <div className="scan-stages">
       {stages.length === 0 && (
@@ -45,29 +38,13 @@ export function ScanStages({
         </div>
       )}
       {stages.map((stage, i) => (
-        <StageRow
-          key={i}
-          stage={stage}
-          active={i === stages.length - 1}
-          cancelDisabled={cancelDisabled}
-          onCancel={onCancel}
-        />
+        <StageRow key={i} stage={stage} />
       ))}
     </div>
   );
 }
 
-function StageRow({
-  stage,
-  active,
-  cancelDisabled,
-  onCancel,
-}: {
-  stage: ScanStage;
-  active: boolean;
-  cancelDisabled: boolean;
-  onCancel: () => void;
-}) {
+function StageRow({ stage }: { stage: ScanStage }) {
   // A completed row fills its bar and reads `100%` even when the phase could
   // not know its total while running; the active row keeps the live fraction.
   const fraction = stage.complete ? 1 : scanProgressFraction(stage);
@@ -93,21 +70,6 @@ function StageRow({
         {percent != null ? `${percent}%` : ''}
       </span>
       <span className="scan-stage-label">{scanProgressLabel(stage)}</span>
-      <div className="scan-stage-actions">
-        <button
-          type="button"
-          className={active ? undefined : 'slot'}
-          onClick={onCancel}
-          disabled={!active || cancelDisabled}
-          tabIndex={active ? undefined : -1}
-          aria-hidden={active ? undefined : true}
-          title={
-            cancelDisabled ? 'nothing is in progress to cancel' : undefined
-          }
-        >
-          cancel
-        </button>
-      </div>
     </div>
   );
 }

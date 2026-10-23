@@ -896,12 +896,20 @@ export default function App() {
       <main className="run-view">
         <div className="run-status">
           <span className="state-busy">{stateLabel(state)} ...</span>
+          <div className="toolbar">
+            <button
+              type="button"
+              onClick={() => void cancel()}
+              disabled={!canCancel}
+              title={
+                canCancel ? undefined : 'nothing is in progress to cancel'
+              }
+            >
+              cancel
+            </button>
+          </div>
         </div>
-        <ScanStages
-          stages={st.stages}
-          cancelDisabled={!canCancel}
-          onCancel={() => void cancel()}
-        />
+        <ScanStages stages={st.stages} />
         {metadataLabel && (
           <span className="progress-line">{metadataLabel}</span>
         )}
