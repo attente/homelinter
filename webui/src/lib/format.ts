@@ -47,20 +47,54 @@ function fileName(path: string): string {
   return part && part.length > 0 ? part : path;
 }
 
-/** The action sentence for a suggestion: `move <path> to <path>` for moves
- *  and `delete <path>, duplicate of <path>` for duplicate deletes (the
- *  retained keeper read from the suggestion's `duplicate_of` metadata),
- *  shared by the browse rows and the run view's execution list. */
-export function actionLabel(s: Suggestion, root?: string | null): string {
+/** One display piece of an action sentence: a connecting word, or a path
+ *  that the run list renders in the monospace stack. */
+export interface ActionPart {
+  kind: 'text' | 'path';
+  text: string;
+}
+
+/** The action sentence for a suggestion as display parts: `move <path> to
+ *  <path>` for moves and `delete <path>, duplicate of <path>` for duplicate
+ *  deletes (the retained keeper read from the suggestion's
+ *  `duplicate_of` metadata). The parts let the run view keep the words in the
+ *  UI typeface while the paths carry the monospace stack. */
+export function actionLabelParts(
+  s: Suggestion,
+  root?: string | null,
+): ActionPart[] {
   const name = pathLabel(s.target, root);
   if (s.type === 'delete') {
     const dupOf = s.metadata?.duplicate_of;
-    return typeof dupOf === 'string' && dupOf.length > 0
-      ? `delete ${name}, duplicate of ${pathLabel(dupOf, root)}`
-      : `delete ${name}`;
+    if (typeof dupOf === 'string' && dupOf.length > 0) {
+      return [
+        { kind: 'text', text: 'delete ' },
+        { kind: 'path', text: name },
+        { kind: 'text', text: ', duplicate of ' },
+        { kind: 'path', text: pathLabel(dupOf, root) },
+      ];
+    }
+    return [
+      { kind: 'text', text: 'delete ' },
+      { kind: 'path', text: name },
+    ];
   }
-  const dest = s.new_path ? pathLabel(s.new_path, root) : '?';
-  return `move ${name} to ${dest}`;
+  return [
+    { kind: 'text', text: 'move ' },
+    { kind: 'path', text: name },
+    { kind: 'text', text: ' to ' },
+    { kind: 'path', text: s.new_path ? pathLabel(s.new_path, root) : '?' },
+  ];
+}
+
+/** The action sentence as one string, shared by the browse rows. */
+export function actionLabel(s: Suggestion, root?: string | null): string {
+  return actionText(actionLabelParts(s, root));
+}
+
+/** Join action parts back into their plain sentence (titles, test labels). */
+export function actionText(parts: readonly ActionPart[]): string {
+  return parts.map((p) => p.text).join('');
 }
 
 export function rowLabel(s: Suggestion, root?: string | null): string {

@@ -3,7 +3,7 @@
 // events and the final execution report.
 
 import type { EntryResult, ExecutionOp, ReportEntry, Suggestion } from '../types';
-import { actionLabel } from './format';
+import { actionLabelParts, type ActionPart } from './format';
 
 export type RunItemStatus = 'pending' | 'running' | EntryResult;
 
@@ -18,9 +18,10 @@ export interface RunItemOp {
 
 export interface RunItem {
   id: string;
-  /** Action sentence, e.g. `move a.jpg to photos/2024/a.jpg` or
-   *  `delete b.jpg, duplicate of c.jpg`. */
-  label: string;
+  /** Action sentence as display parts: the connecting words stay in the UI
+   *  typeface, the paths render in the monospace stack. For a suggestion
+   *  whose record is not fetched yet, the single part is its id. */
+  parts: ActionPart[];
   status: RunItemStatus;
   /** Operations streamed so far; drives the derived result when the run
    *  moves past this suggestion. */
@@ -79,7 +80,7 @@ export function buildRunState(
   });
   const items: RunItem[] = records.map((r) => ({
     id: r.id,
-    label: r.s ? actionLabel(r.s, root) : r.id,
+    parts: r.s ? actionLabelParts(r.s, root) : [{ kind: 'text', text: r.id }],
     status: 'pending',
     ops: [],
   }));

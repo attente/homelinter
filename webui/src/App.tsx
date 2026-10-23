@@ -17,7 +17,7 @@ import {
   mergeSuggestionEvents,
 } from "./lib/filter";
 import {
-  actionLabel,
+  actionLabelParts,
   appendScanStage,
   countsOf,
   countsSummary,
@@ -398,7 +398,7 @@ export default function App() {
                 ...prev.run,
                 items: prev.run.items.map((it) => {
                   const s = fetched.get(it.id);
-                  return s ? { ...it, label: actionLabel(s, root) } : it;
+                  return s ? { ...it, parts: actionLabelParts(s, root) } : it;
                 }),
               }
             : prev.run,

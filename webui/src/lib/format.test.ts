@@ -22,6 +22,8 @@ import {
   countsOf,
   countsSummary,
   actionLabel,
+  actionLabelParts,
+  actionText,
   manualOverrideLabel,
   metadataProgressLabel,
   pathLabel,
@@ -465,6 +467,27 @@ describe('format', () => {
     expect(
       actionLabel(sampleSuggestion({ type: 'delete', new_path: null }), root),
     ).toBe('delete IMG_1.jpg');
+  });
+
+  it('action parts split words from paths for the run list', () => {
+    const parts = actionLabelParts(sampleSuggestion(), '/home/a');
+    expect(parts).toEqual([
+      { kind: 'text', text: 'move ' },
+      { kind: 'path', text: 'IMG_1.jpg' },
+      { kind: 'text', text: ' to ' },
+      { kind: 'path', text: 'Pictures/2024/IMG_1.jpg' },
+    ]);
+    expect(actionText(parts)).toBe(actionLabel(sampleSuggestion(), '/home/a'));
+    expect(
+      actionLabelParts(
+        sampleSuggestion({
+          type: 'delete',
+          new_path: null,
+          metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
+        }),
+        '/home/a',
+      ).map((p) => p.kind),
+    ).toEqual(['text', 'path', 'text', 'path']);
   });
 
   it('counts and entry lines render reports', () => {

@@ -1,8 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { countsSummary, stateLabel } from '../lib/format';
-import { isFinal, type RunState } from '../lib/run';
-import type { ExecutionReport } from '../types';
+import { actionText, countsSummary, stateLabel } from '../lib/format';
+import { isFinal, type RunState } from '../lib/run';import type { ExecutionReport } from '../types';
 import { BackIcon } from './BackIcon';
 
 interface RunViewProps {
@@ -137,8 +136,16 @@ export function RunView(props: RunViewProps) {
                   }}
                 >
                   <span className="run-item-status">{status}</span>
-                  <span className="run-item-label" title={item.label}>
-                    {item.label}
+                  <span className="run-item-label" title={actionText(item.parts)}>
+                    {item.parts.map((p, i) =>
+                      p.kind === 'path' ? (
+                        <span key={i} className="run-path">
+                          {p.text}
+                        </span>
+                      ) : (
+                        p.text
+                      ),
+                    )}
                   </span>
                 </li>
               );

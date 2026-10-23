@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { actionText } from './format';
 import {
   applyExecutionOp,
   applyReport,
@@ -58,8 +59,17 @@ describe('buildRunState', () => {
       ['m-1', suggestion({ id: 'm-1', target: '/r/a.jpg' })] as const,
     ]);
     const run = buildRunState(['m-1', 'x-9'], known, '/r');
-    expect(run.items[0].label).toBe('move a.jpg to Pictures/IMG_1.jpg');
-    expect(run.items[1].label).toBe('x-9');
+    expect(actionText(run.items[0].parts)).toBe(
+      'move a.jpg to Pictures/IMG_1.jpg',
+    );
+    expect(run.items[0].parts.map((p) => p.kind)).toEqual([
+      'text',
+      'path',
+      'text',
+      'path',
+    ]);
+    expect(actionText(run.items[1].parts)).toBe('x-9');
+    expect(run.items[1].parts).toEqual([{ kind: 'text', text: 'x-9' }]);
   });
 });
 

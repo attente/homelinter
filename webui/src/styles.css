@@ -924,6 +924,14 @@ select optgroup {
   text-overflow: ellipsis;
 }
 
+/* Paths inside an action sentence carry the monospace stack, like the detail
+   preview's paths; the connecting words stay in the UI typeface. Inline spans
+   keep the container's nowrap/ellipsis truncation working. */
+.run-path {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 /* Rows that nothing happened to stay dim; the active row carries the accent;
    finished rows get a status word in the palette colour of its outcome. */
 .run-item.status-pending,
