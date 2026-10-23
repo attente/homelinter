@@ -6,12 +6,14 @@
 //! outstanding provider requests are published immediately with
 //! `metadata_pending = true`: the user sees the full scan result at once,
 //! but a pending suggestion is not executable until every request it
-//! depends on resolves. A single background worker drains the queue and
-//! fetches requests serially per provider, paced by the provider's own
-//! minimum interval ("Geocoder rate limiting and identification" in
-//! DESIGN.md: nominatim once per second, photon its documented rate). The
-//! persistent cache is consulted before any network I/O and successes are
-//! stored in it afterward. When the last outstanding request of a unit
+//! depends on resolves. A single background worker drains the queue, but it
+//! answers every job from the persistent cache first: a hit resolves its
+//! unit immediately and occupies no provider slot, while only a miss waits
+//! for one of `provider_concurrency` provider slots and is paced by the
+//! provider's own minimum interval ("Geocoder rate limiting and
+//! identification" in DESIGN.md: nominatim once per second, photon its
+//! documented rate). Successes are stored in the cache afterward. When the
+//! last outstanding request of a unit
 //! resolves - on success or on definitive failure - the suggestion is
 //! updated in place: successes overlay their values into the rebuilt move,
 //! failures keep the generated fallbacks, and `metadata_pending` flips to
@@ -298,58 +300,141 @@ pub fn spawn(app: AppHandle) {
     tokio::spawn(run_provider_worker(app));
 }
 
-/// The background request loop. Up to `provider_concurrency` requests run
-/// at a time (default one), paced per provider, cache-first,
-/// failure-tolerant, session-applying on success. It pulls only as many jobs
-/// as it can run, so a priority refresh can overtake queued scan work as soon
-/// as an in-flight request frees a slot.
+/// One queued job's outcome from the cache probe.
+enum Probe {
+    /// The persistent cache answered the request; the value resolves the
+    /// unit without any provider call.
+    Hit(String),
+    /// The request needs a provider call: a cache miss, or a forced
+    /// re-request that deliberately ignores the cached value.
+    Miss,
+    /// The scan that planned this job has been superseded; drop it without
+    /// touching the session or the cache.
+    Stale,
+}
+
+/// The background request loop. Every queued job is probed against the
+/// persistent cache before anything else: a hit resolves its unit
+/// immediately, so cache hits never wait on provider pacing or on a
+/// provider slot, while only misses run concurrently (up to
+/// `provider_concurrency`, default one) and are paced per provider. With a
+/// concurrency of one the only serial work is therefore the misses
+/// themselves. Priority re-requests overtake queued scan work in both
+/// phases, so a refresh starts as soon as a slot frees rather than behind a
+/// whole scan batch.
 pub async fn run_provider_worker(app: AppHandle) {
     let queue = app.provider_queue.clone();
     let last_start = Arc::new(Mutex::new(BTreeMap::<String, Instant>::new()));
     let mut running = tokio::task::JoinSet::new();
+    // Misses waiting for a provider slot. Forced re-requests are kept apart
+    // so they still go ahead of queued scan work.
+    let mut priority_misses: VecDeque<ProviderJob> = VecDeque::new();
+    let mut misses: VecDeque<ProviderJob> = VecDeque::new();
     // Tool availability for document-text defaults; detected once per
     // worker lifetime, exactly like the scan pipeline's ToolSet.
     let tools = ToolSet::detect();
     loop {
         // Re-read so a config change takes effect without a service restart.
         let concurrency = provider_concurrency(&app).await;
-        while running.len() < concurrency {
-            let Some(job) = queue.try_dequeue() else {
-                break;
-            };
-            spawn_provider_job(
+        // Probe every queued job. A probe is a local cache read, so it needs
+        // neither a provider slot nor a pace wait, and a hit resolves its
+        // unit right away. A miss hands the job to a provider slot, filled
+        // here as misses accumulate so an early miss does not wait for the
+        // rest of the queue to be probed.
+        while let Some(job) = queue.try_dequeue() {
+            probe_and_dispatch(&app, job, &mut priority_misses, &mut misses).await;
+            fill_provider_slots(
                 &mut running,
-                app.clone(),
-                tools.clone(),
-                last_start.clone(),
-                job,
+                &app,
+                &tools,
+                &last_start,
+                &mut priority_misses,
+                &mut misses,
+                concurrency,
             );
         }
+        fill_provider_slots(
+            &mut running,
+            &app,
+            &tools,
+            &last_start,
+            &mut priority_misses,
+            &mut misses,
+            concurrency,
+        );
 
         if running.is_empty() {
+            // Nothing in flight and nothing pending: wait for the next job.
             let job = queue.dequeue_ready().await;
-            spawn_provider_job(
-                &mut running,
-                app.clone(),
-                tools.clone(),
-                last_start.clone(),
-                job,
-            );
+            probe_and_dispatch(&app, job, &mut priority_misses, &mut misses).await;
             continue;
         }
 
         tokio::select! {
             Some(_) = running.join_next() => {}
-            job = queue.dequeue_ready(), if running.len() < concurrency => {
-                spawn_provider_job(
-                    &mut running,
-                    app.clone(),
-                    tools.clone(),
-                    last_start.clone(),
-                    job,
-                );
+            job = queue.dequeue_ready() => {
+                probe_and_dispatch(&app, job, &mut priority_misses, &mut misses).await;
             }
         }
+    }
+}
+
+/// Probe one dequeued job and route it: a hit resolves its unit now, a miss
+/// waits in the matching queue for a provider slot, and a stale job is
+/// dropped.
+async fn probe_and_dispatch(
+    app: &AppHandle,
+    job: ProviderJob,
+    priority_misses: &mut VecDeque<ProviderJob>,
+    misses: &mut VecDeque<ProviderJob>,
+) {
+    match probe_job(app, &job).await {
+        Probe::Hit(value) => {
+            resolve_provider_job(app, &job, Some(&value)).await;
+        }
+        Probe::Miss if job.force => priority_misses.push_back(job),
+        Probe::Miss => misses.push_back(job),
+        Probe::Stale => {}
+    }
+}
+
+/// Consult the persistent cache for one job without pacing or a provider
+/// slot. Records the batch's hit/miss counters: a forced re-request ignores
+/// the cache by design, so it is reported as neither.
+async fn probe_job(app: &App, job: &ProviderJob) -> Probe {
+    if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
+        return Probe::Stale;
+    }
+    if job.force {
+        return Probe::Miss;
+    }
+    match cache_get(app, job).await {
+        Some(v) => {
+            app.cache_stats.record_hit();
+            Probe::Hit(v)
+        }
+        None => {
+            app.cache_stats.record_miss();
+            Probe::Miss
+        }
+    }
+}
+
+/// Start misses in free provider slots, priority re-requests first.
+fn fill_provider_slots(
+    running: &mut tokio::task::JoinSet<()>,
+    app: &AppHandle,
+    tools: &ToolSet,
+    last_start: &Arc<Mutex<BTreeMap<String, Instant>>>,
+    priority_misses: &mut VecDeque<ProviderJob>,
+    misses: &mut VecDeque<ProviderJob>,
+    concurrency: usize,
+) {
+    while running.len() < concurrency {
+        let Some(job) = priority_misses.pop_front().or_else(|| misses.pop_front()) else {
+            break;
+        };
+        spawn_provider_job(running, app.clone(), tools.clone(), last_start.clone(), job);
     }
 }
 
@@ -362,21 +447,23 @@ fn spawn_provider_job(
 ) {
     running.spawn(async move {
         if job.unit.epoch != app.provider_epoch.load(Ordering::SeqCst) {
-            // The scan that produced this job has been superseded.
+            // The scan that produced this job has been superseded while the
+            // job waited for a slot.
             return;
         }
-        let value = process_provider_job(&app, &job, &tools, &last_start).await;
+        let value = run_provider_request(&app, &job, &tools, &last_start).await;
         // Both outcomes resolve the unit's pending request: success overlays
         // the value, failure publishes the fallback.
         resolve_provider_job(&app, &job, value.as_deref()).await;
     });
 }
 
-/// Run one provider job to completion: pace, cache-first fetch (extracting
-/// document text only on a miss), invoke under the configured timeout, and
-/// cache a success. Returns the resolved value, or `None` on a miss that
-/// failed or timed out (not cached, retried on the next scan).
-async fn process_provider_job(
+/// Run one cache-missed provider request to completion: pace, materialize
+/// the provider input (extracting document text only here, on a miss),
+/// invoke under the configured timeout, and cache a success. Returns the
+/// resolved value, or `None` on a failure or timeout (not cached, retried on
+/// the next scan).
+async fn run_provider_request(
     app: &App,
     job: &ProviderJob,
     tools: &ToolSet,
@@ -386,58 +473,38 @@ async fn process_provider_job(
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
-    let cached = if job.force {
-        None
-    } else {
-        cache_get(app, job).await
-    };
-    // A forced re-request deliberately ignores the cached value, so it is
-    // reported as neither a hit nor a miss.
-    if !job.force {
-        if cached.is_some() {
-            app.cache_stats.record_hit();
-        } else {
-            app.cache_stats.record_miss();
-        }
-    }
-    match cached {
-        Some(v) => Some(v),
-        None => {
-            // Cache miss: fetch the provider input first (document text
-            // extraction runs off the async runtime, and only when a
-            // provider call is actually needed), then call.
-            let job = prepare_provider_job(app, job, tools).await;
-            // A vision request costs roughly one inference per image, so the
-            // provider timeout scales with the number of frames sent; a
-            // photo or a text job stays at the configured value. The frame
-            // count is known only after preparation, which is why the scale
-            // is applied here rather than in the planner.
-            let timeout = provider_timeout_for_job(provider_timeout(app).await, &job.input);
-            match tokio::time::timeout(timeout, invoke(&job)).await {
-                Ok(Ok(v)) => {
-                    // A vision job that produced no pixels (a video whose
-                    // frame extraction failed) must not be cached under the
-                    // vision key, or installing `ffmpeg` later would still
-                    // reuse the text-only result.
-                    if !vision_without_pixels(&job.input) {
-                        // Geocode results already resolve the structured
-                        // locality; the value is cached as-is and rendered
-                        // into `%l`. A forced re-request overwrites the
-                        // entry; ordinary inserts stay write-once.
-                        if job.force {
-                            cache_replace(app, &job, &v).await;
-                        } else {
-                            cache_put(app, &job, &v).await;
-                        }
-                    }
-                    Some(v)
+    // Cache miss: fetch the provider input first (document text extraction
+    // runs off the async runtime, and only when a provider call is actually
+    // needed), then call.
+    let job = prepare_provider_job(app, job, tools).await;
+    // A vision request costs roughly one inference per image, so the provider
+    // timeout scales with the number of frames sent; a photo or a text job
+    // stays at the configured value. The frame count is known only after
+    // preparation, which is why the scale is applied here rather than in the
+    // planner.
+    let timeout = provider_timeout_for_job(provider_timeout(app).await, &job.input);
+    match tokio::time::timeout(timeout, invoke(&job)).await {
+        Ok(Ok(v)) => {
+            // A vision job that produced no pixels (a video whose frame
+            // extraction failed) must not be cached under the vision key, or
+            // installing `ffmpeg` later would still reuse the text-only
+            // result.
+            if !vision_without_pixels(&job.input) {
+                // Geocode results already resolve the structured locality;
+                // the value is cached as-is and rendered into `%l`. A forced
+                // re-request overwrites the entry; ordinary inserts stay
+                // write-once.
+                if job.force {
+                    cache_replace(app, &job, &v).await;
+                } else {
+                    cache_put(app, &job, &v).await;
                 }
-                // Failure or timeout: not cached, the pending suggestion
-                // stays published with its fallbacks, retried on the next
-                // scan.
-                Ok(Err(_)) | Err(_) => None,
             }
+            Some(v)
         }
+        // Failure or timeout: not cached, the pending suggestion stays
+        // published with its fallbacks, retried on the next scan.
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
@@ -2710,6 +2777,13 @@ mod tests {
     /// request. `%l` is omitted and `%s` uses the filename stem until a
     /// provider result overlays it.
     async fn primed_app_with_format(format: &str) -> (AppHandle, u64) {
+        primed_app_with_units(format, 1).await
+    }
+
+    /// The same with `n` photos (`IMG_0001.jpg` onward), each with one
+    /// outstanding provider request, so a test can keep one unit's request in
+    /// flight while another unit resolves from the cache.
+    async fn primed_app_with_units(format: &str, n: usize) -> (AppHandle, u64) {
         let dir = tmp_dir("app");
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -2723,9 +2797,6 @@ mod tests {
         let epoch = 1u64;
         app.provider_epoch.store(epoch, Ordering::SeqCst);
 
-        let photo = home.join("IMG_0001.jpg");
-        std::fs::write(&photo, b"photo bytes").unwrap();
-
         // A real unix scan records dev/ino identity; mirror that so the
         // post-resolution re-validation does not reject the suggestion for
         // `identity_unavailable`.
@@ -2733,32 +2804,37 @@ mod tests {
             identity_available: true,
             ..Default::default()
         };
-        let file = AnalyzedFile {
-            path: photo.clone(),
-            kind: AssetKind::Photo,
-            size: 11,
-            modified: SystemTime::now(),
-            created: None,
-            full_hash: None,
-            fast_hash: None,
-            provenance,
-            extracted_date: None,
-            date_source: "",
-            date_offset: None,
-            embedded_title: None,
-            embedded_author: None,
-            camera_model: None,
-            latitude: None,
-            longitude: None,
-            location: None,
-            subject: None,
-            overrides: Default::default(),
-            bitrate_kbps: None,
-            duration_secs: None,
-            page_count: None,
-        };
+        let mut files = Vec::new();
+        for i in 1..=n {
+            let photo = home.join(format!("IMG_{i:04}.jpg"));
+            std::fs::write(&photo, b"photo bytes").unwrap();
+            files.push(AnalyzedFile {
+                path: photo,
+                kind: AssetKind::Photo,
+                size: 11,
+                modified: SystemTime::now(),
+                created: None,
+                full_hash: None,
+                fast_hash: None,
+                provenance: provenance.clone(),
+                extracted_date: None,
+                date_source: "",
+                date_offset: None,
+                embedded_title: None,
+                embedded_author: None,
+                camera_model: None,
+                latitude: None,
+                longitude: None,
+                location: None,
+                subject: None,
+                overrides: Default::default(),
+                bitrate_kbps: None,
+                duration_secs: None,
+                page_count: None,
+            });
+        }
         let analysis = Arc::new(Analysis {
-            files: vec![file],
+            files,
             repos: Vec::new(),
             groups: Vec::new(),
             warnings: Vec::new(),
@@ -2775,7 +2851,7 @@ mod tests {
             home: &home,
         };
         let suggestions = generate_suggestions(&input).unwrap().suggestions;
-        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions.len(), n);
         assert!(!suggestions[0]
             .new_path
             .as_deref()
@@ -2783,8 +2859,6 @@ mod tests {
             .contains("paris"));
 
         let mut sess = app.session.lock().await;
-        let mut suggestion = suggestions.into_iter().next().unwrap();
-        suggestion.metadata_pending = true;
         sess.provider_ctx = Some(ProviderScanCtx {
             epoch,
             analysis: analysis.clone(),
@@ -2792,13 +2866,19 @@ mod tests {
             formats: formats.clone(),
             home: home.clone(),
             meta: Default::default(),
-            pending: BTreeMap::from([(0, 1)]),
+            pending: (0..n).map(|i| (i, 1u32)).collect(),
             generations: Default::default(),
             refreshing: Default::default(),
-            total_units: std::collections::BTreeSet::from([0]),
-            pending_units: std::collections::BTreeSet::from([0]),
+            total_units: (0..n).collect(),
+            pending_units: (0..n).collect(),
         });
-        sess.suggestions = vec![suggestion];
+        sess.suggestions = suggestions
+            .into_iter()
+            .map(|mut suggestion| {
+                suggestion.metadata_pending = true;
+                suggestion
+            })
+            .collect();
         sess.summary = Some(ScanSummary::default());
         sess.state = SessionState::Ready;
         drop(sess);
@@ -2984,20 +3064,25 @@ mod tests {
         let last = Mutex::new(BTreeMap::new());
 
         assert_eq!(app.cache_stats.counts(), (0, 0));
-        let first = super::process_provider_job(&app, &job, &tools, &last).await;
-        assert_eq!(first.as_deref(), Some("paris"));
+        assert!(matches!(super::probe_job(&app, &job).await, Probe::Miss));
         assert_eq!(app.cache_stats.counts(), (0, 1), "the first lookup missed");
+        let first = super::run_provider_request(&app, &job, &tools, &last).await;
+        assert_eq!(first.as_deref(), Some("paris"));
 
-        // The same key now resolves from the persistent cache.
-        let second = super::process_provider_job(&app, &job, &tools, &last).await;
-        assert_eq!(second.as_deref(), Some("paris"));
+        // The same key now resolves from the persistent cache, without any
+        // provider request.
+        match super::probe_job(&app, &job).await {
+            Probe::Hit(v) => assert_eq!(v, "paris"),
+            _ => panic!("the second lookup should hit"),
+        }
         assert_eq!(app.cache_stats.counts(), (1, 1), "the second lookup hit");
 
         // A forced re-request ignores the cache by design, so it is not
         // reported as a lookup at all.
         let mut forced = job.clone();
         forced.force = true;
-        let third = super::process_provider_job(&app, &forced, &tools, &last).await;
+        assert!(matches!(super::probe_job(&app, &forced).await, Probe::Miss));
+        let third = super::run_provider_request(&app, &forced, &tools, &last).await;
         assert_eq!(third.as_deref(), Some("paris"));
         assert_eq!(
             app.cache_stats.counts(),
@@ -3008,6 +3093,139 @@ mod tests {
         // A new batch restarts the pair (the scan planner resets it).
         app.cache_stats.reset();
         assert_eq!(app.cache_stats.counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn cache_hits_do_not_wait_for_provider_pacing() {
+        let (app, epoch) = primed_app().await;
+        let port = stub_geocoder().await;
+        let mut job = geocode_job(&app, port, epoch).await;
+        // An interval far longer than the test's patience: a probe that paced
+        // itself would sleep through it.
+        job.settings.min_interval = Duration::from_secs(30);
+        let tools = ToolSet::detect();
+        let last = Mutex::new(BTreeMap::new());
+        assert_eq!(
+            super::run_provider_request(&app, &job, &tools, &last)
+                .await
+                .as_deref(),
+            Some("paris")
+        );
+
+        let started = Instant::now();
+        match super::probe_job(&app, &job).await {
+            Probe::Hit(v) => assert_eq!(v, "paris"),
+            _ => panic!("expected a cache hit"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a cache hit waited on the provider's pacing interval"
+        );
+        // The warm-up call was a direct request, so only the probe counts.
+        assert_eq!(app.cache_stats.counts(), (1, 0));
+    }
+
+    /// A stub `custom` geocoder that answers "paris", but only after
+    /// `slow_ms` for the warm-up coordinate (latitude 48.8566); it answers
+    /// immediately for anything else.
+    async fn stub_slow_geocoder(slow_ms: u64) -> u16 {
+        let router = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| async move {
+                let slow = body["latitude"]
+                    .as_f64()
+                    .is_some_and(|lat| (lat - 48.8566).abs() < 1e-6);
+                if slow {
+                    tokio::time::sleep(Duration::from_millis(slow_ms)).await;
+                }
+                Json(json!({ "name": "paris" }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn cache_hits_resolve_while_a_provider_slot_is_busy() {
+        // Two units with `provider_concurrency` at its default of one: the
+        // first unit's request occupies the only provider slot, so the second
+        // unit can only stop being pending while that request is in flight if
+        // a cache hit needs no slot.
+        let (app, epoch) = primed_app_with_units("Pictures/%Y/%l/%f", 2).await;
+        let port = stub_slow_geocoder(1500).await;
+        let tools = ToolSet::detect();
+        let last = Mutex::new(BTreeMap::new());
+
+        let (slow, cached, slow_id, cached_id) = {
+            let sess = app.session.lock().await;
+            let ctx = sess.provider_ctx.as_ref().unwrap();
+            let slow_path = ctx.analysis.files[0].path.clone();
+            let cached_path = ctx.analysis.files[1].path.clone();
+            drop(sess);
+
+            let slow = geocode_job(&app, port, epoch).await;
+            let mut cached = geocode_job(&app, port, epoch).await;
+            cached.unit.index = 1;
+            cached.unit.path = cached_path.clone();
+            cached.input = ProviderInput::Geocode {
+                latitude: 1.0,
+                longitude: 2.0,
+                language: None,
+            };
+            // Distinct from the slow job's key so the warm-up entry serves
+            // only this unit.
+            cached.input_hash = sha256(&[b"warm-second-unit"]);
+            (
+                slow,
+                cached,
+                Suggestion::id_for_target(&slow_path),
+                Suggestion::id_for_target(&cached_path),
+            )
+        };
+        // Warm the second unit's cache entry before the worker starts.
+        assert_eq!(
+            super::run_provider_request(&app, &cached, &tools, &last)
+                .await
+                .as_deref(),
+            Some("paris")
+        );
+
+        app.provider_queue.enqueue(slow);
+        app.provider_queue.enqueue(cached);
+        spawn(app.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut resolved_early = false;
+        while Instant::now() < deadline {
+            let sess = app.session.lock().await;
+            let pending = |id: &str| {
+                sess.suggestions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.metadata_pending)
+            };
+            let cached_pending = pending(&cached_id);
+            let slow_pending = pending(&slow_id);
+            drop(sess);
+            if cached_pending == Some(false) {
+                assert_eq!(
+                    slow_pending,
+                    Some(true),
+                    "the slow request should still hold the only provider slot"
+                );
+                resolved_early = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            resolved_early,
+            "the cache hit never resolved while the provider slot was busy"
+        );
     }
 
     #[tokio::test]
