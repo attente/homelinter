@@ -21,6 +21,7 @@ import {
   rowText,
   suggestionCountLabel,
 } from '../lib/format';
+import { previewSourcePath } from '../lib/preview';
 import type { MetadataProgress, Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
@@ -411,7 +412,9 @@ function DetailPane(props: {
   const { suggestion, onClose, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [tab, setTab] = useState<TabId>('preview');
   const [expanded, setExpanded] = useState(false);
-  const kind = previewKind(suggestion.target);
+  // An executed suggestion's target no longer exists, so the preview element
+  // is chosen from the file's post-execution path (see previewSourcePath).
+  const kind = previewKind(previewSourcePath(suggestion));
 
   useEffect(() => {
     if (!expanded) return;

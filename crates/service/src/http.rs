@@ -25,7 +25,9 @@ use homelinter_model::config::{
 };
 use homelinter_model::error::{ApiError, ErrorCode};
 use homelinter_model::path;
-use homelinter_model::suggestion::{ExecutionReport, SessionState, Suggestion, SuggestionStatus};
+use homelinter_model::suggestion::{
+    ExecutionReport, SessionState, Suggestion, SuggestionStatus, SuggestionType,
+};
 
 use crate::events::RejectedId;
 use crate::events::ServerEvent;
@@ -608,41 +610,87 @@ async fn suggestion_refresh(
 /// Serve a safe, inline preview for file types browsers can render directly.
 /// The target is taken from the in-memory suggestion rather than from a path
 /// supplied by the client, and only a small allowlist of media/document types
-/// is exposed.
+/// is exposed. An executed suggestion's own target no longer exists (the file
+/// was moved or deleted), so the preview reads from where the file lives now:
+/// a move's destination, or a duplicate delete's retained keeper.
 async fn suggestion_preview(
     State(app): State<AppHandle>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult {
-    let target = {
+    let suggestion = {
         let sess = app.session.lock().await;
-        sess.suggestion_by_id(&id).map(|s| s.target.clone())
+        sess.suggestion_by_id(&id).cloned()
     };
-    let Some(target) = target else {
+    let Some(suggestion) = suggestion else {
         return Err(err(
             ErrorCode::NotFound,
             format!("no suggestion with id {id}"),
         ));
     };
-    let path = PathBuf::from(&target);
-    let Some(content_type) = preview_content_type(&path) else {
-        return Err(err(
-            ErrorCode::NotFound,
-            "no browser preview is available for this file type",
-        ));
-    };
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| err(ErrorCode::NotFound, "preview file is not available"))?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static(content_type),
-    );
-    headers.insert(
-        HeaderName::from_static("content-disposition"),
-        HeaderValue::from_static("inline"),
-    );
-    Ok((headers, Body::from(data)).into_response())
+    let mut candidates = preview_candidates(&suggestion);
+    let primary = candidates
+        .first()
+        .cloned()
+        .expect("preview_candidates always yields the target");
+    candidates.reverse();
+    let mut missing_type: Option<&'static str> = None;
+    for path in candidates {
+        let Some(content_type) = preview_content_type(&path) else {
+            if path == primary {
+                missing_type = Some("no browser preview is available for this file type");
+            }
+            continue;
+        };
+        match tokio::fs::read(&path).await {
+            Ok(data) => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static(content_type),
+                );
+                headers.insert(
+                    HeaderName::from_static("content-disposition"),
+                    HeaderValue::from_static("inline"),
+                );
+                return Ok((headers, Body::from(data)).into_response());
+            }
+            Err(_) => {
+                if path == primary {
+                    missing_type = Some("preview file is not available");
+                }
+            }
+        }
+    }
+    Err(err(
+        ErrorCode::NotFound,
+        missing_type.unwrap_or("preview file is not available"),
+    ))
+}
+
+/// The candidate paths a suggestion's preview may be served from, most
+/// specific first: for an executed or partially executed move the file now
+/// lives at the destination, and for an executed duplicate delete only the
+/// retained keeper remains, so those paths come ahead of the (now missing)
+/// original target. Every other suggestion previews its own target. The
+/// target is always the last candidate, so a preview falls back to it when
+/// the post-execution path is unreadable.
+fn preview_candidates(s: &Suggestion) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    match (s.suggestion_type, s.status) {
+        (SuggestionType::Move, SuggestionStatus::Executed | SuggestionStatus::Partial) => {
+            if let Some(new_path) = &s.new_path {
+                paths.push(PathBuf::from(new_path));
+            }
+        }
+        (SuggestionType::Delete, SuggestionStatus::Executed) => {
+            if let Some(keeper) = s.metadata.get("duplicate_of").and_then(|v| v.as_str()) {
+                paths.push(PathBuf::from(keeper));
+            }
+        }
+        _ => {}
+    }
+    paths.push(PathBuf::from(&s.target));
+    paths
 }
 
 fn preview_content_type(path: &Path) -> Option<&'static str> {
@@ -1221,6 +1269,62 @@ mod tests {
             Vec::new(),
             Provenance::default(),
         )
+    }
+
+    #[test]
+    fn preview_candidates_follow_execution() {
+        let s = pending_move();
+        assert_eq!(
+            preview_candidates(&s),
+            vec![PathBuf::from("/a/b.jpg")],
+            "a pending move previews its own target"
+        );
+        let mut executed = pending_move();
+        executed.status = SuggestionStatus::Executed;
+        assert_eq!(
+            preview_candidates(&executed),
+            vec![PathBuf::from("/c/b.jpg"), PathBuf::from("/a/b.jpg")],
+            "an executed move previews its destination first"
+        );
+        let mut partial = pending_move();
+        partial.status = SuggestionStatus::Partial;
+        assert_eq!(
+            preview_candidates(&partial).first(),
+            Some(&PathBuf::from("/c/b.jpg")),
+            "a partial cross-filesystem copy still previews the destination"
+        );
+        let mut skipped = pending_move();
+        skipped.status = SuggestionStatus::Skipped;
+        assert_eq!(
+            preview_candidates(&skipped),
+            vec![PathBuf::from("/a/b.jpg")],
+            "a skipped move's file never left, so it previews its target"
+        );
+
+        let mut keeper = Suggestion::new_delete(
+            AssetKind::Photo,
+            Path::new("/a/copy.jpg"),
+            "Duplicate of /a/original.jpg; retaining the oldest copy.".to_string(),
+            Default::default(),
+            Vec::new(),
+            Provenance::default(),
+        );
+        keeper.metadata.insert(
+            "duplicate_of".to_string(),
+            serde_json::Value::String("/a/original.jpg".to_string()),
+        );
+        let mut executed_delete = keeper.clone();
+        executed_delete.status = SuggestionStatus::Executed;
+        assert_eq!(
+            preview_candidates(&executed_delete),
+            vec![PathBuf::from("/a/original.jpg"), PathBuf::from("/a/copy.jpg")],
+            "an executed duplicate delete previews the retained keeper"
+        );
+        assert_eq!(
+            preview_candidates(&keeper),
+            vec![PathBuf::from("/a/copy.jpg")],
+            "a pending duplicate delete previews its own target"
+        );
     }
 
     #[test]
