@@ -774,7 +774,7 @@ export function Browse(props: BrowseProps) {
             className="filter-input"
             type="text"
             aria-label="path filter"
-            placeholder="filter paths"
+            placeholder="filter by path"
             title="Match the source, destination, or duplicate-keeper path; case-insensitive substring"
             value={pathDraft}
             onChange={(e) => scheduleCommitPath(e.currentTarget.value)}
