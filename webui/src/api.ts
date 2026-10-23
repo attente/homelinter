@@ -121,6 +121,15 @@ export const api = {
     return request<SuggestionList>(`/suggestions${qs ? `?${qs}` : ""}`);
   },
 
+  /** One suggestion by id, for clients that need a row outside the window
+   *  they already loaded (the run view labels each executed suggestion this
+   *  way). */
+  async suggestion(id: string): Promise<Suggestion> {
+    return request<Suggestion>(
+      `/suggestions/${encodeURIComponent(id)}`,
+    );
+  },
+
   async selection(): Promise<{ ids: string[] }> {
     return request<{ ids: string[] }>("/selection");
   },

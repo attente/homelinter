@@ -17,12 +17,21 @@ import {
   mergeSuggestionEvents,
 } from "./lib/filter";
 import {
+  actionLabel,
   appendScanStage,
+  countsOf,
+  countsSummary,
   metadataProgressLabel,
-  opLine,
   stateLabel,
 } from "./lib/format";
+import {
+  applyExecutionOp,
+  applyReport,
+  buildRunState,
+  type RunState,
+} from "./lib/run";
 import type {
+  ExecutionOp,
   ExecutionReport,
   MetadataProgress,
   ScanProgress,
@@ -47,7 +56,10 @@ interface AppState {
   filter: Filter;
   stages: ScanStage[];
   metadataProgress: MetadataProgress | null;
-  runLog: string[];
+  /** Live state of the current run: every requested suggestion with its
+   *  action sentence and status, folded from `execution.op` events and the
+   *  final report. Null outside a run. */
+  run: RunState | null;
   report: ExecutionReport | null;
   runError: string | null;
   busy: boolean;
@@ -89,7 +101,7 @@ export default function App() {
     filter: initialFilter(),
     stages: [],
     metadataProgress: null,
-    runLog: [],
+    run: null,
     report: null,
     runError: null,
     busy: false,
@@ -297,7 +309,7 @@ export default function App() {
         stages: [],
         metadataProgress: null,
         report: null,
-        runLog: [],
+        run: null,
         runError: null,
       }));
       try {
@@ -321,11 +333,80 @@ export default function App() {
   const fetchExecution = useCallback(async () => {
     try {
       const report = await api.execution();
-      setSt((prev) => ({ ...prev, report, phase: "report" }));
+      setSt((prev) => ({
+        ...prev,
+        report,
+        phase: "report",
+        run: prev.run ? applyReport(prev.run, report.entries) : prev.run,
+      }));
     } catch (e: unknown) {
       pushToast(`cannot load execution report: ${resolveApiError(e)}`);
     }
   }, [pushToast]);
+
+  /** A run finished while this client was not watching it (the user navigated
+   *  back mid-run, or another client started the run): fetch the report for
+   *  the record and refresh the suggestion rows, but do not yank the view to
+   *  the run screen. */
+  const runFinishedElsewhere = useCallback(async () => {
+    let summary = "";
+    try {
+      const report = await api.execution();
+      summary = countsSummary(countsOf(report.entries));
+      setSt((prev) => ({ ...prev, report }));
+    } catch {
+      // The refreshed rows still show the outcome without the report.
+    }
+    try {
+      await resetSuggestions(stRef.current.filter);
+    } catch (e: unknown) {
+      pushToast(`cannot refresh: ${resolveApiError(e)}`);
+    }
+    pushToast(summary ? `execution finished: ${summary}` : "execution finished");
+  }, [pushToast, resetSuggestions]);
+
+  /** Label run rows whose suggestions were outside the loaded browse window,
+   *  fetched by id in modest chunks so the labels land while the run is still
+   *  executing its first suggestions. */
+  const fillRunLabels = useCallback(
+    async (
+      ids: string[],
+      known: Map<string, Suggestion>,
+      root: string | null,
+    ) => {
+      const missing = ids.filter((id) => !known.has(id));
+      const CHUNK = 32;
+      for (let i = 0; i < missing.length; i += CHUNK) {
+        const settled = await Promise.all(
+          missing.slice(i, i + CHUNK).map(async (id) => {
+            try {
+              return [id, await api.suggestion(id)] as const;
+            } catch {
+              return null;
+            }
+          }),
+        );
+        const fetched = new Map<string, Suggestion>();
+        for (const r of settled) {
+          if (r) fetched.set(r[0], r[1]);
+        }
+        if (fetched.size === 0) continue;
+        setSt((prev) => ({
+          ...prev,
+          run: prev.run
+            ? {
+                ...prev.run,
+                items: prev.run.items.map((it) => {
+                  const s = fetched.get(it.id);
+                  return s ? { ...it, label: actionLabel(s, root) } : it;
+                }),
+              }
+            : prev.run,
+        }));
+      }
+    },
+    [],
+  );
   const handleSse = useCallback(
     async (ev: SseEvent) => {
       const d = ev.data as Record<string, unknown>;
@@ -439,22 +520,20 @@ export default function App() {
         case "execution.op":
           setSt((prev) => ({
             ...prev,
-            runLog: [
-              ...prev.runLog,
-              opLine(
-                d as {
-                  suggestion_id: string;
-                  operation: string;
-                  status: string;
-                  detail?: unknown;
-                },
-              ),
-            ],
+            run: prev.run
+              ? applyExecutionOp(prev.run, d as unknown as ExecutionOp)
+              : prev.run,
           }));
           break;
-        case "execution.complete":
-          await fetchExecution();
+        case "execution.complete": {
+          const curPhase = stRef.current.phase;
+          if (curPhase === "running" || curPhase === "report") {
+            await fetchExecution();
+          } else {
+            await runFinishedElsewhere();
+          }
           break;
+        }
         case "config.updated": {
           // No toast: the scan setup page persists settings as they change,
           // so this event fires on every saved edit. The configuration view
@@ -474,7 +553,7 @@ export default function App() {
           break;
       }
     },
-    [dropPendingSuggestionEvents, enterBrowse, fetchExecution, pushToast, scheduleSuggestionFlush],
+    [dropPendingSuggestionEvents, enterBrowse, fetchExecution, pushToast, runFinishedElsewhere, scheduleSuggestionFlush],
   );
 
   const poll = useCallback(async () => {
@@ -635,24 +714,30 @@ export default function App() {
         pushToast("no suggestions selected");
         return;
       }
+      const root = stRef.current.session?.scan_root ?? null;
+      const known = new Map(
+        stRef.current.suggestions.map((s) => [s.id, s] as const),
+      );
+      const run = buildRunState(ids, known, root);
       setSt((prev) => ({
         ...prev,
         phase: "running",
+        run,
         report: null,
-        runLog: [],
         runError: null,
         busy: true,
       }));
+      void fillRunLabels(ids, known, root);
       try {
         await api.run(ids);
         setSt((prev) => ({ ...prev, busy: false }));
         pushToast(`running ${ids.length} suggestion(s)`);
       } catch (e: unknown) {
         pushToast(`cannot start run: ${resolveApiError(e)}`);
-        setSt((prev) => ({ ...prev, busy: false, phase: "browse" }));
+        setSt((prev) => ({ ...prev, busy: false, phase: "browse", run: null }));
       }
     },
-    [pushToast],
+    [fillRunLabels, pushToast],
   );
 
   // The batch carries the hash of the config it was scanned under; when the
@@ -839,12 +924,20 @@ export default function App() {
     }
   }, [doExport, readSelection, startRun]);
 
-  const doneFromReport = useCallback(async () => {
+  /** Leave the run screen for the suggestion browser: the normal exit once
+   *  the report is in, and also the way back while a run is still executing
+   *  (the run continues in the background; its completion then refreshes the
+   *  rows instead of yanking the view back). */
+  const leaveRun = useCallback(async () => {
+    const executing = stRef.current.session?.state === "executing";
     try {
       await resetSuggestions(stRef.current.filter);
-      setSt((prev) => ({ ...prev, phase: "browse", report: null, runLog: [] }));
     } catch (e: unknown) {
       pushToast(`cannot refresh: ${resolveApiError(e)}`);
+    }
+    setSt((prev) => ({ ...prev, phase: "browse", report: null, run: null }));
+    if (executing) {
+      pushToast("execution continues in the background");
     }
   }, [pushToast, resetSuggestions]);
 
@@ -919,12 +1012,12 @@ export default function App() {
     body = (
       <RunView
         state={state}
-        log={st.runLog}
+        run={st.run}
         report={st.report}
         error={st.runError}
         cancelDisabled={!canCancel}
         onCancel={() => void cancel()}
-        onDone={() => void doneFromReport()}
+        onDone={() => void leaveRun()}
       />
     );
   } else {

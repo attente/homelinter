@@ -21,7 +21,7 @@ import {
   suggestionCountLabel,
   countsOf,
   countsSummary,
-  entryLine,
+  actionLabel,
   manualOverrideLabel,
   metadataProgressLabel,
   pathLabel,
@@ -447,6 +447,26 @@ describe('format', () => {
   });
 
 
+  it('action label reads the performed operation, not the id', () => {
+    const root = '/home/a';
+    expect(actionLabel(sampleSuggestion(), root)).toBe(
+      'move IMG_1.jpg to Pictures/2024/IMG_1.jpg',
+    );
+    expect(
+      actionLabel(
+        sampleSuggestion({
+          type: 'delete',
+          new_path: null,
+          metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
+        }),
+        root,
+      ),
+    ).toBe('delete IMG_1.jpg, duplicate of keeper/IMG_1.jpg');
+    expect(
+      actionLabel(sampleSuggestion({ type: 'delete', new_path: null }), root),
+    ).toBe('delete IMG_1.jpg');
+  });
+
   it('counts and entry lines render reports', () => {
     const entries: ReportEntry[] = [
       { suggestion_id: 's-1', result: 'executed', operations: [] },
@@ -464,6 +484,5 @@ describe('format', () => {
     expect(countsSummary({ executed: 0, partial: 0, failed: 0, skipped: 0 })).toBe(
       'no entries executed',
     );
-    expect(entryLine({ suggestion_id: 's-9', result: 'executed', operations: [] })).toBe('[executed] s-9');
   });
 });

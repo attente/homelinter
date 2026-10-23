@@ -47,6 +47,22 @@ function fileName(path: string): string {
   return part && part.length > 0 ? part : path;
 }
 
+/** The action sentence for a suggestion: `move <path> to <path>` for moves
+ *  and `delete <path>, duplicate of <path>` for duplicate deletes (the
+ *  retained keeper read from the suggestion's `duplicate_of` metadata),
+ *  shared by the browse rows and the run view's execution list. */
+export function actionLabel(s: Suggestion, root?: string | null): string {
+  const name = pathLabel(s.target, root);
+  if (s.type === 'delete') {
+    const dupOf = s.metadata?.duplicate_of;
+    return typeof dupOf === 'string' && dupOf.length > 0
+      ? `delete ${name}, duplicate of ${pathLabel(dupOf, root)}`
+      : `delete ${name}`;
+  }
+  const dest = s.new_path ? pathLabel(s.new_path, root) : '?';
+  return `move ${name} to ${dest}`;
+}
+
 export function rowLabel(s: Suggestion, root?: string | null): string {
   const marker = s.selected ? '[x]' : '[ ]';
   // A suggestion whose provider metadata is still in flight has no stable
@@ -54,17 +70,7 @@ export function rowLabel(s: Suggestion, root?: string | null): string {
   if (s.metadata_pending) {
     return `${marker} scanning ${fileName(s.target)}`;
   }
-  const name = pathLabel(s.target, root);
-  let action: string;
-  if (s.type === 'delete') {
-    const dupOf = s.metadata?.duplicate_of;
-    action = typeof dupOf === 'string' && dupOf.length > 0
-      ? `delete ${name}, duplicate of ${pathLabel(dupOf, root)}`
-      : `delete ${name}`;
-  } else {
-    const dest = s.new_path ? pathLabel(s.new_path, root) : '?';
-    action = `move ${name} to ${dest}`;
-  }
+  const action = actionLabel(s, root);
   const status = s.status === 'pending' ? '' : ` (${s.status})`;
   const rejected = s.rejection_reason
     ? ` [rejected: ${head(s.rejection_reason, 48)}]`
@@ -128,22 +134,6 @@ export function countsSummary(counts: ReportCounts): string {
   if (counts.failed > 0) parts.push(`failed=${counts.failed}`);
   if (counts.skipped > 0) parts.push(`skipped=${counts.skipped}`);
   return parts.join('  ') || 'no entries executed';
-}
-
-/** One display line for a report entry (top-level result only). */
-export function entryLine(e: ReportEntry): string {
-  return `[${e.result}] ${e.suggestion_id}`;
-}
-
-/** One display line for an in-flight `execution.op` SSE event. */
-export function opLine(op: {
-  suggestion_id: string;
-  operation: string;
-  status: string;
-  detail?: unknown;
-}): string {
-  const suffix = op.detail ? ` (${String(op.detail)})` : '';
-  return `[${op.status}] ${op.operation} ${op.suggestion_id}${suffix}`;
 }
 
 export function elapsedLabel(ms: number): string {

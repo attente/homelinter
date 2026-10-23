@@ -1,9 +1,15 @@
-import { stateLabel } from '../lib/format';
-import type { EntryResult, ExecutionReport, ReportEntry } from '../types';
+import { useEffect, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { countsSummary, stateLabel } from '../lib/format';
+import { isFinal, type RunState } from '../lib/run';
+import type { ExecutionReport } from '../types';
+import { BackIcon } from './BackIcon';
 
 interface RunViewProps {
   state: string;
-  log: string[];
+  /** Live state of the run: every requested suggestion with its action
+   *  sentence and status. Null only if the view is entered without a run. */
+  run: RunState | null;
   report: ExecutionReport | null;
   error: string | null;
   cancelDisabled?: boolean;
@@ -11,16 +17,87 @@ interface RunViewProps {
   onDone: () => void;
 }
 
-const TOTAL_RESULTS: EntryResult[] = ['executed', 'partial', 'failed', 'skipped'];
+const ROW_HEIGHT = 26;
 
+/**
+ * The execution view. The header carries the back icon button (top left),
+ * the session state, one progress meter over the suggestions that have
+ * finished, and cancel. Below it, one row per suggestion in the run - in
+ * execution order, showing the action it performs (never its id) and a
+ * status that updates as the run proceeds - and, once the report is in, the
+ * run's summary counts. There is no console log: this list is the status.
+ */
 export function RunView(props: RunViewProps) {
-  const { state, log, report, error, cancelDisabled, onCancel, onDone } = props;
-  const spinner = '|/-\\'[Math.floor(Date.now() / 120) % 4];
+  const { state, run, report, error, cancelDisabled, onCancel, onDone } = props;
+  const items = run?.items ?? [];
+  const done = run?.done ?? 0;
+  const activeIndex = run?.activeIndex ?? -1;
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Follow the active suggestion like a console, but only while the user has
+  // not scrolled away from the bottom of the list.
+  const followRef = useRef(true);
+  const followedIndexRef = useRef(-1);
+
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    getItemKey: (index) => items[index].id,
+    overscan: 12,
+  });
+
+  useEffect(() => {
+    if (activeIndex < 0 || !followRef.current) return;
+    if (followedIndexRef.current === activeIndex) return;
+    followedIndexRef.current = activeIndex;
+    virtualizer.scrollToIndex(activeIndex, { align: 'auto' });
+  }, [activeIndex, virtualizer]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const follow =
+      el.scrollHeight - el.scrollTop - el.clientHeight < ROW_HEIGHT * 4;
+    if (follow && !followRef.current && activeIndex >= 0) {
+      followedIndexRef.current = activeIndex;
+      virtualizer.scrollToIndex(activeIndex, { align: 'auto' });
+    }
+    followRef.current = follow;
+  };
+
+  const percent =
+    items.length === 0 ? 100 : Math.round((done / items.length) * 100);
 
   return (
     <main className="run-view">
       <div className="run-status">
-        <span className="state-busy">{stateLabel(state)} {spinner}</span>
+        <button
+          type="button"
+          className="close-btn"
+          aria-label="back to suggestions"
+          title="back to suggestions"
+          onClick={onDone}
+        >
+          <BackIcon />
+        </button>
+        <span className="state-busy">{stateLabel(state)}</span>
+        <div
+          className="scan-meter-bar"
+          role="progressbar"
+          aria-label="execution progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+        >
+          <div
+            className="scan-meter-fill"
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+        <span className="run-progress-count">
+          {done}/{items.length}
+        </span>
         <div className="toolbar">
           <button
             type="button"
@@ -32,22 +109,52 @@ export function RunView(props: RunViewProps) {
           </button>
         </div>
       </div>
-      <pre className="log">
-        {log.map((line, i) => (
-          <div key={i}>{line}</div>
-        ))}
-        {log.length === 0 && <div className="empty">waiting for operations...</div>}
-      </pre>
+      <div className="run-items" ref={scrollRef} onScroll={onScroll}>
+        {items.length === 0 ? (
+          <div className="run-empty">no suggestions in this run</div>
+        ) : (
+          <ol className="run-list" style={{ height: virtualizer.getTotalSize() }}>
+            {virtualizer.getVirtualItems().map((v) => {
+              const item = items[v.index];
+              // The active suggestion is the one executing or next in line:
+              // the service runs one suggestion at a time, so the first row
+              // without a final result is the live one.
+              const status =
+                v.index === activeIndex && !isFinal(item.status)
+                  ? 'running'
+                  : item.status;
+              return (
+                <li
+                  key={item.id}
+                  className={`run-item status-${status}`}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: v.size,
+                    transform: `translateY(${v.start}px)`,
+                  }}
+                >
+                  <span className="run-item-status">{status}</span>
+                  <span className="run-item-label" title={item.label}>
+                    {item.label}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
       {report && (
         <section className="report">
-          <h2>Run finished</h2>
           {report.partial && (
             <p className="note warn">
               partial: some operations completed without finishing source cleanup or dependent repairs
             </p>
           )}
           {error && <p className="error">{error}</p>}
-          <RunReport report={report} onDone={onDone} />
+          <ReportSummary run={run} />
         </section>
       )}
       {!report && error && <p className="error">{error}</p>}
@@ -55,35 +162,13 @@ export function RunView(props: RunViewProps) {
   );
 }
 
-function RunReport({ report, onDone }: { report: ExecutionReport; onDone: () => void }) {
-  const counts: Record<EntryResult, number> = {
-    executed: 0,
-    partial: 0,
-    failed: 0,
-    skipped: 0,
-  };
-  for (const e of report.entries) {
-    counts[e.result] += 1;
+/** One summary line over the run's final results, at the bottom of the view. */
+function ReportSummary({ run }: { run: RunState | null }) {
+  const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
+  if (run) {
+    for (const item of run.items) {
+      if (isFinal(item.status)) counts[item.status] += 1;
+    }
   }
-  const summary = TOTAL_RESULTS
-    .filter((k) => counts[k] > 0)
-    .map((k) => `${k}=${counts[k]}`)
-    .join('  ');
-  return (
-    <>
-      <p className="report-summary">{summary || 'no entries executed'}</p>
-      <ul className="report-entries">
-        {report.entries.map((e) => (
-          <li key={e.suggestion_id}>{resultLine(e)}</li>
-        ))}
-      </ul>
-      <div className="toolbar">
-        <button type="button" onClick={onDone}>back to suggestions</button>
-      </div>
-    </>
-  );
-}
-
-function resultLine(e: ReportEntry): string {
-  return `[${e.result}] ${e.suggestion_id}`;
+  return <p className="report-summary">{countsSummary(counts)}</p>;
 }

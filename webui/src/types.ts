@@ -212,5 +212,11 @@ export interface ExecutionOp {
   suggestion_id: string;
   operation: string;
   status: string;
-  detail?: Record<string, unknown> | null;
+  /** Paths and note of the operation, as published by the service:
+   *  `{ source, destination, detail }`. */
+  detail?: {
+    source?: string | null;
+    destination?: string | null;
+    detail?: string | null;
+  } | null;
 }
