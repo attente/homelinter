@@ -799,6 +799,12 @@ select optgroup {
   background: var(--bg);
 }
 
+/* An enlarged map drops the pane's fixed height and fills the preview modal
+   the way an enlarged media preview does. */
+.map-frame.map-frame-enlarged {
+  height: 100%;
+}
+
 .detail-table {
   border-collapse: collapse;
   width: 100%;

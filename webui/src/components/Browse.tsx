@@ -414,10 +414,11 @@ function DetailPane(props: {
 }) {
   const { suggestion, onClose, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [tab, setTab] = useState<TabId>('preview');
-  const [expanded, setExpanded] = useState(false);
-  // Escape shares the modal dismissal stack (lib/modal), so the enlarged
-  // preview closes with the same mechanism as every other dialog.
-  useEscapeClose(expanded, () => setExpanded(false));
+  // The enlarged preview and the enlarged map share one modal state, so
+  // only one can be open and Escape dismisses whichever it is through the
+  // shared modal stack (lib/modal), like every other dialog.
+  const [expanded, setExpanded] = useState<'preview' | 'location' | null>(null);
+  useEscapeClose(expanded !== null, () => setExpanded(null));
   // An executed suggestion's target no longer exists, so the preview element
   // is chosen from the file's post-execution path (see previewSourcePath).
   const kind = previewKind(previewSourcePath(suggestion));
@@ -465,7 +466,18 @@ function DetailPane(props: {
             className="close-btn"
             title="enlarge preview"
             aria-label="enlarge preview"
-            onClick={() => setExpanded(true)}
+            onClick={() => setExpanded('preview')}
+          >
+            <ExpandIcon />
+          </button>
+        )}
+        {active === 'location' && mapSrc !== null && (
+          <button
+            type="button"
+            className="close-btn"
+            title="enlarge map"
+            aria-label="enlarge map"
+            onClick={() => setExpanded('location')}
           >
             <ExpandIcon />
           </button>
@@ -554,17 +566,17 @@ function DetailPane(props: {
         </div>
       )}
 
-      {expanded && kind !== null && (
+      {expanded !== null && (
         <div
           className="modal-backdrop preview-backdrop"
           role="presentation"
-          onClick={() => setExpanded(false)}
+          onClick={() => setExpanded(null)}
         >
           <div
             className="preview-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="file preview"
+            aria-label={expanded === 'location' ? 'location map' : 'file preview'}
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -573,11 +585,21 @@ function DetailPane(props: {
               autoFocus
               aria-label="close"
               title="close"
-              onClick={() => setExpanded(false)}
+              onClick={() => setExpanded(null)}
             >
               <CloseIcon />
             </button>
-            <PreviewContent suggestion={suggestion} kind={kind} enlarged />
+            {expanded === 'location' ? (
+              <iframe
+                className="map-frame map-frame-enlarged"
+                title="location map"
+                src={mapSrc ?? undefined}
+              />
+            ) : (
+              kind !== null && (
+                <PreviewContent suggestion={suggestion} kind={kind} enlarged />
+              )
+            )}
           </div>
         </div>
       )}
