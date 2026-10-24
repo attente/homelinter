@@ -1,8 +1,10 @@
+import type { Toast } from '../lib/toasts';
 import { CloseIcon } from './CloseIcon';
 
 interface ToastsProps {
-  toasts: string[];
-  onDismiss: (index: number) => void;
+  toasts: Toast[];
+  /** Dismiss the toast by its stable key (see `lib/toasts`). */
+  onDismiss: (key: string) => void;
 }
 
 export function Toasts(props: ToastsProps) {
@@ -10,15 +12,15 @@ export function Toasts(props: ToastsProps) {
   if (toasts.length === 0) return null;
   return (
     <div className="toasts">
-      {toasts.map((t, i) => (
-        <div key={`${i}-${t}`} className="toast">
-          <span>{t}</span>
+      {toasts.map((t) => (
+        <div key={t.key} className="toast">
+          <span>{t.msg}</span>
           <button
             type="button"
             className="close-btn"
             aria-label="dismiss"
             title="dismiss"
-            onClick={() => onDismiss(i)}
+            onClick={() => onDismiss(t.key)}
           >
             <CloseIcon />
           </button>

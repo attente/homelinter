@@ -35,6 +35,7 @@ import {
   executionReportFilename,
   executionReportText,
 } from "./lib/report";
+import { addCountedToast, addToast, removeToast, type Toast } from "./lib/toasts";
 import type {
   ExecutionOp,
   ExecutionReport,
@@ -68,13 +69,15 @@ interface AppState {
   report: ExecutionReport | null;
   runError: string | null;
   busy: boolean;
-  toasts: string[];
+  toasts: Toast[];
   configOpen: boolean;
   showScanForm: boolean;
   pendingAction: "run" | "export" | null;
 }
 
 const POLL_MS = 2000;
+/** How long a toast stays up after its last notice; a merged repeat restarts it. */
+const TOAST_MS = 4500;
 /** Suggestions fetched per `GET /suggestions` request while browsing. */
 const PAGE_SIZE = 500;
 
@@ -164,21 +167,51 @@ export default function App() {
     setSt((prev) => ({ ...prev, ...p }));
   }, []);
 
-  const pushToast = useCallback((msg: string) => {
-    setSt((prev) => ({ ...prev, toasts: [...prev.toasts, `${msg}`] }));
-    setTimeout(() => {
-      setSt((prev) => ({
-        ...prev,
-        toasts: prev.toasts.filter((t) => t !== msg),
-      }));
-    }, 4500);
+  // One dismiss clock per toast key, restarted whenever that toast takes a
+  // merged notice, so a burst of duplicates keeps a single toast up instead
+  // of stacking copies. The map lives in a ref: timers outlive renders but
+  // not the component, and unmount leaves them to be collected.
+  const toastTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  const scheduleToastExpiry = useCallback((key: string) => {
+    const pending = toastTimersRef.current.get(key);
+    if (pending !== undefined) clearTimeout(pending);
+    toastTimersRef.current.set(
+      key,
+      setTimeout(() => {
+        toastTimersRef.current.delete(key);
+        setSt((prev) => ({ ...prev, toasts: removeToast(prev.toasts, key) }));
+      }, TOAST_MS),
+    );
   }, []);
 
-  const dismissToast = useCallback((i: number) => {
-    setSt((prev) => ({
-      ...prev,
-      toasts: prev.toasts.filter((_, j) => j !== i),
-    }));
+  /** Show a notice; a repeat with the same key refreshes that toast instead
+   *  of stacking a second one (see `lib/toasts`). */
+  const pushToast = useCallback(
+    (msg: string, key: string = msg) => {
+      setSt((prev) => ({ ...prev, toasts: addToast(prev.toasts, key, msg) }));
+      scheduleToastExpiry(key);
+    },
+    [scheduleToastExpiry],
+  );
+
+  /** Show an aggregated notice whose label carries the running total. */
+  const pushCountedToast = useCallback(
+    (key: string, amount: number, label: (total: number) => string) => {
+      setSt((prev) => ({
+        ...prev,
+        toasts: addCountedToast(prev.toasts, key, amount, label),
+      }));
+      scheduleToastExpiry(key);
+    },
+    [scheduleToastExpiry],
+  );
+
+  const dismissToast = useCallback((key: string) => {
+    const pending = toastTimersRef.current.get(key);
+    if (pending !== undefined) clearTimeout(pending);
+    toastTimersRef.current.delete(key);
+    setSt((prev) => ({ ...prev, toasts: removeToast(prev.toasts, key) }));
   }, []);
 
   const loadTokenRef = useRef(0);
@@ -530,8 +563,10 @@ export default function App() {
             rejected: { id: string; reason: string }[];
           };
           if (!v.valid) {
-            pushToast(
-              `re-validation rejected ${v.rejected.length} suggestion(s)`,
+            pushCountedToast(
+              "revalidation",
+              v.rejected.length,
+              (total) => `re-validation rejected ${total} suggestion(s)`,
             );
           }
           if (v.rejected.length > 0) {
