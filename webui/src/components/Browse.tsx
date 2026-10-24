@@ -818,6 +818,10 @@ export function Browse(props: BrowseProps) {
     setDetailWidth((w) => clampDetailWidth(w + step));
   };
 
+  // The closed status filter takes the current choice's outcome colour too,
+  // so it reads like the matching rows and its own options.
+  const statusTone = filter.status === 'all' ? null : rowTone(filter.status);
+
   return (
     <main className="browse">
       <div className="toolbar-row">
@@ -878,18 +882,28 @@ export function Browse(props: BrowseProps) {
             ))}
           </select>
           <select
-            className="filter-select"
+            className={`filter-select${statusTone ? ` status-${statusTone}` : ''}`}
             aria-label="status filter"
             value={filter.status}
             onChange={(e) =>
               onFilterChange({ ...filter, status: e.currentTarget.value as Filter['status'] })
             }
           >
-            {STATUS_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
+            {STATUS_OPTIONS.map((o) => {
+              // The status choices carry the same outcome colours as the
+              // suggestion rows, so the value reads the same in the list and
+              // in the drop-down.
+              const tone = o.value === 'all' ? null : rowTone(o.value);
+              return (
+                <option
+                  key={o.value}
+                  value={o.value}
+                  className={tone === null ? undefined : `option-status-${tone}`}
+                >
+                  {o.label}
+                </option>
+              );
+            })}
           </select>
           <select
             className="filter-select"

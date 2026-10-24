@@ -530,6 +530,29 @@ select optgroup {
   text-overflow: ellipsis;
 }
 
+/* The status filter's choices carry the suggestion rows' outcome colours, in
+   the drop-down list and on the closed control, so filtering by an outcome
+   reads the same as the rows it keeps. `any status` stays plain. */
+.filter-select.status-done,
+.filter-select option.option-status-done {
+  color: var(--ok);
+}
+
+.filter-select.status-bad,
+.filter-select option.option-status-bad {
+  color: var(--bad);
+}
+
+.filter-select.status-partial,
+.filter-select option.option-status-partial {
+  color: var(--busy);
+}
+
+.filter-select.status-skipped,
+.filter-select option.option-status-skipped {
+  color: var(--dim);
+}
+
 /* Finished rows carry their outcome as the row's own colour instead of a
    status suffix: done is the ok green with the whole sentence struck
    through, rejected and failed are the bad red, partial is the busy amber,
