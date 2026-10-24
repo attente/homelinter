@@ -29,15 +29,16 @@ interface RunViewProps {
 const ROW_HEIGHT = 26;
 
 /**
- * The execution modal. The header carries the close icon button (top left),
- * the session state, one progress meter over the suggestions that have
- * finished, and cancel. Below it, one row per suggestion in the run - in
+ * The execution modal. It fills almost the whole window like the full-screen
+ * preview. The header carries the session state, one progress meter over the
+ * suggestions that have finished, and cancel, with the summary counts after
+ * the disabled cancel once the report is in and the close icon pushed to the
+ * top-right corner. Below it, one row per suggestion in the run - in
  * execution order, showing the action it performs (never its id) and a
- * status that updates as the run proceeds. Once the report is in, the summary
- * counts sit in the header to the right of the disabled cancel, a download
- * icon floats at the top-right corner of the status list, and a partial run
- * or run error shows as a plain status line below the list. There is no
- * console log: this list is the status.
+ * status that updates as the run proceeds. A download icon floats at the
+ * top-right corner of the status list, and a partial run or run error shows
+ * as a plain status line below the list. There is no console log: this list
+ * is the status.
  *
  * The view is a modal over the suggestion browser: the close icon, a click
  * on the backdrop, and Escape all run the same exit, so leaving mid-run just
@@ -98,7 +99,7 @@ export function RunView(props: RunViewProps) {
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop run-backdrop"
       role="presentation"
       onClick={onDone}
     >
@@ -110,15 +111,6 @@ export function RunView(props: RunViewProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="run-status">
-          <button
-            type="button"
-            className="close-btn"
-            aria-label="close execution view"
-            title="close execution view"
-            onClick={onDone}
-          >
-            <CloseIcon />
-          </button>
           <span className="state-busy">{stateLabel(state)}</span>
           <div
             className="scan-meter-bar"
@@ -147,6 +139,15 @@ export function RunView(props: RunViewProps) {
             </button>
             {report && <ReportSummary run={run} />}
           </div>
+          <button
+            type="button"
+            className="close-btn"
+            aria-label="close execution view"
+            title="close execution view"
+            onClick={onDone}
+          >
+            <CloseIcon />
+          </button>
         </div>
         <div className="run-list-wrap">
           <div className="run-items" ref={scrollRef} onScroll={onScroll}>
@@ -229,12 +230,12 @@ function ReportSummary({ run }: { run: RunState | null }) {
     }
   }
   return (
-    <p className="run-summary">
+    <span className="run-summary">
       {countsSummaryParts(counts).map((part) => (
         <span key={part.label} className={`run-summary-part part-${part.tone}`}>
           {part.label}
         </span>
       ))}
-    </p>
+    </span>
   );
 }
