@@ -9,6 +9,7 @@ import { ScanStages } from "./components/ScanStages";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText, saveTextFile } from "./lib/download";
+import { useEscapeClose } from "./lib/modal";
 import {
   Filter,
   filterFromSearchParams,
@@ -904,6 +905,8 @@ export default function App() {
   const dismissPending = useCallback(() => {
     setSt((prev) => ({ ...prev, pendingAction: null }));
   }, []);
+  // Escape dismisses the stale-configuration dialog like its cancel button.
+  useEscapeClose(st.pendingAction !== null, dismissPending);
 
   const reScanFromModal = useCallback(() => {
     patch({

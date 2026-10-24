@@ -22,6 +22,7 @@ import {
   suggestionCountLabel,
 } from '../lib/format';
 import { previewSourcePath } from '../lib/preview';
+import { useEscapeClose } from '../lib/modal';
 import type { MetadataProgress, Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
 import { CheckIcon, CopyIcon } from './CopyIcon';
@@ -122,6 +123,7 @@ function FetchMetadataButton(props: {
 }) {
   const { suggestion, onRefresh } = props;
   const [confirming, setConfirming] = useState(false);
+  useEscapeClose(confirming, () => setConfirming(false));
   if (suggestion.type !== 'move') return null;
   const pending = suggestion.metadata_pending;
   const manual = manualOverrideLabel(suggestion.manual_overrides);
@@ -412,18 +414,12 @@ function DetailPane(props: {
   const { suggestion, onClose, onRefreshMetadata, onSetMetadata, onRebuild } = props;
   const [tab, setTab] = useState<TabId>('preview');
   const [expanded, setExpanded] = useState(false);
+  // Escape shares the modal dismissal stack (lib/modal), so the enlarged
+  // preview closes with the same mechanism as every other dialog.
+  useEscapeClose(expanded, () => setExpanded(false));
   // An executed suggestion's target no longer exists, so the preview element
   // is chosen from the file's post-execution path (see previewSourcePath).
   const kind = previewKind(previewSourcePath(suggestion));
-
-  useEffect(() => {
-    if (!expanded) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExpanded(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [expanded]);
 
   const m = suggestion.metadata ?? {};
   const lat = typeof m.latitude === 'number' ? m.latitude : null;

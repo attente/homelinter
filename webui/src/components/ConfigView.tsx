@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, resolveApiError } from "../api";
+import { useEscapeClose } from "../lib/modal";
 import type { CacheList } from "../types";
 import { CloseIcon } from "./CloseIcon";
 
@@ -30,6 +31,11 @@ export function ConfigView(props: ConfigViewProps) {
   const [cache, setCache] = useState<CacheList | null>(null);
   const [cacheKind, setCacheKind] = useState("");
   const [cacheLoading, setCacheLoading] = useState(false);
+  // Escape dismisses the dialogs like their close buttons: with both open
+  // (the viewer under its clear-cache confirmation) it closes the topmost
+  // first, so the registration order here matches the stacking order.
+  useEscapeClose(cacheOpen, () => setCacheOpen(false));
+  useEscapeClose(confirmClear, () => setConfirmClear(false));
 
   const load = useCallback(async () => {
     try {
