@@ -83,11 +83,19 @@ unmanaged: it is never extracted, hashed, moved, or deduplicated, and no
 suggestion is ever generated for it. Structured data and configuration
 files (`json`, `toml`, `yaml`, `csv`, `sql`, `db`, `sqlite`, `ini`, `conf`,
 lockfiles, and similar), source and script files (`py`, `rs`, `go`, `c`,
-`h`, `cpp`, `js`, `sh`, and similar), and any unknown or extension-free
-name classify to no kind because they live where their software expects
-them: relocating or deduplicating them would break the reader, so the tool
-leaves them strictly alone. There are no `data`, `executable`, or `other`
-kinds.
+`h`, `cpp`, `js`, `ts`, `tsx`, `sh`, and similar), and any unknown or
+extension-free name classify to no kind because they live where their
+software expects them: relocating or deduplicating them would break the
+reader, so the tool leaves them strictly alone. There are no `data`,
+`executable`, or `other` kinds.
+
+**Extension collisions**: classification is by filename extension alone, so
+an extension shared with a source or data format stays unmanaged rather
+than being claimed by a media kind. `ts` is the case that matters today: it
+is both a TypeScript source extension and the MPEG transport stream video
+extension, so `.ts` files are unmanaged (like every other source file) and
+transport streams receive no suggestions. Supporting both would require
+content sniffing, which classification deliberately does not do.
 
 **Empty files**: files of zero bytes are completely ignored. They are not scanned, not classified, and no suggestions are generated for them. They are never duplicates regardless of hash.
 

@@ -120,9 +120,11 @@ fn extension_kind(ext: &str) -> Option<AssetKind> {
         // Photo
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "tif" | "tiff" | "heic"
         | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" => Some(AssetKind::Photo),
-        // Video
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg" | "3gp"
-        | "ts" => Some(AssetKind::Video),
+        // Video. `ts` (MPEG transport stream) is deliberately absent: the
+        // extension also names TypeScript sources, and code must stay
+        // unmanaged rather than be moved into `Videos/`.
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg"
+        | "3gp" => Some(AssetKind::Video),
         // Audio
         "mp3" | "flac" | "ogg" | "m4a" | "wav" | "aac" | "opus" | "wma" | "aiff" | "alac" => {
             Some(AssetKind::Audio)
@@ -282,6 +284,8 @@ mod tests {
         assert_eq!(classify_file_name("app.db"), None);
         assert_eq!(classify_file_name("run.sh"), None);
         assert_eq!(classify_file_name("main.rs"), None);
+        assert_eq!(classify_file_name("main.ts"), None);
+        assert_eq!(classify_file_name("App.TSX"), None);
         assert_eq!(classify_file_name("notes"), None);
         assert_eq!(classify_file_name("cargo.lock"), None);
         assert_eq!(classify_file_name("package-lock.json"), None);
