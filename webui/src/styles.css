@@ -838,10 +838,11 @@ select optgroup {
   color: var(--dim);
 }
 
-/* Keep the run's actions and summary at the right edge of the status header,
-   so the disabled cancel and the counts sit in its top-right corner. */
+/* The status header's toolbar keeps the header's 12px rhythm instead of the
+   shared 8px, so cancel and the summary counts sit evenly spaced after the
+   progress count. */
 .run-status .toolbar {
-  margin-left: auto;
+  gap: 12px;
 }
 
 /* Scanning view stage list: one row per scan phase. Completed rows stay
