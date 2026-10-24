@@ -7,9 +7,6 @@ interface HeaderProps {
   busy: boolean;
   theme: Theme;
   scanDisabled?: boolean;
-  /** An earlier scan's suggestions are still loaded, so starting a scan
-   *  replaces them; the action is then the red `re-scan`. */
-  replaceSuggestions?: boolean;
   onNewScan: () => void;
   onConfig: () => void;
   onToggleTheme: () => void;
@@ -38,7 +35,6 @@ export function Header(props: HeaderProps) {
     busy,
     theme,
     scanDisabled,
-    replaceSuggestions,
     onNewScan,
     onConfig,
     onToggleTheme,
@@ -53,18 +49,13 @@ export function Header(props: HeaderProps) {
       <nav className="header-actions">
         <button
           type="button"
-          className={replaceSuggestions ? 'caution' : undefined}
           onClick={onNewScan}
           disabled={scanDisabled}
           title={
-            scanDisabled
-              ? 'a scan or execution is in progress'
-              : replaceSuggestions
-                ? "re-scan replaces the earlier scan's suggestions"
-                : undefined
+            scanDisabled ? 'a scan or execution is in progress' : undefined
           }
         >
-          {replaceSuggestions ? 're-scan' : 'scan'}
+          scan
         </button>
         <button type="button" onClick={onConfig}>config</button>
         <button

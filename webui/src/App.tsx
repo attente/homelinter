@@ -1175,7 +1175,6 @@ export default function App() {
         busy={st.busy}
         theme={theme}
         scanDisabled={!canScan}
-        replaceSuggestions={hasSuggestions}
         onNewScan={() =>
           patch({ showScanForm: true, phase: "idle", configOpen: false })
         }
