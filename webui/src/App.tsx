@@ -8,7 +8,7 @@ import { ScanForm, ScanFormValues } from "./components/ScanForm";
 import { ScanStages } from "./components/ScanStages";
 import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
-import { downloadText } from "./lib/download";
+import { downloadText, saveTextFile } from "./lib/download";
 import {
   Filter,
   filterFromSearchParams,
@@ -30,6 +30,10 @@ import {
   buildRunState,
   type RunState,
 } from "./lib/run";
+import {
+  executionReportFilename,
+  executionReportText,
+} from "./lib/report";
 import type {
   ExecutionOp,
   ExecutionReport,
@@ -941,6 +945,26 @@ export default function App() {
     }
   }, [pushToast, resetSuggestions]);
 
+  /** Save the finished execution report to a file the user chooses. The
+   *  save picker supplies the location where the browser supports it; the
+   *  anchor download fallback uses the browser's download folder. */
+  const downloadReport = useCallback(async () => {
+    const { report, run, runError } = stRef.current;
+    if (!report) return;
+    const generatedAt = new Date();
+    try {
+      const saved = await saveTextFile(
+        executionReportFilename(generatedAt),
+        executionReportText({ report, run, error: runError, generatedAt }),
+        "text/plain",
+        "execution report",
+      );
+      if (saved) pushToast("downloaded execution report");
+    } catch (e: unknown) {
+      pushToast(`download failed: ${resolveApiError(e)}`);
+    }
+  }, [pushToast]);
+
   const state = st.session?.state ?? "unknown";
   const warnings = st.session?.warnings ?? [];
   // Mirror the backend's state guards so controls are disabled when the
@@ -1018,6 +1042,7 @@ export default function App() {
         cancelDisabled={!canCancel}
         onCancel={() => void cancel()}
         onDone={() => void leaveRun()}
+        onDownload={() => void downloadReport()}
       />
     );
   } else {

@@ -1011,6 +1011,20 @@ select optgroup {
   font-size: 14px;
 }
 
+/* Header row of the execution report: title on the left, the download
+ * button on the right. */
+.report-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.report-head h2 {
+  margin: 0;
+}
+
 .note {
   color: var(--dim);
   margin: 4px 0;

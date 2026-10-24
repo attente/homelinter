@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { actionText, countsSummary, stateLabel } from '../lib/format';
-import { isFinal, type RunState } from '../lib/run';import type { ExecutionReport } from '../types';
+import { isFinal, type RunState } from '../lib/run';
+import type { ExecutionReport } from '../types';
 import { BackIcon } from './BackIcon';
+import { DownloadIcon } from './DownloadIcon';
 
 interface RunViewProps {
   state: string;
@@ -14,6 +16,8 @@ interface RunViewProps {
   cancelDisabled?: boolean;
   onCancel: () => void;
   onDone: () => void;
+  /** Download the finished report to a location the user chooses. */
+  onDownload: () => void;
 }
 
 const ROW_HEIGHT = 26;
@@ -24,10 +28,21 @@ const ROW_HEIGHT = 26;
  * finished, and cancel. Below it, one row per suggestion in the run - in
  * execution order, showing the action it performs (never its id) and a
  * status that updates as the run proceeds - and, once the report is in, the
- * run's summary counts. There is no console log: this list is the status.
+ * run's summary counts with a download icon button that saves the report to a
+ * location the user chooses. There is no console log: this list is the
+ * status.
  */
 export function RunView(props: RunViewProps) {
-  const { state, run, report, error, cancelDisabled, onCancel, onDone } = props;
+  const {
+    state,
+    run,
+    report,
+    error,
+    cancelDisabled,
+    onCancel,
+    onDone,
+    onDownload,
+  } = props;
   const items = run?.items ?? [];
   const done = run?.done ?? 0;
   const activeIndex = run?.activeIndex ?? -1;
@@ -155,6 +170,18 @@ export function RunView(props: RunViewProps) {
       </div>
       {report && (
         <section className="report">
+          <div className="report-head">
+            <h2>execution report</h2>
+            <button
+              type="button"
+              className="close-btn"
+              aria-label="download report"
+              title="download report to a file"
+              onClick={onDownload}
+            >
+              <DownloadIcon />
+            </button>
+          </div>
           {report.partial && (
             <p className="note warn">
               partial: some operations completed without finishing source cleanup or dependent repairs
