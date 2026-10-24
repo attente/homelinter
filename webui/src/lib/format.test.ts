@@ -364,6 +364,15 @@ describe('format', () => {
     expect(suggestionCountLabel(1234, 42, true)).toBe('42 of 1234 suggestions');
   });
 
+  it('shares the filter-row label with the manual-override count', () => {
+    expect(suggestionCountLabel(1234, 1234, false, 17)).toBe(
+      '1234 suggestions, 17 manual',
+    );
+    expect(suggestionCountLabel(1234, 42, true, 0)).toBe(
+      '42 of 1234 suggestions, 0 manual',
+    );
+  });
+
   it('path labels are scan-root relative, verbatim to three segments', () => {
     const root = '/home/a';
     expect(pathLabel('/home/a/IMG_1.jpg', root)).toBe('IMG_1.jpg');

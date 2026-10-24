@@ -1036,6 +1036,12 @@ export default function App() {
 
   const state = st.session?.state ?? "unknown";
   const warnings = st.session?.warnings ?? [];
+  // An earlier scan's batch is still loaded: the scan action then replaces
+  // those suggestions, so it is offered as the red `re-scan`. The session's
+  // whole-batch total is authoritative; `suggestionsTotal` is the filtered
+  // count and can legitimately be zero.
+  const hasSuggestions =
+    (st.session?.suggestions_total ?? st.suggestionsTotal) > 0;
   // Mirror the backend's state guards so controls are disabled when the
   // service would reject the request (see "Session Model" in DESIGN.md):
   // a new scan is only accepted outside scanning/analyzing/executing, and
@@ -1111,7 +1117,7 @@ export default function App() {
         defaultRoot={st.session?.scan_root ?? ""}
         defaultHome={st.session?.home ?? ""}
         configHash={st.session?.config_hash ?? null}
-        hasSuggestions={st.suggestionsTotal > 0}
+        hasSuggestions={hasSuggestions}
         startDisabled={!canScan}
         onStart={startScan}
         onResume={() => void enterBrowse()}
@@ -1169,6 +1175,7 @@ export default function App() {
         busy={st.busy}
         theme={theme}
         scanDisabled={!canScan}
+        replaceSuggestions={hasSuggestions}
         onNewScan={() =>
           patch({ showScanForm: true, phase: "idle", configOpen: false })
         }

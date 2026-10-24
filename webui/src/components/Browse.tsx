@@ -920,19 +920,26 @@ export function Browse(props: BrowseProps) {
               </option>
             ))}
           </select>
-          <span className="count-chip" title="suggestions with saved manual metadata overrides">
-            {manualCount} manual
-          </span>
           <button
             type="button"
-            className="filter-btn"
+            className="close-btn"
             disabled={filtersDefault}
+            aria-label="reset filters"
+            title="reset filters"
             onClick={() => onFilterChange(ALL_FILTER)}
           >
-            reset
+            <CloseIcon />
           </button>
-          <span className="count-chip">
-            {suggestionCountLabel(totalSuggestions, filteredSuggestions, !filtersDefault)}
+          <span
+            className="count-chip"
+            title={`${manualCount} suggestion(s) with saved manual metadata overrides`}
+          >
+            {suggestionCountLabel(
+              totalSuggestions,
+              filteredSuggestions,
+              !filtersDefault,
+              manualCount,
+            )}
           </span>
         </div>
         <div className="toolbar">

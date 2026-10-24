@@ -1169,15 +1169,17 @@ export function ScanForm(props: ScanFormProps) {
         <div className="toolbar">
           <button
             type="submit"
-            className="go"
+            className={hasSuggestions ? "caution" : "go"}
             disabled={startDisabled}
             title={
               startDisabled
                 ? "a scan or execution is already in progress"
-                : undefined
+                : hasSuggestions
+                  ? "re-scan replaces the earlier scan's suggestions"
+                  : undefined
             }
           >
-            scan
+            {hasSuggestions ? "re-scan" : "scan"}
           </button>
         </div>
       </form>

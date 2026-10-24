@@ -360,13 +360,17 @@ export function metadataProgressLabel(
 /**
  * Count label for the filter row: `1234 suggestions` while no dimension is
  * constrained, `42 of 1234 suggestions` while the list shows a filtered
- * subset of the batch.
+ * subset of the batch. When `manual` is given, the batch's manual-override
+ * count shares the label (`1234 suggestions, 17 manual`) instead of taking a
+ * chip of its own.
  */
 export function suggestionCountLabel(
   total: number,
   matched: number,
   filtered: boolean,
+  manual?: number,
 ): string {
   const noun = total === 1 ? 'suggestion' : 'suggestions';
-  return filtered ? `${matched} of ${total} ${noun}` : `${total} ${noun}`;
+  const count = filtered ? `${matched} of ${total} ${noun}` : `${total} ${noun}`;
+  return manual === undefined ? count : `${count}, ${manual} manual`;
 }
