@@ -606,11 +606,15 @@ async fn run_one(
 /// caller has set the session to `Executing` under the lock beforehand.
 pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
     let cancel_token = app.cancel.load(Ordering::SeqCst);
-    let root = {
+    let (root, scan_started_at) = {
         let sess = app.session.lock().await;
-        sess.root().unwrap_or(&sess.home).to_path_buf()
+        (
+            sess.root().unwrap_or(&sess.home).to_path_buf(),
+            sess.scan_started_at.clone(),
+        )
     };
     let mut report = ExecutionReport::empty(&root);
+    report.scan_started_at = scan_started_at;
 
     // Deterministic execution order: batch ids sorted by suggestion sort key.
     // Only Pending suggestions run; already-executed or rejected ids are
@@ -772,6 +776,7 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         pos += 1;
     }
 
+    report.executed_at = Some(chrono::Utc::now().to_rfc3339());
     {
         let mut sess = app.session.lock().await;
         sess.report = Some(report.clone());

@@ -820,6 +820,8 @@ async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|e| e["result"] == "executed"));
     assert_eq!(report["scan_root"], env.home.to_string_lossy().as_ref());
+    assert!(report["scan_started_at"].is_string(), "{report}");
+    assert!(report["executed_at"].is_string(), "{report}");
 
     // Suggestion statuses now executed.
     assert!(suggestion_ids(&app, "executed").await.len() >= 2);

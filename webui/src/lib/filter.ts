@@ -20,7 +20,7 @@ export const STATUS_OPTIONS: ReadonlyArray<FilterOption<'all' | SuggestionStatus
   { value: 'all', label: 'any status' },
   { value: 'pending', label: 'pending' },
   { value: 'rejected', label: 'rejected' },
-  { value: 'executed', label: 'executed' },
+  { value: 'executed', label: 'done' },
   { value: 'partial', label: 'partial' },
   { value: 'failed', label: 'failed' },
   { value: 'skipped', label: 'skipped' },

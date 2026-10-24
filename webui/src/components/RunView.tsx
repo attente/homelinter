@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { actionText, countsSummary, stateLabel } from '../lib/format';
+import { actionText, countsSummary, stateLabel, statusLabel } from '../lib/format';
+import { reportHasIssues } from '../lib/report';
 import { isFinal, type RunState } from '../lib/run';
 import type { ExecutionReport } from '../types';
 import { BackIcon } from './BackIcon';
@@ -27,10 +28,10 @@ const ROW_HEIGHT = 26;
  * the session state, one progress meter over the suggestions that have
  * finished, and cancel. Below it, one row per suggestion in the run - in
  * execution order, showing the action it performs (never its id) and a
- * status that updates as the run proceeds - and, once the report is in, the
- * run's summary counts with a download icon button that saves the report to a
- * location the user chooses. There is no console log: this list is the
- * status.
+ * status that updates as the run proceeds. Once the report is in, a download
+ * icon button sits at the top right of the header and the summary pane appears
+ * below the list only when something did not finish cleanly. There is no
+ * console log: this list is the status.
  */
 export function RunView(props: RunViewProps) {
   const {
@@ -82,6 +83,7 @@ export function RunView(props: RunViewProps) {
 
   const percent =
     items.length === 0 ? 100 : Math.round((done / items.length) * 100);
+  const showReport = report !== null && reportHasIssues(report, run, error);
 
   return (
     <main className="run-view">
@@ -121,6 +123,17 @@ export function RunView(props: RunViewProps) {
           >
             cancel
           </button>
+          {report && (
+            <button
+              type="button"
+              className="close-btn"
+              aria-label="download report"
+              title="download report to a file"
+              onClick={onDownload}
+            >
+              <DownloadIcon />
+            </button>
+          )}
         </div>
       </div>
       <div className="run-items" ref={scrollRef} onScroll={onScroll}>
@@ -150,7 +163,7 @@ export function RunView(props: RunViewProps) {
                     transform: `translateY(${v.start}px)`,
                   }}
                 >
-                  <span className="run-item-status">{status}</span>
+                  <span className="run-item-status">{statusLabel(status)}</span>
                   <span className="run-item-label" title={actionText(item.parts)}>
                     {item.parts.map((p, i) =>
                       p.kind === 'path' ? (
@@ -168,20 +181,9 @@ export function RunView(props: RunViewProps) {
           </ol>
         )}
       </div>
-      {report && (
+      {showReport && report && (
         <section className="report">
-          <div className="report-head">
-            <h2>execution report</h2>
-            <button
-              type="button"
-              className="close-btn"
-              aria-label="download report"
-              title="download report to a file"
-              onClick={onDownload}
-            >
-              <DownloadIcon />
-            </button>
-          </div>
+          <h2>execution report</h2>
           {report.partial && (
             <p className="note warn">
               partial: some operations completed without finishing source cleanup or dependent repairs
@@ -196,7 +198,8 @@ export function RunView(props: RunViewProps) {
   );
 }
 
-/** One summary line over the run's final results, at the bottom of the view. */
+/** One summary line over the run's final results, when the report pane is
+ *  shown because something needs attention. */
 function ReportSummary({ run }: { run: RunState | null }) {
   const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   if (run) {

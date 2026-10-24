@@ -130,6 +130,10 @@ export interface ExecutionReport {
   partial: boolean;
   scan_root: string;
   platform: string;
+  /** RFC 3339 timestamp of when the scan that produced this batch started. */
+  scan_started_at?: string | null;
+  /** RFC 3339 timestamp of when execution finished. */
+  executed_at?: string | null;
 }
 
 export interface ScanProgress {

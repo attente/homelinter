@@ -12,7 +12,7 @@ import type {
   OperationOutcome,
   ReportEntry,
 } from '../types';
-import { actionText, type ReportCounts } from './format';
+import { actionText, statusLabel, type ReportCounts } from './format';
 import { isFinal, type RunItemStatus, type RunState } from './run';
 
 export interface ExecutionReportInput {
@@ -79,15 +79,16 @@ function actionFor(
   entry: ReportEntry | undefined,
 ): ReportAction {
   const operations = entry?.operations ?? [];
+  const label = operationsLabel(operations) ?? fallbackLabel;
   return {
     id,
-    label: operationsLabel(operations) ?? fallbackLabel ?? id,
+    label: label ? pastTenseAction(label) : id,
     status,
     operations,
   };
 }
 
-/** `move <source> to <destination>` or `delete <source>` from the parent
+/** `moved <source> to <destination>` or `deleted <source>` from the parent
  *  operation, so the report carries the full absolute paths it recorded.
  *  Dependent repairs are not parent actions, so they never supply it. */
 function operationsLabel(operations: OperationOutcome[]): string | null {
@@ -97,10 +98,35 @@ function operationsLabel(operations: OperationOutcome[]): string | null {
   if (!parent || !parent.source) return null;
   if (parent.operation === 'move') {
     return parent.destination
-      ? `move ${parent.source} to ${parent.destination}`
-      : `move ${parent.source}`;
+      ? `moved ${parent.source} to ${parent.destination}`
+      : `moved ${parent.source}`;
   }
-  return `delete ${parent.source}`;
+  return `deleted ${parent.source}`;
+}
+
+/** Put an action's leading verb in the past tense, as a historical report
+ *  should read. The run model's live labels use the imperative form. */
+function pastTenseAction(label: string): string {
+  if (label.startsWith('move ')) return `moved ${label.slice(5)}`;
+  if (label.startsWith('delete ')) return `deleted ${label.slice(7)}`;
+  return label;
+}
+
+/** True when the report has anything worth calling out beyond actions that
+ *  finished cleanly: a run error, a partial run, or any action or operation
+ *  that did not complete without a detail. The SPA hides the report pane
+ *  when everything is `done`. */
+export function reportHasIssues(
+  report: ExecutionReport,
+  run: RunState | null,
+  error?: string | null,
+): boolean {
+  if (error || report.partial) return true;
+  return reportActions(report, run).some(
+    (action) =>
+      action.status !== 'executed' ||
+      action.operations.some((op) => op.status !== 'completed' || !!op.detail),
+  );
 }
 
 /** An action counts as an error when it did not fully finish, or when one of
@@ -127,7 +153,13 @@ function notableOps(action: ReportAction): OperationOutcome[] {
 }
 
 function operationLine(op: OperationOutcome): string {
-  const parts = [`${op.operation}: ${op.status}`];
+  const verb =
+    op.operation === 'move'
+      ? 'moved'
+      : op.operation === 'delete'
+        ? 'deleted'
+        : 'repaired symlink';
+  const parts = [`${verb}: ${op.status}`];
   if (op.source && op.destination) {
     parts.push(`${op.source} -> ${op.destination}`);
   } else if (op.source ?? op.destination) {
@@ -138,7 +170,7 @@ function operationLine(op: OperationOutcome): string {
 }
 
 function actionLine(action: ReportAction): string {
-  return `  [${action.status}] ${action.label}`;
+  return `  [${statusLabel(action.status)}] ${action.label}`;
 }
 
 function countActions(actions: ReportAction[]): ReportCounts {
@@ -164,7 +196,7 @@ export function executionReportText(input: ExecutionReportInput): string {
   lines.push('');
   lines.push(`summary (${actions.length} ${plural('action', actions.length)})`);
   for (const key of ['executed', 'partial', 'failed', 'skipped'] as const) {
-    lines.push(`  ${key.padEnd(8)} ${counts[key]}`);
+    lines.push(`  ${statusLabel(key).padEnd(8)} ${counts[key]}`);
   }
   lines.push('');
   if (error) {
@@ -172,6 +204,12 @@ export function executionReportText(input: ExecutionReportInput): string {
   }
   lines.push(`scan root: ${report.scan_root}`);
   lines.push(`platform: ${report.platform}`);
+  if (report.scan_started_at) {
+    lines.push(`scan started: ${report.scan_started_at}`);
+  }
+  if (report.executed_at) {
+    lines.push(`executed: ${report.executed_at}`);
+  }
   lines.push(`generated: ${at.toISOString()}`);
   lines.push(
     report.partial

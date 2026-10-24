@@ -105,7 +105,7 @@ export function rowLabel(s: Suggestion, root?: string | null): string {
     return `${marker} scanning ${fileName(s.target)}`;
   }
   const action = actionLabel(s, root);
-  const status = s.status === 'pending' ? '' : ` (${s.status})`;
+  const status = s.status === 'pending' ? '' : ` (${statusLabel(s.status)})`;
   const rejected = s.rejection_reason
     ? ` [rejected: ${head(s.rejection_reason, 48)}]`
     : '';
@@ -131,6 +131,12 @@ export function manualOverrideLabel(
 export function head(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 3)}...`;
+}
+
+/** The SPA's display word for an internal execution status: a successful
+ *  execution is shown as `done`, while the API keeps using `executed`. */
+export function statusLabel(status: string): string {
+  return status === 'executed' ? 'done' : status;
 }
 
 export interface ReportCounts {
@@ -163,11 +169,11 @@ export function countsOf(entries: ReportEntry[]): ReportCounts {
 
 export function countsSummary(counts: ReportCounts): string {
   const parts: string[] = [];
-  if (counts.executed > 0) parts.push(`executed=${counts.executed}`);
+  if (counts.executed > 0) parts.push(`done=${counts.executed}`);
   if (counts.partial > 0) parts.push(`partial=${counts.partial}`);
   if (counts.failed > 0) parts.push(`failed=${counts.failed}`);
   if (counts.skipped > 0) parts.push(`skipped=${counts.skipped}`);
-  return parts.join('  ') || 'no entries executed';
+  return parts.join('  ') || 'no actions done';
 }
 
 export function elapsedLabel(ms: number): string {

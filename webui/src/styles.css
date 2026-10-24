@@ -838,6 +838,12 @@ select optgroup {
   color: var(--dim);
 }
 
+/* Keep the run's actions at the right edge of the status header, so the
+   download button sits in its top-right corner. */
+.run-status .toolbar {
+  margin-left: auto;
+}
+
 /* Scanning view stage list: one row per scan phase. Completed rows stay
    frozen at their last reported counts with a full bar and a `100%` label.
    The cancel button is not in the list: it sits once in the scanning header
@@ -1021,20 +1027,6 @@ select optgroup {
 .report h2 {
   margin: 0 0 8px;
   font-size: 14px;
-}
-
-/* Header row of the execution report: title on the left, the download
- * button on the right. */
-.report-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.report-head h2 {
-  margin: 0;
 }
 
 .note {

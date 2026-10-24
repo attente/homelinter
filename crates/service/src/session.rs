@@ -30,6 +30,8 @@ pub struct Session {
     pub state: SessionState,
     /// Normalized absolute scan root captured when the scan started.
     pub scan_root: Option<PathBuf>,
+    /// RFC 3339 timestamp of when the current scan was accepted.
+    pub scan_started_at: Option<String>,
     /// Home directory used for the symlink index and relative destinations.
     pub home: PathBuf,
     pub platform: &'static str,
@@ -71,6 +73,7 @@ impl Session {
         Session {
             state: SessionState::Idle,
             scan_root: None,
+            scan_started_at: None,
             home,
             platform: homelinter_model::config::platform_name(),
             config,

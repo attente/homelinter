@@ -5,6 +5,7 @@ import {
   executionReportFilename,
   executionReportText,
   reportActions,
+  reportHasIssues,
 } from './report';
 import type {
   ExecutionReport,
@@ -102,6 +103,8 @@ function report(): ExecutionReport {
     partial: true,
     scan_root: '/scan',
     platform: 'linux',
+    scan_started_at: '2025-03-05T13:55:00+00:00',
+    executed_at: '2025-03-05T14:02:00+00:00',
   };
 }
 
@@ -127,11 +130,11 @@ describe('executionReportText', () => {
       run: runState(),
       generatedAt: AT,
     });
-    expect(text).toContain('  executed 1');
+    expect(text).toContain('  done     1');
     expect(text).toContain('  partial  1');
     expect(text).toContain('  failed   1');
     expect(text).toContain('  skipped  1');
-    expect(text).toContain('[skipped] delete dup.jpg, duplicate of keeper.jpg');
+    expect(text).toContain('[skipped] deleted dup.jpg, duplicate of keeper.jpg');
   });
 
   it('records failed operations and their details in the errors section', () => {
@@ -141,13 +144,13 @@ describe('executionReportText', () => {
       generatedAt: AT,
     });
     expect(text).toContain(
-      '[failed] move /scan/b.jpg to /scan/keep/b.jpg',
+      '[failed] moved /scan/b.jpg to /scan/keep/b.jpg',
     );
     expect(text).toContain(
-      '    move: failed /scan/b.jpg -> /scan/keep/b.jpg - destination exists; refusing to overwrite',
+      '    moved: failed /scan/b.jpg -> /scan/keep/b.jpg - destination exists; refusing to overwrite',
     );
     expect(text).toContain(
-      '    repair_symlink: failed /scan/old/c.jpg -> /scan/keep/c.jpg - link is unreadable',
+      '    repaired symlink: failed /scan/old/c.jpg -> /scan/keep/c.jpg - link is unreadable',
     );
   });
 
@@ -157,15 +160,15 @@ describe('executionReportText', () => {
       run: runState(),
       generatedAt: AT,
     });
-    expect(text).toContain('[executed] move /scan/a.jpg to /scan/keep/a.jpg');
+    expect(text).toContain('[done] moved /scan/a.jpg to /scan/keep/a.jpg');
     // A plain completed parent operation repeats the action line, so it is
     // left out; a completed parent carrying a detail (the partial
     // cross-filesystem move) is kept.
     expect(text).not.toContain(
-      '    move: completed /scan/a.jpg -> /scan/keep/a.jpg',
+      '    moved: completed /scan/a.jpg -> /scan/keep/a.jpg',
     );
     expect(text).toContain(
-      '    move: completed /scan/old/c.jpg -> /scan/keep/c.jpg - source removal failed; leftover at /scan/old/c.jpg',
+      '    moved: completed /scan/old/c.jpg -> /scan/keep/c.jpg - source removal failed; leftover at /scan/old/c.jpg',
     );
     expect(text).toContain('    no operations recorded');
   });
@@ -180,6 +183,8 @@ describe('executionReportText', () => {
     expect(text).toContain('run error: scan was cancelled');
     expect(text).toContain('scan root: /scan');
     expect(text).toContain('platform: linux');
+    expect(text).toContain('scan started: 2025-03-05T13:55:00+00:00');
+    expect(text).toContain('executed: 2025-03-05T14:02:00+00:00');
     expect(text).toContain('generated: 2025-03-05T14:02:11.000Z');
     expect(text).toContain('partial: yes');
     expect(text.indexOf('run error:')).toBeLessThan(text.indexOf('errors (2)'));
@@ -188,15 +193,40 @@ describe('executionReportText', () => {
   it('falls back to report operations when no run model is available', () => {
     const actions = reportActions(report(), null);
     expect(actions.map((a) => a.label)).toEqual([
-      'move /scan/a.jpg to /scan/keep/a.jpg',
-      'move /scan/b.jpg to /scan/keep/b.jpg',
-      'move /scan/old/c.jpg to /scan/keep/c.jpg',
+      'moved /scan/a.jpg to /scan/keep/a.jpg',
+      'moved /scan/b.jpg to /scan/keep/b.jpg',
+      'moved /scan/old/c.jpg to /scan/keep/c.jpg',
     ]);
     expect(actions.map((a) => a.status)).toEqual([
       'executed',
       'failed',
       'partial',
     ]);
+  });
+
+  it('shows the report pane only when something did not finish cleanly', () => {
+    const clean: ExecutionReport = {
+      entries: [
+        {
+          suggestion_id: 's-1',
+          result: 'executed',
+          operations: [
+            {
+              operation: 'move',
+              source: '/scan/a.jpg',
+              destination: '/scan/keep/a.jpg',
+              status: 'completed',
+            },
+          ],
+        },
+      ],
+      partial: false,
+      scan_root: '/scan',
+      platform: 'linux',
+    };
+    expect(reportHasIssues(clean, null)).toBe(false);
+    expect(reportHasIssues(clean, runState(), 'scan was cancelled')).toBe(true);
+    expect(reportHasIssues(report(), runState())).toBe(true);
   });
 
   it('stays ASCII only', () => {

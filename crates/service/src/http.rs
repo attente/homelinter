@@ -403,6 +403,7 @@ async fn session_scan(State(app): State<AppHandle>, Json(_body): Json<ScanBody>)
         };
         sess.state = SessionState::Scanning;
         sess.scan_root = Some(root.clone());
+        sess.scan_started_at = Some(chrono::Utc::now().to_rfc3339());
         // The new scan replaces the session: previous suggestions,
         // selection, and the execution report are discarded.
         sess.suggestions.clear();
@@ -898,13 +899,18 @@ async fn execute(State(app): State<AppHandle>, Json(body): Json<IdsBody>) -> Api
         if executable.is_empty() {
             // Everything resolved to already-executed or rejected: normal
             // acceptance with an empty report.
-            let root = {
+            let (root, scan_started_at) = {
                 let sess = app.session.lock().await;
-                sess.root()
-                    .map(|r| r.to_path_buf())
-                    .unwrap_or_else(|| sess.home.clone())
+                (
+                    sess.root()
+                        .map(|r| r.to_path_buf())
+                        .unwrap_or_else(|| sess.home.clone()),
+                    sess.scan_started_at.clone(),
+                )
             };
-            let report = ExecutionReport::empty(&root);
+            let mut report = ExecutionReport::empty(&root);
+            report.scan_started_at = scan_started_at;
+            report.executed_at = Some(chrono::Utc::now().to_rfc3339());
             {
                 let mut sess = app.session.lock().await;
                 sess.state = SessionState::Done;

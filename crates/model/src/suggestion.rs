@@ -282,6 +282,14 @@ pub struct ExecutionReport {
     pub partial: bool,
     pub scan_root: String,
     pub platform: String,
+    /// When the scan that produced this batch started, as an RFC 3339
+    /// timestamp. Absent in reports produced outside a service session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_started_at: Option<String>,
+    /// When execution finished, as an RFC 3339 timestamp. Absent in reports
+    /// produced outside a service session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_at: Option<String>,
 }
 
 impl ExecutionReport {
@@ -291,6 +299,8 @@ impl ExecutionReport {
             partial: false,
             scan_root: scan_root.to_string_lossy().into_owned(),
             platform: crate::config::platform_name().to_string(),
+            scan_started_at: None,
+            executed_at: None,
         }
     }
 }
