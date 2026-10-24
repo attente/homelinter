@@ -185,7 +185,7 @@ export function ConfigView(props: ConfigViewProps) {
               </button>
               <button
                 type="button"
-                className="danger"
+                className="caution"
                 onClick={() => setConfirmClear(true)}
               >
                 clear cache
@@ -268,7 +268,7 @@ export function ConfigView(props: ConfigViewProps) {
               </button>
               <button
                 type="button"
-                className="danger"
+                className="caution"
                 onClick={() => void onClearCache()}
               >
                 clear cache
