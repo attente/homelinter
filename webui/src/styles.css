@@ -839,7 +839,7 @@ select optgroup {
 }
 
 /* Keep the run's actions and summary at the right edge of the status header,
-   so the download button and counts sit in its top-right corner. */
+   so the disabled cancel and the counts sit in its top-right corner. */
 .run-status .toolbar {
   margin-left: auto;
 }
@@ -943,6 +943,25 @@ select optgroup {
   margin: 0;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
+}
+
+/* The list wrapper anchors the download icon at the top-right corner of the
+   status list: it floats over the rows instead of taking a place in the
+   header, and the solid button background keeps it legible above them. */
+.run-list-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.run-download {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
 }
 
 /* Execution list: one row per suggestion in the run, in execution order,

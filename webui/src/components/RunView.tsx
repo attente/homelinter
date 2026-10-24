@@ -28,9 +28,10 @@ const ROW_HEIGHT = 26;
  * finished, and cancel. Below it, one row per suggestion in the run - in
  * execution order, showing the action it performs (never its id) and a
  * status that updates as the run proceeds. Once the report is in, the summary
- * counts sit in the header to the right of the cancel and download controls,
- * and a partial run or run error shows as a plain status line below the list.
- * There is no console log: this list is the status.
+ * counts sit in the header to the right of the disabled cancel, a download
+ * icon floats at the top-right corner of the status list, and a partial run
+ * or run error shows as a plain status line below the list. There is no
+ * console log: this list is the status.
  */
 export function RunView(props: RunViewProps) {
   const {
@@ -121,63 +122,65 @@ export function RunView(props: RunViewProps) {
           >
             cancel
           </button>
-          {report && (
-            <button
-              type="button"
-              className="close-btn"
-              aria-label="download report"
-              title="download report to a file"
-              onClick={onDownload}
-            >
-              <DownloadIcon />
-            </button>
-          )}
           {report && <ReportSummary run={run} />}
         </div>
       </div>
-      <div className="run-items" ref={scrollRef} onScroll={onScroll}>
-        {items.length === 0 ? (
-          <div className="run-empty">no suggestions in this run</div>
-        ) : (
-          <ol className="run-list" style={{ height: virtualizer.getTotalSize() }}>
-            {virtualizer.getVirtualItems().map((v) => {
-              const item = items[v.index];
-              // The active suggestion is the one executing or next in line:
-              // the service runs one suggestion at a time, so the first row
-              // without a final result is the live one.
-              const status =
-                v.index === activeIndex && !isFinal(item.status)
-                  ? 'running'
-                  : item.status;
-              return (
-                <li
-                  key={item.id}
-                  className={`run-item status-${status}`}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: v.size,
-                    transform: `translateY(${v.start}px)`,
-                  }}
-                >
-                  <span className="run-item-status">{statusLabel(status)}</span>
-                  <span className="run-item-label" title={actionText(item.parts)}>
-                    {item.parts.map((p, i) =>
-                      p.kind === 'path' ? (
-                        <span key={i} className="run-path">
-                          {p.text}
-                        </span>
-                      ) : (
-                        p.text
-                      ),
-                    )}
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
+      <div className="run-list-wrap">
+        <div className="run-items" ref={scrollRef} onScroll={onScroll}>
+          {items.length === 0 ? (
+            <div className="run-empty">no suggestions in this run</div>
+          ) : (
+            <ol className="run-list" style={{ height: virtualizer.getTotalSize() }}>
+              {virtualizer.getVirtualItems().map((v) => {
+                const item = items[v.index];
+                // The active suggestion is the one executing or next in line:
+                // the service runs one suggestion at a time, so the first row
+                // without a final result is the live one.
+                const status =
+                  v.index === activeIndex && !isFinal(item.status)
+                    ? 'running'
+                    : item.status;
+                return (
+                  <li
+                    key={item.id}
+                    className={`run-item status-${status}`}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: v.size,
+                      transform: `translateY(${v.start}px)`,
+                    }}
+                  >
+                    <span className="run-item-status">{statusLabel(status)}</span>
+                    <span className="run-item-label" title={actionText(item.parts)}>
+                      {item.parts.map((p, i) =>
+                        p.kind === 'path' ? (
+                          <span key={i} className="run-path">
+                            {p.text}
+                          </span>
+                        ) : (
+                          p.text
+                        ),
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+        {report && (
+          <button
+            type="button"
+            className="close-btn run-download"
+            aria-label="download report"
+            title="download report to a file"
+            onClick={onDownload}
+          >
+            <DownloadIcon />
+          </button>
         )}
       </div>
       {report?.partial && (
@@ -191,7 +194,7 @@ export function RunView(props: RunViewProps) {
 }
 
 /** The run's final counts, shown in the status header to the right of the
- *  cancel and download controls once the report is in: the same words the
+ *  disabled cancel button once the report is in: the same words the
  *  downloaded report and the TUI use. */
 function ReportSummary({ run }: { run: RunState | null }) {
   const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
