@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, resolveApiError, SelectionFilter } from "./api";
 import { Browse } from "./components/Browse";
+import { CloseIcon } from "./components/CloseIcon";
 import { ConfigView } from "./components/ConfigView";
 import { Header } from "./components/Header";
 import { RunView } from "./components/RunView";
@@ -824,6 +825,12 @@ export default function App() {
     );
   }, []);
   const configDirty = batchIsStale(st.session, st.suggestionsTotal);
+  // The stale-configuration banner is advisory, so it can be dismissed for
+  // the hash pair it describes; a new scan or another configuration edit
+  // changes those hashes and brings the warning back.
+  const [dismissedStale, setDismissedStale] = useState<string | null>(null);
+  const staleKey = `${st.session?.batch_config_hash ?? ""}:${st.session?.config_hash ?? ""}`;
+  const showConfigDirty = configDirty && dismissedStale !== staleKey;
 
   const readSelection = useCallback(async (): Promise<string[] | null> => {
     try {
@@ -1066,11 +1073,22 @@ export default function App() {
   // its not-yet-refreshed rows) and the run view floats over it.
   const browseView = (
     <>
-      {configDirty && (
-        <p className="banner warn" role="status">
-          Configuration changed after this scan: the suggestions still use the
-          scan's settings. Start a new scan to apply the changes.
-        </p>
+      {showConfigDirty && (
+        <div className="banner notice">
+          <p role="status">
+            Configuration changed after this scan: the suggestions still use the
+            scan's settings. Start a new scan to apply the changes.
+          </p>
+          <button
+            type="button"
+            className="close-btn banner-close"
+            aria-label="dismiss configuration warning"
+            title="dismiss configuration warning"
+            onClick={() => setDismissedStale(staleKey)}
+          >
+            <CloseIcon />
+          </button>
+        </div>
       )}
       <Browse
         suggestions={st.suggestions}

@@ -1235,6 +1235,9 @@ select optgroup {
 }
 
 .banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   margin: 8px 12px 0;
   padding: 8px 12px;
   border: 1px solid var(--bad);
@@ -1246,6 +1249,14 @@ select optgroup {
 .banner.notice {
   border-color: var(--busy);
   color: var(--busy);
+}
+
+/* A dismissable advisory banner keeps its text left and its close button at
+   the right edge, aligned with the first line of text. */
+.banner-close {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: inherit;
 }
 
 .banner p {
