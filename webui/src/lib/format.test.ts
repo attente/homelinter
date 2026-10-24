@@ -21,6 +21,7 @@ import {
   suggestionCountLabel,
   countsOf,
   countsSummary,
+  countsSummaryParts,
   statusLabel,
   actionLabel,
   actionLabelParts,
@@ -509,6 +510,19 @@ describe('format', () => {
     expect(countsSummary({ executed: 0, partial: 0, failed: 0, skipped: 0 })).toBe(
       'no actions done',
     );
+    expect(countsSummaryParts(countsOf(entries))).toEqual([
+      { label: 'done=1', tone: 'ok' },
+      { label: 'partial=1', tone: 'busy' },
+      { label: 'failed=1', tone: 'bad' },
+      { label: 'skipped=1', tone: 'dim' },
+    ]);
+    expect(countsSummaryParts({ executed: 3, partial: 0, failed: 0, skipped: 2 })).toEqual([
+      { label: 'done=3', tone: 'ok' },
+      { label: 'skipped=2', tone: 'dim' },
+    ]);
+    expect(countsSummaryParts({ executed: 0, partial: 0, failed: 0, skipped: 0 })).toEqual([
+      { label: 'no actions done', tone: 'dim' },
+    ]);
     expect(statusLabel('executed')).toBe('done');
     expect(statusLabel('partial')).toBe('partial');
   });

@@ -935,14 +935,28 @@ select optgroup {
   font-variant-numeric: tabular-nums;
 }
 
-/* The run's final summary counts, once the report is in, at the right of the
-   status header beside the disabled cancel: the same quiet tone as the
-   progress count, with tabular digits so the words do not shift. */
+/* The run's final summary counts, once the report is in, immediately after
+   the disabled cancel button in the status header. The container keeps the
+   progress count's quiet tone; each count then takes the colour of its
+   outcome's run rows, so the summary reads by goodness, with tabular digits
+   so the words do not shift. */
 .run-summary {
   flex: 0 0 auto;
   margin: 0;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
+}
+
+.run-summary .part-ok {
+  color: var(--ok);
+}
+
+.run-summary .part-busy {
+  color: var(--busy);
+}
+
+.run-summary .part-bad {
+  color: var(--bad);
 }
 
 /* The list wrapper anchors the download icon at the top-right corner of the

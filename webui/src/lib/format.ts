@@ -167,13 +167,29 @@ export function countsOf(entries: ReportEntry[]): ReportCounts {
   return counts;
 }
 
+export type CountsTone = 'ok' | 'busy' | 'bad' | 'dim';
+
+/** The summary counts as labelled parts, each carrying the outcome tone its
+ *  run rows use, so the header can colour the counts by goodness. */
+export function countsSummaryParts(
+  counts: ReportCounts,
+): Array<{ label: string; tone: CountsTone }> {
+  const halves: Array<[string, number, CountsTone]> = [
+    ['done', counts.executed, 'ok'],
+    ['partial', counts.partial, 'busy'],
+    ['failed', counts.failed, 'bad'],
+    ['skipped', counts.skipped, 'dim'],
+  ];
+  const parts = halves
+    .filter(([, n]) => n > 0)
+    .map(([word, n, tone]) => ({ label: `${word}=${n}`, tone }));
+  return parts.length > 0 ? parts : [{ label: 'no actions done', tone: 'dim' }];
+}
+
 export function countsSummary(counts: ReportCounts): string {
-  const parts: string[] = [];
-  if (counts.executed > 0) parts.push(`done=${counts.executed}`);
-  if (counts.partial > 0) parts.push(`partial=${counts.partial}`);
-  if (counts.failed > 0) parts.push(`failed=${counts.failed}`);
-  if (counts.skipped > 0) parts.push(`skipped=${counts.skipped}`);
-  return parts.join('  ') || 'no actions done';
+  return countsSummaryParts(counts)
+    .map((part) => part.label)
+    .join('  ');
 }
 
 export function elapsedLabel(ms: number): string {

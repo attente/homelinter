@@ -1,6 +1,11 @@
 import { useEffect, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { actionText, countsSummary, stateLabel, statusLabel } from '../lib/format';
+import {
+  actionText,
+  countsSummaryParts,
+  stateLabel,
+  statusLabel,
+} from '../lib/format';
 import { isFinal, type RunState } from '../lib/run';
 import type { ExecutionReport } from '../types';
 import { BackIcon } from './BackIcon';
@@ -193,9 +198,10 @@ export function RunView(props: RunViewProps) {
   );
 }
 
-/** The run's final counts, shown in the status header to the right of the
+/** The run's final counts, shown in the status header immediately after the
  *  disabled cancel button once the report is in: the same words the
- *  downloaded report and the TUI use. */
+ *  downloaded report and the TUI use, each count coloured by its outcome's
+ *  goodness (the colours its rows use on the list). */
 function ReportSummary({ run }: { run: RunState | null }) {
   const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   if (run) {
@@ -203,5 +209,13 @@ function ReportSummary({ run }: { run: RunState | null }) {
       if (isFinal(item.status)) counts[item.status] += 1;
     }
   }
-  return <p className="run-summary">{countsSummary(counts)}</p>;
+  return (
+    <p className="run-summary">
+      {countsSummaryParts(counts).map((part) => (
+        <span key={part.label} className={`run-summary-part part-${part.tone}`}>
+          {part.label}
+        </span>
+      ))}
+    </p>
+  );
 }
