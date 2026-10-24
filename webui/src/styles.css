@@ -838,8 +838,8 @@ select optgroup {
   color: var(--dim);
 }
 
-/* Keep the run's actions at the right edge of the status header, so the
-   download button sits in its top-right corner. */
+/* Keep the run's actions and summary at the right edge of the status header,
+   so the download button and counts sit in its top-right corner. */
 .run-status .toolbar {
   margin-left: auto;
 }
@@ -935,6 +935,16 @@ select optgroup {
   font-variant-numeric: tabular-nums;
 }
 
+/* The run's final summary counts, once the report is in, at the right of the
+   status header beside the disabled cancel: the same quiet tone as the
+   progress count, with tabular digits so the words do not shift. */
+.run-summary {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Execution list: one row per suggestion in the run, in execution order,
    each showing the action it performs and its live status. The same
    windowed-row geometry as the suggestion list, so a selection of any size
@@ -1017,18 +1027,6 @@ select optgroup {
   padding: 8px;
 }
 
-.report {
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 12px;
-}
-
-.report h2 {
-  margin: 0 0 8px;
-  font-size: 14px;
-}
-
 .note {
   color: var(--dim);
   margin: 4px 0;
@@ -1096,17 +1094,6 @@ select optgroup {
 
 .error {
   color: var(--bad);
-}
-
-.report-summary {
-  color: var(--ok);
-}
-
-.report-entries {
-  margin: 8px 0;
-  padding-left: 18px;
-  max-height: 220px;
-  overflow-y: auto;
 }
 
 /* Config view (read-only) */

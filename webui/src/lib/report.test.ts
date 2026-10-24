@@ -5,7 +5,6 @@ import {
   executionReportFilename,
   executionReportText,
   reportActions,
-  reportHasIssues,
 } from './report';
 import type {
   ExecutionReport,
@@ -202,31 +201,6 @@ describe('executionReportText', () => {
       'failed',
       'partial',
     ]);
-  });
-
-  it('shows the report pane only when something did not finish cleanly', () => {
-    const clean: ExecutionReport = {
-      entries: [
-        {
-          suggestion_id: 's-1',
-          result: 'executed',
-          operations: [
-            {
-              operation: 'move',
-              source: '/scan/a.jpg',
-              destination: '/scan/keep/a.jpg',
-              status: 'completed',
-            },
-          ],
-        },
-      ],
-      partial: false,
-      scan_root: '/scan',
-      platform: 'linux',
-    };
-    expect(reportHasIssues(clean, null)).toBe(false);
-    expect(reportHasIssues(clean, runState(), 'scan was cancelled')).toBe(true);
-    expect(reportHasIssues(report(), runState())).toBe(true);
   });
 
   it('stays ASCII only', () => {

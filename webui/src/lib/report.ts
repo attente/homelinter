@@ -112,23 +112,6 @@ function pastTenseAction(label: string): string {
   return label;
 }
 
-/** True when the report has anything worth calling out beyond actions that
- *  finished cleanly: a run error, a partial run, or any action or operation
- *  that did not complete without a detail. The SPA hides the report pane
- *  when everything is `done`. */
-export function reportHasIssues(
-  report: ExecutionReport,
-  run: RunState | null,
-  error?: string | null,
-): boolean {
-  if (error || report.partial) return true;
-  return reportActions(report, run).some(
-    (action) =>
-      action.status !== 'executed' ||
-      action.operations.some((op) => op.status !== 'completed' || !!op.detail),
-  );
-}
-
 /** An action counts as an error when it did not fully finish, or when one of
  *  its operations failed, was skipped, or carried a detail (a completed move
  *  with a detail is the published partial cross-filesystem completion). */
