@@ -10,6 +10,7 @@ import { isFinal, type RunState } from '../lib/run';
 import { useEscapeClose } from '../lib/modal';
 import type { ExecutionReport } from '../types';
 import { CloseIcon } from './CloseIcon';
+import { CopyablePath } from './CopyablePath';
 import { DownloadIcon } from './DownloadIcon';
 
 interface RunViewProps {
@@ -181,9 +182,13 @@ export function RunView(props: RunViewProps) {
                       <span className="run-item-label" title={actionText(item.parts)}>
                         {item.parts.map((p, i) =>
                           p.kind === 'path' ? (
-                            <span key={i} className="run-path">
-                              {p.text}
-                            </span>
+                            <CopyablePath
+                              key={i}
+                              value={p.path ?? p.text}
+                              display={p.text}
+                              className="run-path"
+                              buttonClassName="run-path-copy"
+                            />
                           ) : (
                             p.text
                           ),

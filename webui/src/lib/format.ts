@@ -57,7 +57,11 @@ function fileName(path: string): string {
  *  that the run list renders in the monospace stack. */
 export interface ActionPart {
   kind: 'text' | 'path';
+  /** Display text: a path is scan-root relative and may be truncated. */
   text: string;
+  /** The full absolute path a path part stands for, so clicking it copies
+   *  what the shortened display cannot show. Absent on text parts. */
+  path?: string;
 }
 
 export interface ActionLabelOptions {
@@ -85,21 +89,25 @@ export function actionLabelParts(
     if (typeof dupOf === 'string' && dupOf.length > 0) {
       return [
         { kind: 'text', text: past ? 'deleted ' : 'delete ' },
-        { kind: 'path', text: name },
+        { kind: 'path', text: name, path: s.target },
         { kind: 'text', text: ', duplicate of ' },
-        { kind: 'path', text: pathLabel(dupOf, root) },
+        { kind: 'path', text: pathLabel(dupOf, root), path: dupOf },
       ];
     }
     return [
       { kind: 'text', text: past ? 'deleted ' : 'delete ' },
-      { kind: 'path', text: name },
+      { kind: 'path', text: name, path: s.target },
     ];
   }
   return [
     { kind: 'text', text: past ? 'moved ' : 'move ' },
-    { kind: 'path', text: name },
+    { kind: 'path', text: name, path: s.target },
     { kind: 'text', text: ' to ' },
-    { kind: 'path', text: s.new_path ? pathLabel(s.new_path, root) : '?' },
+    {
+      kind: 'path',
+      text: s.new_path ? pathLabel(s.new_path, root) : '?',
+      path: s.new_path ?? undefined,
+    },
   ];
 }
 

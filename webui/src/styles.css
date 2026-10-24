@@ -797,17 +797,21 @@ select optgroup {
   word-break: break-all;
 }
 
-/* The path text itself is an inline, clickable run so a long path wraps
-   naturally and the copy button stays at the end of the text. */
-.path-copy {
+/* Path text is an inline, clickable run: clicking it copies the full path,
+   a longer path wraps naturally in the preview, and the copy button stays
+   at the end of the text. The run list's paths use the same affordances. */
+.path-copy,
+.run-path {
   cursor: pointer;
 }
 
-.path-copy:hover {
+.path-copy:hover,
+.run-path:hover {
   text-decoration: underline;
 }
 
-.path-copy:focus-visible {
+.path-copy:focus-visible,
+.run-path:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1175,6 +1179,13 @@ select optgroup {
 .run-path {
   font-family: var(--mono);
   font-size: 12px;
+}
+
+/* The clipboard button after a run-list path fits the fixed row height and
+   sits tight against its path, so a move's two paths stay in one sentence. */
+.run-path-copy {
+  margin-left: 3px;
+  padding: 1px;
 }
 
 /* Rows that nothing happened to stay dim; the active row carries the accent;

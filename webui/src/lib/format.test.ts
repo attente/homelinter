@@ -503,9 +503,13 @@ describe('format', () => {
     const parts = actionLabelParts(sampleSuggestion(), '/home/a');
     expect(parts).toEqual([
       { kind: 'text', text: 'move ' },
-      { kind: 'path', text: 'IMG_1.jpg' },
+      { kind: 'path', text: 'IMG_1.jpg', path: '/home/a/IMG_1.jpg' },
       { kind: 'text', text: ' to ' },
-      { kind: 'path', text: 'Pictures/2024/IMG_1.jpg' },
+      {
+        kind: 'path',
+        text: 'Pictures/2024/IMG_1.jpg',
+        path: '/home/a/Pictures/2024/IMG_1.jpg',
+      },
     ]);
     expect(actionText(parts)).toBe(actionLabel(sampleSuggestion(), '/home/a'));
     expect(
@@ -518,6 +522,32 @@ describe('format', () => {
         '/home/a',
       ).map((p) => p.kind),
     ).toEqual(['text', 'path', 'text', 'path']);
+  });
+
+  it('path parts carry the full path for copying', () => {
+    const move = actionLabelParts(sampleSuggestion(), '/home/a');
+    expect(move.filter((p) => p.kind === 'path').map((p) => p.path)).toEqual([
+      '/home/a/IMG_1.jpg',
+      '/home/a/Pictures/2024/IMG_1.jpg',
+    ]);
+    const dup = actionLabelParts(
+      sampleSuggestion({
+        type: 'delete',
+        new_path: null,
+        metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
+      }),
+      '/home/a',
+    );
+    expect(dup.filter((p) => p.kind === 'path').map((p) => p.path)).toEqual([
+      '/home/a/IMG_1.jpg',
+      '/home/a/keeper/IMG_1.jpg',
+    ]);
+    // A missing destination has no full path to copy, only the "?" display.
+    const unknown = actionLabelParts(
+      sampleSuggestion({ new_path: null }),
+      '/home/a',
+    );
+    expect(unknown.at(-1)).toEqual({ kind: 'path', text: '?', path: undefined });
   });
 
   it('action parts use the past tense for the execution list', () => {

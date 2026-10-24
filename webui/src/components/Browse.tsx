@@ -26,7 +26,7 @@ import { previewSourcePath } from '../lib/preview';
 import { useEscapeClose } from '../lib/modal';
 import type { MetadataProgress, Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
-import { CheckIcon, CopyIcon } from './CopyIcon';
+import { CopyablePath } from './CopyablePath';
 import { ExpandIcon } from './ExpandIcon';
 import { RefreshIcon } from './RefreshIcon';
 
@@ -211,80 +211,15 @@ function RebuildButton(props: {
   );
 }
 
-/** Copy `value` to the clipboard, using the async Clipboard API when it is
- *  available and falling back to a hidden textarea + `execCommand` otherwise
- *  (for example a non-secure context). Resolves to whether the copy worked. */
-async function copyText(value: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-      return true;
-    }
-  } catch {
-    // Fall through to the legacy path.
-  }
-  try {
-    const el = document.createElement('textarea');
-    el.value = value;
-    el.style.position = 'fixed';
-    el.style.opacity = '0';
-    document.body.appendChild(el);
-    el.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(el);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 /** One source/destination path in the preview. Both the path text and a
- *  trailing button copy the full path to the clipboard; the button confirms
- *  the copy for a moment. */
+ *  trailing button copy the full path to the clipboard (see
+ *  `CopyablePath`). */
 function PathRow(props: { label: string; value: string; action?: ReactNode }) {
   const { label, value, action } = props;
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current !== null) window.clearTimeout(timer.current);
-    },
-    [],
-  );
-  const copy = async () => {
-    if (await copyText(value)) {
-      setCopied(true);
-      if (timer.current !== null) window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => setCopied(false), 1500);
-    }
-  };
   return (
     <p className="detail-path">
       <span className="detail-label">{label} </span>
-      <span
-        className="path-copy"
-        role="button"
-        tabIndex={0}
-        title="copy path to clipboard"
-        onClick={() => void copy()}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            void copy();
-          }
-        }}
-      >
-        {value}
-      </span>
-      <button
-        type="button"
-        className="path-copy-btn"
-        title={copied ? 'copied' : 'copy path to clipboard'}
-        aria-label={copied ? 'copied' : 'copy path to clipboard'}
-        onClick={() => void copy()}
-      >
-        {copied ? <CheckIcon /> : <CopyIcon />}
-      </button>
+      <CopyablePath value={value} className="path-copy" />
       {action}
     </p>
   );
