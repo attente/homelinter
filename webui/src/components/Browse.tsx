@@ -19,6 +19,7 @@ import {
   manualOverrideLabel,
   metadataProgressLabel,
   rowText,
+  rowTone,
   suggestionCountLabel,
 } from '../lib/format';
 import { previewSourcePath } from '../lib/preview';
@@ -607,12 +608,17 @@ const SuggestionRow = memo(function SuggestionRow({
   onToggleManualFilter,
 }: SuggestionRowProps) {
   const overrides = suggestion.manual_overrides ?? [];
+  // Finished rows carry their outcome as the row's colour rather than a
+  // status suffix: green and struck for done, red for rejected/failed,
+  // orange for partial, dim for skipped.
+  const tone = rowTone(suggestion.status);
   return (
     <>
       <input
         type="checkbox"
         className="row-check"
-        checked={suggestion.selected}
+        checked={suggestion.selected && suggestion.status !== 'executed'}
+        disabled={suggestion.status === 'executed'}
         onChange={() => onToggle(suggestion.id, !suggestion.selected)}
         aria-label="select"
       />
@@ -621,7 +627,13 @@ const SuggestionRow = memo(function SuggestionRow({
         className="row-hit"
         onClick={() => onOpen(suggestion.id)}
       >
-        <span className="row-text">
+        <span
+          className={
+            tone === null
+              ? 'row-text'
+              : `row-text row-status-${tone}`
+          }
+        >
           {suggestion.metadata_pending && (
             <span className="spinner" aria-hidden="true" />
           )}

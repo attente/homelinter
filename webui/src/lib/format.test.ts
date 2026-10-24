@@ -30,6 +30,8 @@ import {
   metadataProgressLabel,
   pathLabel,
   rowLabel,
+  rowText,
+  rowTone,
   shorten,
 } from './format';
 import type { ReportEntry, Suggestion } from '../types';
@@ -438,18 +440,35 @@ describe('format', () => {
     expect(resolved).not.toContain('scanning');
   });
 
-  it('row label shows the rejection reason when present', () => {
+  it('row label shows the rejection reason when present, without a status suffix', () => {
     const s = sampleSuggestion({
       status: 'rejected',
       rejection_reason: 'destination_collision:also=abc123',
     });
     const label = rowLabel(s);
-    expect(label).toContain('(rejected)');
     expect(label).toContain('[rejected: destination_collision:also=abc123]');
+    expect(label).not.toContain('(rejected)');
     const plain = rowLabel(sampleSuggestion({ status: 'rejected' }));
     expect(plain).not.toContain('[rejected:');
   });
 
+  it('no row label appends the outcome in parentheses', () => {
+    expect(rowLabel(sampleSuggestion({ status: 'pending' }))).not.toContain('(');
+    for (const status of ['executed', 'partial', 'failed', 'skipped'] as const) {
+      const label = rowText(sampleSuggestion({ status }), '/home/a');
+      expect(label).not.toMatch(/\(/);
+      expect(label).not.toContain(statusLabel(status));
+    }
+  });
+
+  it('row tone maps each finished outcome to its colour class', () => {
+    expect(rowTone('pending')).toBeNull();
+    expect(rowTone('executed')).toBe('done');
+    expect(rowTone('partial')).toBe('partial');
+    expect(rowTone('failed')).toBe('bad');
+    expect(rowTone('rejected')).toBe('bad');
+    expect(rowTone('skipped')).toBe('skipped');
+  });
 
   it('action label reads the performed operation, not the id', () => {
     const root = '/home/a';

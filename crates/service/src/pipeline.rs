@@ -732,6 +732,12 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
         {
             let mut sess = app.session.lock().await;
             sess.suggestions[i].status = s.status;
+            if s.status == SuggestionStatus::Executed {
+                // A done suggestion leaves the selection: its checkbox clears
+                // and disables, the batch total stops counting it as selected,
+                // and a later run cannot try to execute it again.
+                sess.suggestions[i].selected = false;
+            }
             if s.suggestion_type == homelinter_model::suggestion::SuggestionType::Move
                 && s.status == SuggestionStatus::Executed
             {

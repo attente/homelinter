@@ -529,6 +529,33 @@ select optgroup {
   text-overflow: ellipsis;
 }
 
+/* Finished rows carry their outcome as the row's own colour instead of a
+   status suffix: done is the ok green with the whole sentence struck
+   through, rejected and failed are the bad red, partial is the busy amber,
+   and skipped stays dim. Pending rows keep the plain text colour. */
+.list-row .row-text.row-status-done {
+  color: var(--ok);
+  text-decoration: line-through;
+}
+
+.list-row .row-text.row-status-bad {
+  color: var(--bad);
+}
+
+.list-row .row-text.row-status-partial {
+  color: var(--busy);
+}
+
+.list-row .row-text.row-status-skipped {
+  color: var(--dim);
+}
+
+/* A done row's checkbox is cleared and disabled: nothing is left to run, and
+   the row cannot be re-selected. */
+.list-row .row-check:disabled {
+  cursor: default;
+}
+
 .list-row.row-open .row-hit {
   background: var(--bg);
   border-color: var(--line);

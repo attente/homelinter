@@ -1,7 +1,13 @@
 // Display formatting helpers shared by components. ASCII only, matching
 // the house style and the TUI's rendering conventions.
 
-import type { ReportEntry, ScanProgress, ScanStage, Suggestion } from '../types';
+import type {
+  ReportEntry,
+  ScanProgress,
+  ScanStage,
+  Suggestion,
+  SuggestionStatus,
+} from '../types';
 
 /**
  * A path as shown in a suggestion row: made relative to the scan root when
@@ -115,16 +121,40 @@ export function rowLabel(s: Suggestion, root?: string | null): string {
     return `${marker} scanning ${fileName(s.target)}`;
   }
   const action = actionLabel(s, root);
-  const status = s.status === 'pending' ? '' : ` (${statusLabel(s.status)})`;
   const rejected = s.rejection_reason
     ? ` [rejected: ${head(s.rejection_reason, 48)}]`
     : '';
-  return `${marker} ${action}${status}${rejected}`;
+  return `${marker} ${action}${rejected}`;
 }
 
 /** rowLabel without the leading selection marker, for use next to a real checkbox. */
 export function rowText(s: Suggestion, root?: string | null): string {
   return rowLabel(s, root).slice(4);
+}
+
+/**
+ * The outcome tone of a browser row, carried as a class instead of a status
+ * suffix: a done row reads green and struck through, red marks rejected and
+ * failed rows, orange marks a partial run, and skipped rows stay dim. A
+ * pending (or still metadata-pending) row has no tone and keeps the normal
+ * text colour.
+ */
+export type RowTone = 'done' | 'bad' | 'partial' | 'skipped';
+
+export function rowTone(status: SuggestionStatus): RowTone | null {
+  switch (status) {
+    case 'executed':
+      return 'done';
+    case 'rejected':
+    case 'failed':
+      return 'bad';
+    case 'partial':
+      return 'partial';
+    case 'skipped':
+      return 'skipped';
+    default:
+      return null;
+  }
 }
 
 /** Human-readable list of the fields backed by manual overrides. */
