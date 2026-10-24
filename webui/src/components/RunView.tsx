@@ -7,8 +7,9 @@ import {
   statusLabel,
 } from '../lib/format';
 import { isFinal, type RunState } from '../lib/run';
+import { useEscapeClose } from '../lib/modal';
 import type { ExecutionReport } from '../types';
-import { BackIcon } from './BackIcon';
+import { CloseIcon } from './CloseIcon';
 import { DownloadIcon } from './DownloadIcon';
 
 interface RunViewProps {
@@ -28,7 +29,7 @@ interface RunViewProps {
 const ROW_HEIGHT = 26;
 
 /**
- * The execution view. The header carries the back icon button (top left),
+ * The execution modal. The header carries the close icon button (top left),
  * the session state, one progress meter over the suggestions that have
  * finished, and cancel. Below it, one row per suggestion in the run - in
  * execution order, showing the action it performs (never its id) and a
@@ -37,6 +38,10 @@ const ROW_HEIGHT = 26;
  * icon floats at the top-right corner of the status list, and a partial run
  * or run error shows as a plain status line below the list. There is no
  * console log: this list is the status.
+ *
+ * The view is a modal over the suggestion browser: the close icon, a click
+ * on the backdrop, and Escape all run the same exit, so leaving mid-run just
+ * hides the view and the execution carries on in the background.
  */
 export function RunView(props: RunViewProps) {
   const {
@@ -89,112 +94,126 @@ export function RunView(props: RunViewProps) {
   const percent =
     items.length === 0 ? 100 : Math.round((done / items.length) * 100);
 
+  useEscapeClose(true, onDone);
+
   return (
-    <main className="run-view">
-      <div className="run-status">
-        <button
-          type="button"
-          className="close-btn"
-          aria-label="back to suggestions"
-          title="back to suggestions"
-          onClick={onDone}
-        >
-          <BackIcon />
-        </button>
-        <span className="state-busy">{stateLabel(state)}</span>
-        <div
-          className="scan-meter-bar"
-          role="progressbar"
-          aria-label="execution progress"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-        >
-          <div
-            className="scan-meter-fill"
-            style={{ width: `${percent}%` }}
-          />
-        </div>
-        <span className="run-progress-count">
-          {done}/{items.length}
-        </span>
-        <div className="toolbar">
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onClick={onDone}
+    >
+      <div
+        className="modal run-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="execution"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="run-status">
           <button
             type="button"
-            onClick={onCancel}
-            disabled={cancelDisabled}
-            title={cancelDisabled ? 'nothing is in progress to cancel' : undefined}
+            className="close-btn"
+            aria-label="close execution view"
+            title="close execution view"
+            onClick={onDone}
           >
-            cancel
+            <CloseIcon />
           </button>
-          {report && <ReportSummary run={run} />}
+          <span className="state-busy">{stateLabel(state)}</span>
+          <div
+            className="scan-meter-bar"
+            role="progressbar"
+            aria-label="execution progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <div
+              className="scan-meter-fill"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+          <span className="run-progress-count">
+            {done}/{items.length}
+          </span>
+          <div className="toolbar">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={cancelDisabled}
+              title={cancelDisabled ? 'nothing is in progress to cancel' : undefined}
+            >
+              cancel
+            </button>
+            {report && <ReportSummary run={run} />}
+          </div>
         </div>
-      </div>
-      <div className="run-list-wrap">
-        <div className="run-items" ref={scrollRef} onScroll={onScroll}>
-          {items.length === 0 ? (
-            <div className="run-empty">no suggestions in this run</div>
-          ) : (
-            <ol className="run-list" style={{ height: virtualizer.getTotalSize() }}>
-              {virtualizer.getVirtualItems().map((v) => {
-                const item = items[v.index];
-                // The active suggestion is the one executing or next in line:
-                // the service runs one suggestion at a time, so the first row
-                // without a final result is the live one.
-                const status =
-                  v.index === activeIndex && !isFinal(item.status)
-                    ? 'running'
-                    : item.status;
-                return (
-                  <li
-                    key={item.id}
-                    className={`run-item status-${status}`}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: v.size,
-                      transform: `translateY(${v.start}px)`,
-                    }}
-                  >
-                    <span className="run-item-status">{statusLabel(status)}</span>
-                    <span className="run-item-label" title={actionText(item.parts)}>
-                      {item.parts.map((p, i) =>
-                        p.kind === 'path' ? (
-                          <span key={i} className="run-path">
-                            {p.text}
-                          </span>
-                        ) : (
-                          p.text
-                        ),
-                      )}
-                    </span>
-                  </li>
-                );
-              })}
-            </ol>
+        <div className="run-list-wrap">
+          <div className="run-items" ref={scrollRef} onScroll={onScroll}>
+            {items.length === 0 ? (
+              <div className="run-empty">no suggestions in this run</div>
+            ) : (
+              <ol className="run-list" style={{ height: virtualizer.getTotalSize() }}>
+                {virtualizer.getVirtualItems().map((v) => {
+                  const item = items[v.index];
+                  // The active suggestion is the one executing or next in line:
+                  // the service runs one suggestion at a time, so the first row
+                  // without a final result is the live one.
+                  const status =
+                    v.index === activeIndex && !isFinal(item.status)
+                      ? 'running'
+                      : item.status;
+                  return (
+                    <li
+                      key={item.id}
+                      className={`run-item status-${status}`}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: v.size,
+                        transform: `translateY(${v.start}px)`,
+                      }}
+                    >
+                      <span className="run-item-status">{statusLabel(status)}</span>
+                      <span className="run-item-label" title={actionText(item.parts)}>
+                        {item.parts.map((p, i) =>
+                          p.kind === 'path' ? (
+                            <span key={i} className="run-path">
+                              {p.text}
+                            </span>
+                          ) : (
+                            p.text
+                          ),
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+          {report && (
+            <button
+              type="button"
+              className="close-btn run-download"
+              aria-label="download report"
+              title="download report to a file"
+              onClick={onDownload}
+            >
+              <DownloadIcon />
+            </button>
           )}
         </div>
-        {report && (
-          <button
-            type="button"
-            className="close-btn run-download"
-            aria-label="download report"
-            title="download report to a file"
-            onClick={onDownload}
-          >
-            <DownloadIcon />
-          </button>
+        {report?.partial && (
+          <p className="note warn">
+            partial: some operations completed without finishing source cleanup or dependent repairs
+          </p>
         )}
+        {error && <p className="error">{error}</p>}
       </div>
-      {report?.partial && (
-        <p className="note warn">
-          partial: some operations completed without finishing source cleanup or dependent repairs
-        </p>
-      )}
-      {error && <p className="error">{error}</p>}
-    </main>
+    </div>
   );
 }
 

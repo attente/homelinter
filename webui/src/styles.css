@@ -848,7 +848,10 @@ select optgroup {
   padding: 8px;
 }
 
-/* Run view */
+/* Run view
+
+   Two homes share the inner layout (status header, list, optional notes):
+   the scanning view fills the page as an ordinary `main`. */
 
 .run-view {
   display: flex;
@@ -1245,6 +1248,20 @@ select optgroup {
   color: var(--dim);
   cursor: pointer;
   margin-bottom: 8px;
+}
+
+/* Execution modal (the run view floating over the suggestion browser). The
+   list needs more width and height than a confirmation dialog, so the panel
+   is large and the status list scrolls inside it. Declared after `.modal` so
+   its padding, width, and height win. */
+.run-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(960px, 92vw);
+  height: min(78vh, 660px);
+  max-width: none;
+  padding: 12px 16px;
 }
 
 /* Cache viewer modal (opened from the configuration view). The table needs

@@ -991,6 +991,46 @@ export default function App() {
     st.session?.cache_misses ?? 0,
   );
 
+  // The suggestion browser is the page beneath the execution modal: while a
+  // run executes or its report is showing, the browser stays mounted (with
+  // its not-yet-refreshed rows) and the run view floats over it.
+  const browseView = (
+    <>
+      {configDirty && (
+        <p className="banner warn" role="status">
+          Configuration changed after this scan: the suggestions still use the
+          scan's settings. Start a new scan to apply the changes.
+        </p>
+      )}
+      <Browse
+        suggestions={st.suggestions}
+        kinds={st.kinds}
+        filter={st.filter}
+        totalSuggestions={st.session?.suggestions_total ?? st.suggestionsTotal}
+        filteredSuggestions={st.suggestionsTotal}
+        selectedCount={st.session?.selection_count ?? 0}
+        manualCount={st.session?.manual_overrides_total ?? 0}
+        metadataProgress={st.metadataProgress}
+        cacheHits={st.session?.cache_hits ?? 0}
+        cacheMisses={st.session?.cache_misses ?? 0}
+        actionsDisabled={!canAct}
+        root={st.session?.scan_root ?? null}
+        onFilterChange={applyFilter}
+        onLoadMore={() => void loadMore()}
+        onToggle={toggle}
+        onSelectFiltered={selectFiltered}
+        onClearFiltered={clearFiltered}
+        onRun={() => void run()}
+        onExport={() => void exportPlan()}
+        onRefreshMetadata={(id, clearOverrides) =>
+          void refreshMetadata(id, clearOverrides)
+        }
+        onSetMetadata={(id, edit) => void setMetadata(id, edit)}
+        onRebuild={(id) => void rebuildSuggestion(id)}
+      />
+    </>
+  );
+
   let body;
   if (st.configOpen) {
     body = (
@@ -1039,54 +1079,22 @@ export default function App() {
     );
   } else if (st.phase === "running" || st.phase === "report") {
     body = (
-      <RunView
-        state={state}
-        run={st.run}
-        report={st.report}
-        error={st.runError}
-        cancelDisabled={!canCancel}
-        onCancel={() => void cancel()}
-        onDone={() => void leaveRun()}
-        onDownload={() => void downloadReport()}
-      />
-    );
-  } else {
-    body = (
       <>
-        {configDirty && (
-          <p className="banner warn" role="status">
-            Configuration changed after this scan: the suggestions still use the
-            scan's settings. Start a new scan to apply the changes.
-          </p>
-        )}
-        <Browse
-          suggestions={st.suggestions}
-          kinds={st.kinds}
-          filter={st.filter}
-          totalSuggestions={st.session?.suggestions_total ?? st.suggestionsTotal}
-          filteredSuggestions={st.suggestionsTotal}
-          selectedCount={st.session?.selection_count ?? 0}
-          manualCount={st.session?.manual_overrides_total ?? 0}
-          metadataProgress={st.metadataProgress}
-          cacheHits={st.session?.cache_hits ?? 0}
-          cacheMisses={st.session?.cache_misses ?? 0}
-          actionsDisabled={!canAct}
-          root={st.session?.scan_root ?? null}
-          onFilterChange={applyFilter}
-          onLoadMore={() => void loadMore()}
-          onToggle={toggle}
-          onSelectFiltered={selectFiltered}
-          onClearFiltered={clearFiltered}
-          onRun={() => void run()}
-          onExport={() => void exportPlan()}
-          onRefreshMetadata={(id, clearOverrides) =>
-            void refreshMetadata(id, clearOverrides)
-          }
-          onSetMetadata={(id, edit) => void setMetadata(id, edit)}
-          onRebuild={(id) => void rebuildSuggestion(id)}
+        {browseView}
+        <RunView
+          state={state}
+          run={st.run}
+          report={st.report}
+          error={st.runError}
+          cancelDisabled={!canCancel}
+          onCancel={() => void cancel()}
+          onDone={() => void leaveRun()}
+          onDownload={() => void downloadReport()}
         />
       </>
     );
+  } else {
+    body = browseView;
   }
 
   return (
