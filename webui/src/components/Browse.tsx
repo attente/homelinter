@@ -965,6 +965,9 @@ export function Browse(props: BrowseProps) {
                       transform: `translateY(${v.start}px)`,
                     }}
                   >
+                    <span className="row-lineno" aria-hidden="true">
+                      {v.index + 1}
+                    </span>
                     <SuggestionRow
                       suggestion={s}
                       root={root ?? null}

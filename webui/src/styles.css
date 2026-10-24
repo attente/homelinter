@@ -8,6 +8,7 @@
   --fg: #d7dae0;
   --bright: #ffffff;
   --dim: #8b90a0;
+  --lineno: #454b56;
   --line: #2e323c;
   --accent: #7aa2f7;
   --ok: #9ece6a;
@@ -35,6 +36,7 @@
   --fg: #22252c;
   --bright: #090b10;
   --dim: #596170;
+  --lineno: #b6bdc7;
   --line: #c4cad4;
   --accent: #1d5fbf;
   --ok: #2b7430;
@@ -523,6 +525,19 @@ select optgroup {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.list-row .row-lineno {
+  flex: 0 0 auto;
+  /* Right-aligned in a column wide enough for the whole filtered set, so the
+     numbers line up and the checkboxes never move. */
+  width: var(--lineno-width, 4ch);
+  text-align: right;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--lineno);
+  user-select: none;
 }
 
 .list-row .row-check {
