@@ -54,33 +54,43 @@ export interface ActionPart {
   text: string;
 }
 
+export interface ActionLabelOptions {
+  /** Past tense (`moved`, `deleted`) for historical contexts: the execution
+   *  list and the downloaded report describe what happened, while the
+   *  browser's rows describe what a suggestion would do. */
+  past?: boolean;
+}
+
 /** The action sentence for a suggestion as display parts: `move <path> to
  *  <path>` for moves and `delete <path>, duplicate of <path>` for duplicate
  *  deletes (the retained keeper read from the suggestion's
- *  `duplicate_of` metadata). The parts let the run view keep the words in the
- *  UI typeface while the paths carry the monospace stack. */
+ *  `duplicate_of` metadata), or `moved`/`deleted` with `{ past: true }`. The
+ *  parts let the run view keep the words in the UI typeface while the paths
+ *  carry the monospace stack. */
 export function actionLabelParts(
   s: Suggestion,
   root?: string | null,
+  options?: ActionLabelOptions,
 ): ActionPart[] {
+  const past = options?.past === true;
   const name = pathLabel(s.target, root);
   if (s.type === 'delete') {
     const dupOf = s.metadata?.duplicate_of;
     if (typeof dupOf === 'string' && dupOf.length > 0) {
       return [
-        { kind: 'text', text: 'delete ' },
+        { kind: 'text', text: past ? 'deleted ' : 'delete ' },
         { kind: 'path', text: name },
         { kind: 'text', text: ', duplicate of ' },
         { kind: 'path', text: pathLabel(dupOf, root) },
       ];
     }
     return [
-      { kind: 'text', text: 'delete ' },
+      { kind: 'text', text: past ? 'deleted ' : 'delete ' },
       { kind: 'path', text: name },
     ];
   }
   return [
-    { kind: 'text', text: 'move ' },
+    { kind: 'text', text: past ? 'moved ' : 'move ' },
     { kind: 'path', text: name },
     { kind: 'text', text: ' to ' },
     { kind: 'path', text: s.new_path ? pathLabel(s.new_path, root) : '?' },

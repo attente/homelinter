@@ -403,7 +403,9 @@ export default function App() {
                 ...prev.run,
                 items: prev.run.items.map((it) => {
                   const s = fetched.get(it.id);
-                  return s ? { ...it, parts: actionLabelParts(s, root) } : it;
+                  return s
+                    ? { ...it, parts: actionLabelParts(s, root, { past: true }) }
+                    : it;
                 }),
               }
             : prev.run,

@@ -107,6 +107,34 @@ function report(): ExecutionReport {
   };
 }
 
+describe('executionReportText timestamps', () => {
+  it('renders every timestamp in one UTC second-precision form', () => {
+    const text = executionReportText({
+      report: {
+        ...report(),
+        // Fractional seconds and a non-UTC offset still normalize to one
+        // second-precision UTC form.
+        scan_started_at: '2025-03-05T15:55:00.123456789+02:00',
+        executed_at: '2025-03-05T16:02:00.5+02:00',
+      },
+      run: null,
+      generatedAt: AT,
+    });
+    expect(text).toContain('scanned: 2025-03-05T13:55:00Z');
+    expect(text).toContain('executed: 2025-03-05T14:02:00Z');
+    expect(text).toContain('generated: 2025-03-05T14:02:11Z');
+  });
+
+  it('prints an unparseable timestamp verbatim instead of dropping it', () => {
+    const text = executionReportText({
+      report: { ...report(), scan_started_at: 'not a time' },
+      run: null,
+      generatedAt: AT,
+    });
+    expect(text).toContain('scanned: not a time');
+  });
+});
+
 describe('executionReportText', () => {
   it('orders the summary, the errors, and then every action', () => {
     const text = executionReportText({
@@ -182,9 +210,9 @@ describe('executionReportText', () => {
     expect(text).toContain('run error: scan was cancelled');
     expect(text).toContain('scan root: /scan');
     expect(text).toContain('platform: linux');
-    expect(text).toContain('scan started: 2025-03-05T13:55:00+00:00');
-    expect(text).toContain('executed: 2025-03-05T14:02:00+00:00');
-    expect(text).toContain('generated: 2025-03-05T14:02:11.000Z');
+    expect(text).toContain('scanned: 2025-03-05T13:55:00Z');
+    expect(text).toContain('executed: 2025-03-05T14:02:00Z');
+    expect(text).toContain('generated: 2025-03-05T14:02:11Z');
     expect(text).toContain('partial: yes');
     expect(text.indexOf('run error:')).toBeLessThan(text.indexOf('errors (2)'));
   });

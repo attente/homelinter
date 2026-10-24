@@ -654,6 +654,24 @@ export function Browse(props: BrowseProps) {
   const [detailWidth, setDetailWidth] = useState(360);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
+  // Execute and export need both an actionable session state and a non-empty
+  // selection; the disabled reason says which of the two is missing.
+  const nothingSelected = selectedCount === 0;
+  const executeDisabled = actionsDisabled || nothingSelected;
+  const exportDisabled = actionsDisabled || nothingSelected;
+  const stateReason = (action: string) =>
+    `${action} is only available from a ready or done session`;
+  const executeTitle = actionsDisabled
+    ? stateReason('execute')
+    : nothingSelected
+      ? 'select at least one suggestion first'
+      : undefined;
+  const exportTitle = actionsDisabled
+    ? stateReason('export')
+    : nothingSelected
+      ? 'select at least one suggestion first'
+      : undefined;
+
   const kindOptions = useMemo<FilterOption<'all' | string>[]>(() => {
     // Keep an active kind selectable even if the batch summary omits it.
     const active = filter.kind !== 'all' && !kinds.includes(filter.kind) ? [filter.kind] : [];
@@ -880,17 +898,18 @@ export function Browse(props: BrowseProps) {
           <span className="sep" />
           <button
             type="button"
+            className="caution"
             onClick={() => onRun()}
-            disabled={actionsDisabled}
-            title={actionsDisabled ? 'execute is only available from a ready or done session' : undefined}
+            disabled={executeDisabled}
+            title={executeTitle}
           >
             execute
           </button>
           <button
             type="button"
             onClick={() => onExport()}
-            disabled={actionsDisabled}
-            title={actionsDisabled ? 'export is only available from a ready or done session' : undefined}
+            disabled={exportDisabled}
+            title={exportTitle}
           >
             export
           </button>

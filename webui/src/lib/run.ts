@@ -18,9 +18,10 @@ export interface RunItemOp {
 
 export interface RunItem {
   id: string;
-  /** Action sentence as display parts: the connecting words stay in the UI
-   *  typeface, the paths render in the monospace stack. For a suggestion
-   *  whose record is not fetched yet, the single part is its id. */
+  /** Action sentence as display parts in the past tense (`moved`, `deleted`):
+   *  the connecting words stay in the UI typeface, the paths render in the
+   *  monospace stack. For a suggestion whose record is not fetched yet, the
+   *  single part is its id. */
   parts: ActionPart[];
   status: RunItemStatus;
   /** Operations streamed so far; drives the derived result when the run
@@ -80,7 +81,11 @@ export function buildRunState(
   });
   const items: RunItem[] = records.map((r) => ({
     id: r.id,
-    parts: r.s ? actionLabelParts(r.s, root) : [{ kind: 'text', text: r.id }],
+    // The execution list reports what happened, so its verbs are past tense;
+    // the browse rows keep the imperative form for proposals.
+    parts: r.s
+      ? actionLabelParts(r.s, root, { past: true })
+      : [{ kind: 'text', text: r.id }],
     status: 'pending',
     ops: [],
   }));

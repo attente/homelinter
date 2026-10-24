@@ -129,6 +129,38 @@ button.danger:hover:not(:disabled) {
   color: var(--bad);
 }
 
+/* The two committing actions step out of the neutral button look: the scan
+   button is the green "go" action and execute the red caution action, each
+   a filled block so its weight is unmistakable at a glance. */
+button.go,
+button.caution {
+  font-weight: 600;
+}
+
+button.go {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--bg);
+}
+
+button.caution {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--bg);
+}
+
+button.go:hover:not(:disabled) {
+  border-color: var(--ok);
+  color: var(--bg);
+  filter: brightness(1.15);
+}
+
+button.caution:hover:not(:disabled) {
+  border-color: var(--bad);
+  color: var(--bg);
+  filter: brightness(1.15);
+}
+
 input[type="text"],
 textarea {
   background: var(--bg);

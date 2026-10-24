@@ -60,7 +60,7 @@ describe('buildRunState', () => {
     ]);
     const run = buildRunState(['m-1', 'x-9'], known, '/r');
     expect(actionText(run.items[0].parts)).toBe(
-      'move a.jpg to Pictures/IMG_1.jpg',
+      'moved a.jpg to Pictures/IMG_1.jpg',
     );
     expect(run.items[0].parts.map((p) => p.kind)).toEqual([
       'text',

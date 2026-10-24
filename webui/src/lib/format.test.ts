@@ -492,6 +492,27 @@ describe('format', () => {
     ).toEqual(['text', 'path', 'text', 'path']);
   });
 
+  it('action parts use the past tense for the execution list', () => {
+    expect(
+      actionText(actionLabelParts(sampleSuggestion(), '/home/a', { past: true })),
+    ).toBe('moved IMG_1.jpg to Pictures/2024/IMG_1.jpg');
+    expect(
+      actionText(
+        actionLabelParts(
+          sampleSuggestion({
+            type: 'delete',
+            new_path: null,
+            metadata: { duplicate_of: '/home/a/keeper/IMG_1.jpg' },
+          }),
+          '/home/a',
+          { past: true },
+        ),
+      ),
+    ).toBe('deleted IMG_1.jpg, duplicate of keeper/IMG_1.jpg');
+    // The browser's proposal rows keep the imperative form.
+    expect(actionLabel(sampleSuggestion(), '/home/a')).toContain('move ');
+  });
+
   it('counts and entry lines render reports', () => {
     const entries: ReportEntry[] = [
       { suggestion_id: 's-1', result: 'executed', operations: [] },

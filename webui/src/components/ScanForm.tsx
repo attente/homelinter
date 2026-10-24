@@ -1169,6 +1169,7 @@ export function ScanForm(props: ScanFormProps) {
         <div className="toolbar">
           <button
             type="submit"
+            className="go"
             disabled={startDisabled}
             title={
               startDisabled

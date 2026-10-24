@@ -82,7 +82,7 @@ function actionFor(
   const label = operationsLabel(operations) ?? fallbackLabel;
   return {
     id,
-    label: label ? pastTenseAction(label) : id,
+    label: label ?? id,
     status,
     operations,
   };
@@ -102,14 +102,6 @@ function operationsLabel(operations: OperationOutcome[]): string | null {
       : `moved ${parent.source}`;
   }
   return `deleted ${parent.source}`;
-}
-
-/** Put an action's leading verb in the past tense, as a historical report
- *  should read. The run model's live labels use the imperative form. */
-function pastTenseAction(label: string): string {
-  if (label.startsWith('move ')) return `moved ${label.slice(5)}`;
-  if (label.startsWith('delete ')) return `deleted ${label.slice(7)}`;
-  return label;
 }
 
 /** An action counts as an error when it did not fully finish, or when one of
@@ -188,12 +180,12 @@ export function executionReportText(input: ExecutionReportInput): string {
   lines.push(`scan root: ${report.scan_root}`);
   lines.push(`platform: ${report.platform}`);
   if (report.scan_started_at) {
-    lines.push(`scan started: ${report.scan_started_at}`);
+    lines.push(`scanned: ${reportStamp(report.scan_started_at)}`);
   }
   if (report.executed_at) {
-    lines.push(`executed: ${report.executed_at}`);
+    lines.push(`executed: ${reportStamp(report.executed_at)}`);
   }
-  lines.push(`generated: ${at.toISOString()}`);
+  lines.push(`generated: ${reportStamp(at)}`);
   lines.push(
     report.partial
       ? 'partial: yes (some actions completed without finishing source cleanup or dependent repairs)'
@@ -225,6 +217,20 @@ export function executionReportText(input: ExecutionReportInput): string {
 
 function plural(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
+}
+
+/**
+ * One report timestamp, in the single form every timestamp in the document
+ * uses: UTC, second precision, ISO 8601 (`2025-03-05T14:02:11Z`). The
+ * service supplies RFC 3339 values with variable fractional precision and a
+ * `+00:00` offset while the generation time is a local `Date`, so both are
+ * normalized here; a value that does not parse is printed verbatim rather
+ * than dropped.
+ */
+function reportStamp(value: string | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 /**
