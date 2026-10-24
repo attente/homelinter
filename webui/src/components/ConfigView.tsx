@@ -31,9 +31,11 @@ export function ConfigView(props: ConfigViewProps) {
   const [cache, setCache] = useState<CacheList | null>(null);
   const [cacheKind, setCacheKind] = useState("");
   const [cacheLoading, setCacheLoading] = useState(false);
-  // Escape dismisses the dialogs like their close buttons: with both open
-  // (the viewer under its clear-cache confirmation) it closes the topmost
-  // first, so the registration order here matches the stacking order.
+  // Escape dismisses the dialogs like their close buttons: the screen
+  // itself is registered first (it is the bottom of the stack) and the
+  // modals open on top, so with both open (the viewer under its
+  // clear-cache confirmation) Escape closes the topmost first.
+  useEscapeClose(true, onClose);
   useEscapeClose(cacheOpen, () => setCacheOpen(false));
   useEscapeClose(confirmClear, () => setConfirmClear(false));
 
