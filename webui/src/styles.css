@@ -926,6 +926,14 @@ select optgroup {
   margin-bottom: 10px;
 }
 
+/* The value a manual override replaced: quiet under the input, wrapped so a
+   long provider title does not widen the pane. */
+.meta-edit .field-original {
+  margin: 4px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .meta-edit input {
   width: 100%;
 }

@@ -309,6 +309,43 @@ fn build_move_suggestion(
     if let Some(a) = effective_author {
         metadata.insert("author".into(), serde_json::Value::String(a.clone()));
     }
+    // A manual override replaces the value the destination would otherwise
+    // use. Report that replaced value under `original_*` so the metadata tab
+    // can show what the edit hid. The location and author originals come from
+    // a cleared-override view, so their precedence (provider or GPS fallback;
+    // embedded author) cannot drift from what clearing the override would
+    // render. The subject is different: it is the content description (`%s`),
+    // so its original is the provider description the edit replaced, with an
+    // embedded title as the fallback when the provider returned nothing. A
+    // filename stem is never reported - it names the file rather than
+    // describing it. Only an overridden field gets a row, and only when there
+    // is a value to report.
+    if !f.overrides.is_empty() {
+        let mut cleared = f.clone();
+        cleared.overrides = homelinter_analyze::MetadataOverrides::default();
+        let originals = file_values(&cleared);
+        let mut insert = |key: &str, value: Option<&String>| {
+            if let Some(value) = value {
+                metadata.insert(key.to_string(), serde_json::Value::String(value.clone()));
+            }
+        };
+        if f.overrides.location.is_some() {
+            insert("original_location", originals.location.as_ref());
+        }
+        if f.overrides.subject.is_some() {
+            let description = f
+                .subject
+                .as_deref()
+                .and_then(meaningful)
+                .map(strip_trailing_document_extension)
+                .map(str::to_owned)
+                .or_else(|| f.authoritative_title().map(str::to_owned));
+            insert("original_description", description.as_ref());
+        }
+        if f.overrides.author.is_some() {
+            insert("original_author", originals.author.as_ref());
+        }
+    }
     // A move re-verifies content when analysis recorded a full-content hash:
     // every file below the fast-path threshold and every confirmed group
     // member has one, so carry it instead of dropping it. The sampling hash
@@ -809,6 +846,99 @@ mod tests {
         // `unknown` is no answer, so `%t` and `%s` use the stem.
         assert_eq!(file_values(&f).title.as_deref(), Some("Quarterly Report"));
         assert_eq!(file_values(&f).subject.as_deref(), Some("Quarterly Report"));
+    }
+
+    #[test]
+    fn metadata_reports_the_value_a_manual_override_replaced() {
+        let fmt = FormatString::parse("Archives/%f").unwrap();
+        let home = Path::new("/home/user");
+        let symlinks = SymlinkIndex::default();
+
+        // No override: nothing was replaced, so no `original_*` rows appear.
+        let plain = analyzed("/tmp/Untitled.jpg");
+        let s = rebuild_move_suggestion(&plain, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert!(!s.metadata.contains_key("original_location"));
+        assert!(!s.metadata.contains_key("original_description"));
+        assert!(!s.metadata.contains_key("original_author"));
+
+        // An override for every field reports the provider or embedded value
+        // the destination would have used without it. `title` carries the
+        // effective value the editor prefills `subject` from.
+        let mut f = analyzed("/tmp/Untitled.jpg");
+        f.location = Some("Berlin".into());
+        f.subject = Some("Provider Description".into());
+        f.embedded_title = Some("Embedded Title".into());
+        f.embedded_author = Some("Real Author".into());
+        f.overrides.location = Some("Manual Place".into());
+        f.overrides.subject = Some("Manual Subject".into());
+        f.overrides.author = Some("Manual Author".into());
+        let s = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.metadata.get("title").and_then(|v| v.as_str()),
+            Some("Manual Subject")
+        );
+        assert_eq!(
+            s.metadata.get("original_location").and_then(|v| v.as_str()),
+            Some("Berlin")
+        );
+        // The subject backs `%s`/`%t` but is the content description, so its
+        // original is the provider description, not the embedded title that
+        // would win `%t` without the override.
+        assert_eq!(
+            s.metadata
+                .get("original_description")
+                .and_then(|v| v.as_str()),
+            Some("Provider Description")
+        );
+        assert_eq!(
+            s.metadata.get("original_author").and_then(|v| v.as_str()),
+            Some("Real Author")
+        );
+
+        // An embedded title is the description only when the provider did not
+        // supply one, and a bare filename stem is never reported.
+        let mut titled = analyzed("/tmp/Untitled.jpg");
+        titled.embedded_title = Some("Embedded Title".into());
+        titled.overrides.subject = Some("Manual Subject".into());
+        let s = rebuild_move_suggestion(&titled, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.metadata
+                .get("original_description")
+                .and_then(|v| v.as_str()),
+            Some("Embedded Title")
+        );
+        let mut stem_only = analyzed("/tmp/Untitled.jpg");
+        stem_only.overrides.subject = Some("Manual Subject".into());
+        let s = rebuild_move_suggestion(&stem_only, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert!(!s.metadata.contains_key("original_description"));
+
+        // Without a provider or embedded value, the location's original is
+        // the GPS fallback; with neither, there is no original row at all.
+        let mut gps = analyzed("/tmp/Untitled.jpg");
+        gps.latitude = Some(48.8566);
+        gps.longitude = Some(2.3522);
+        gps.overrides.location = Some("Manual Place".into());
+        let s = rebuild_move_suggestion(&gps, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.metadata.get("original_location").and_then(|v| v.as_str()),
+            Some("48.856600,2.352200")
+        );
+        let mut none = analyzed("/tmp/Untitled.jpg");
+        none.overrides.location = Some("Manual Place".into());
+        let s = rebuild_move_suggestion(&none, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        assert!(!s.metadata.contains_key("original_location"));
     }
 
     #[test]

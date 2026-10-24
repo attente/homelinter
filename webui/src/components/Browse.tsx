@@ -98,6 +98,12 @@ const META_LABELS: Record<string, string> = {
   latitude: 'Latitude',
   longitude: 'Longitude',
   location: 'Location name',
+  // The value a manual override replaced, reported only for overridden
+  // fields. The subject backs `%s`/`%t`, but it holds the content
+  // description, so its replaced value is reported as the description.
+  original_location: 'Original location',
+  original_description: 'Original description',
+  original_author: 'Original author',
 };
 
 function metaKeyLabel(key: string): string {
@@ -254,6 +260,15 @@ function PreviewContent(props: {
   }
 }
 
+/** The value a manual edit replaced, computed by the service (location and
+ *  author from the effective precedence with the override cleared; the
+ *  subject from the content description it hid). Rendered under the input
+ *  so the editor shows what the override hid; `none` means the field had no
+ *  provider, embedded, or fallback value to replace. */
+function OriginalValue(props: { value: string | null }) {
+  return <span className="field-original">original: {props.value ?? 'none'}</span>;
+}
+
 /** Manual metadata editor: the three values that shape a move's destination
  *  (`%l`, `%s`/`%t`, `%a`). Saving replaces all three overrides for this
  *  content, and the service persists them keyed by content identity. The
@@ -272,6 +287,11 @@ function MetadataEditor(props: {
   const { suggestion, onSave, actions } = props;
   const m = suggestion.metadata ?? {};
   const overridden = new Set(suggestion.manual_overrides ?? []);
+  const originals = {
+    location: typeof m.original_location === 'string' ? m.original_location : null,
+    subject: typeof m.original_description === 'string' ? m.original_description : null,
+    author: typeof m.original_author === 'string' ? m.original_author : null,
+  };
   const effective = {
     location: typeof m.location === 'string' ? m.location : '',
     subject: typeof m.title === 'string' ? m.title : '',
@@ -298,34 +318,31 @@ function MetadataEditor(props: {
       }}
     >
       <label className="field">
-        <span className="field-label">
-          Location (%l){overridden.has('location') ? ' - manual' : ''}
-        </span>
+        <span className="field-label">Location (%l)</span>
         <input
           value={location}
           onChange={(e) => setLocation(e.target.value)}
           placeholder="leave blank to use geocoder or embedded GPS"
         />
+        {overridden.has('location') && <OriginalValue value={originals.location} />}
       </label>
       <label className="field">
-        <span className="field-label">
-          Subject (%s, %t){overridden.has('subject') ? ' - manual' : ''}
-        </span>
+        <span className="field-label">Subject (%s, %t)</span>
         <input
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
           placeholder="leave blank to use embedded title or a description"
         />
+        {overridden.has('subject') && <OriginalValue value={originals.subject} />}
       </label>
       <label className="field">
-        <span className="field-label">
-          Author (%a){overridden.has('author') ? ' - manual' : ''}
-        </span>
+        <span className="field-label">Author (%a)</span>
         <input
           value={author}
           onChange={(e) => setAuthor(e.target.value)}
           placeholder="leave blank to use embedded or inferred author"
         />
+        {overridden.has('author') && <OriginalValue value={originals.author} />}
       </label>
       <div className="meta-actions">
         <button type="submit" className="meta-save-btn">
