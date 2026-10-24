@@ -451,18 +451,31 @@ pub fn normalize_provider_text(input: &str) -> String {
 /// a single hyphen, and path separators, NUL, control characters, and
 /// platform-invalid characters become `_`. Underscores and dots are
 /// preserved, so a run of spaces, hyphens, and other separator punctuation
-/// collapses to one hyphen. An empty result means the value carried no
+/// collapses to one hyphen. Possessives are dropped instead of hyphenated:
+/// a word-final `'s` loses the apostrophe and the `s`, and a word-final
+/// apostrophe on a plural noun loses only the apostrophe. A common
+/// contraction whose word is in `CONTRACTIONS` is the exception: it is
+/// spelled out (`it's` becomes `it is`), so it keeps its meaning instead of
+/// reading as a possessive. An empty result means the value carried no
 /// usable text; callers render such a placeholder as nothing rather than a
 /// literal placeholder word.
 pub fn sanitize_metadata_segment(input: &str) -> String {
+    // Collect first so the possessive rules can look ahead past an apostrophe
+    // at the character that follows it and, for `'s`, at the boundary after
+    // that. Filtering the combining marks here keeps the lookahead aligned
+    // with the characters that are actually rendered.
+    let chars: Vec<char> = input.nfd().filter(|c| !is_combining_mark(*c)).collect();
     let mut out = String::new();
     let mut pending_hyphen = false;
-    for c in input.nfd() {
-        if is_combining_mark(c) {
-            continue;
-        }
+    // Index in `out` where the word being built starts, so an apostrophe can
+    // name the word before it when matching a contraction.
+    let mut word_start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         if c.is_whitespace() {
             pending_hyphen = true;
+            i += 1;
             continue;
         }
         if c == '/' || c == '\\' || c == '\0' || c.is_control() || is_platform_invalid(c) {
@@ -471,19 +484,55 @@ pub fn sanitize_metadata_segment(input: &str) -> String {
                 pending_hyphen = false;
             }
             out.push('_');
+            word_start = out.len();
+            i += 1;
             continue;
+        }
+        if is_apostrophe(c) {
+            let next = chars.get(i + 1).copied();
+            let possessive_s = matches!(next, Some('s' | 'S'))
+                && chars
+                    .get(i + 2)
+                    .is_none_or(|after| !after.is_alphanumeric());
+            if possessive_s {
+                // `word's` and `word's,` drop the apostrophe and the `s`;
+                // the surrounding separator (if any) supplies the hyphen.
+                // A known contraction spells the word out instead.
+                let word = &out[word_start..];
+                if let Some((_, expansion)) = CONTRACTIONS
+                    .iter()
+                    .find(|(contracted, _)| *contracted == word)
+                {
+                    out.push('-');
+                    word_start = out.len();
+                    out.push_str(expansion);
+                }
+                i += 2;
+                continue;
+            }
+            if next.is_none_or(|after| !after.is_alphanumeric()) {
+                // A plural possessive (`providers' names`) drops only the
+                // apostrophe, so the following separator stays a single
+                // hyphen rather than becoming a doubled one.
+                i += 1;
+                continue;
+            }
+            // An interior apostrophe (`O'Brien`) remains a separator.
         }
         if is_separator_punctuation(c) {
             pending_hyphen = true;
+            i += 1;
             continue;
         }
         if pending_hyphen {
             out.push('-');
             pending_hyphen = false;
+            word_start = out.len();
         }
         for lc in c.to_lowercase() {
             out.push(lc);
         }
+        i += 1;
     }
     if pending_hyphen {
         out.push('-');
@@ -492,6 +541,38 @@ pub fn sanitize_metadata_segment(input: &str) -> String {
     // normalizes to nothing, `.`, or `..` becomes the empty string.
     out.trim_matches(|c: char| c.is_whitespace() || c == '-' || c == '.')
         .to_string()
+}
+
+/// Common `'s` contractions, keyed by the word before the apostrophe and
+/// mapped to the word the contraction hides. The sanitizer replaces the
+/// apostrophe and `s` with a hyphen and this expansion (`it's` becomes
+/// `it-is`), so a contraction is not mistaken for a possessive. Only these
+/// fixed forms are recognized: any other `word's` is ambiguous between a
+/// possessive and a noun plus `is`/`has`, so it is treated as a possessive.
+const CONTRACTIONS: [(&str, &str); 13] = [
+    ("it", "is"),
+    ("that", "is"),
+    ("what", "is"),
+    ("there", "is"),
+    ("where", "is"),
+    ("when", "is"),
+    ("why", "is"),
+    ("how", "is"),
+    ("who", "is"),
+    ("here", "is"),
+    ("he", "is"),
+    ("she", "is"),
+    ("let", "us"),
+];
+
+/// Apostrophe forms that can mark a possessive. Provider text reaches the
+/// sanitizer as ASCII after `normalize_provider_text`, but metadata and
+/// original filenames may still carry typographic forms.
+fn is_apostrophe(c: char) -> bool {
+    matches!(
+        c,
+        '\'' | '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{2032}' | '\u{ff07}'
+    )
 }
 
 /// Normalize an optional metadata value to a path segment. Returns the empty
@@ -790,7 +871,55 @@ mod tests {
         );
         assert_eq!(
             sanitize_metadata_segment("AT&T's (draft): v1.2"),
-            "at-t-s-draft-v1.2"
+            "at-t-draft-v1.2"
+        );
+        // Possessives are removed rather than hyphenated, singular and
+        // plural alike, and removing one never leaves a doubled hyphen.
+        assert_eq!(
+            sanitize_metadata_segment("the company's logo"),
+            "the-company-logo"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("the providers' names"),
+            "the-providers-names"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("Employees' handbook"),
+            "employees-handbook"
+        );
+        assert_eq!(sanitize_metadata_segment("James's file"), "james-file");
+        // A common contraction is spelled out instead of being mistaken for
+        // a possessive.
+        assert_eq!(sanitize_metadata_segment("it's a draft"), "it-is-a-draft");
+        assert_eq!(
+            sanitize_metadata_segment("That's the plan"),
+            "that-is-the-plan"
+        );
+        assert_eq!(sanitize_metadata_segment("let's go"), "let-us-go");
+        assert_eq!(sanitize_metadata_segment("Who's there?"), "who-is-there");
+        // A contraction only matches the whole preceding word, and the
+        // possessive pronoun `its` (no apostrophe) is untouched.
+        assert_eq!(sanitize_metadata_segment("a bit's worth"), "a-bit-worth");
+        assert_eq!(sanitize_metadata_segment("its metadata"), "its-metadata");
+        // Interior apostrophes stay separators.
+        assert_eq!(
+            sanitize_metadata_segment("O'Brien's notes"),
+            "o-brien-notes"
+        );
+        // Typographic apostrophes mark possessives too.
+        assert_eq!(
+            sanitize_metadata_segment("the company\u{2019}s logo"),
+            "the-company-logo"
+        );
+        assert_eq!(
+            sanitize_metadata_segment("the providers\u{2019} names"),
+            "the-providers-names"
+        );
+        // A possessive next to an existing separator still collapses to one
+        // hyphen, never two.
+        assert_eq!(
+            sanitize_metadata_segment("the company's - logo"),
+            "the-company-logo"
         );
         assert_eq!(sanitize_metadata_segment("!!!"), "");
         assert_eq!(sanitize_metadata_segment("..."), "");

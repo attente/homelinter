@@ -123,8 +123,9 @@ fn extension_kind(ext: &str) -> Option<AssetKind> {
         // Video. `ts` (MPEG transport stream) is deliberately absent: the
         // extension also names TypeScript sources, and code must stay
         // unmanaged rather than be moved into `Videos/`.
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg"
-        | "3gp" => Some(AssetKind::Video),
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "mpg" | "mpeg" | "3gp" => {
+            Some(AssetKind::Video)
+        }
         // Audio
         "mp3" | "flac" | "ogg" | "m4a" | "wav" | "aac" | "opus" | "wma" | "aiff" | "alac" => {
             Some(AssetKind::Audio)
