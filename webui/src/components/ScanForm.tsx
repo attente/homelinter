@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useEscapeClose } from "../lib/modal";
 import { hasNativeDirectoryPicker, pickDirectory } from "../lib/native";
 
 type Json = Record<string, unknown>;
@@ -454,6 +455,10 @@ export function ScanForm(props: ScanFormProps) {
   const [form, setForm] = useState<OverrideState | null>(null);
   const [saveNote, setSaveNote] = useState<string | null>(null);
   const [rootPickError, setRootPickError] = useState<string | null>(null);
+  // When an earlier scan's suggestions are loaded, submitting the form
+  // first asks for confirmation: starting a scan discards that batch.
+  const [confirmRescan, setConfirmRescan] = useState(false);
+  useEscapeClose(confirmRescan, () => setConfirmRescan(false));
 
   const dirtyRef = useRef<Set<string>>(new Set());
   const touchRef = useRef<Map<string, number>>(new Map());
@@ -816,6 +821,11 @@ export function ScanForm(props: ScanFormProps) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
+          if (hasSuggestions && !confirmRescan) {
+            setConfirmRescan(true);
+            return;
+          }
+          setConfirmRescan(false);
           void start();
         }}
       >
@@ -1183,6 +1193,45 @@ export function ScanForm(props: ScanFormProps) {
           </button>
         </div>
       </form>
+      {confirmRescan && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setConfirmRescan(false)}
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Re-scan discards the current suggestions?</h2>
+            <p>
+              Starting a new scan replaces the earlier batch of suggestions.
+              This cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setConfirmRescan(false)}
+              >
+                cancel
+              </button>
+              <button
+                type="button"
+                className="caution"
+                onClick={() => {
+                  setConfirmRescan(false);
+                  void start();
+                }}
+              >
+                re-scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
