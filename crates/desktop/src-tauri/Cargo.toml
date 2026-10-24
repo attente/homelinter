@@ -16,6 +16,10 @@ homelinter-service = { path = "../../service" }
 tauri = { version = "=2.11.1" }
 # Pin transitively shared Tauri crates whose newer releases require Rust 1.90.
 tauri-utils = { version = "=2.9.3" }
+# 2.8 raised the MSRV to Rust 1.90; 2.7.3 is the newest release that builds
+# with the workspace toolchain. It provides the native directory picker the
+# SPA uses for the scan root when running inside this shell.
+tauri-plugin-dialog = { version = "=2.7.3" }
 tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 # Pin an MSRV-unaware transitive dependency of `zip`: 0.1.12 uses the
 # unstable `unbounded_shifts` feature, which Rust 1.85 cannot compile.

@@ -24,6 +24,9 @@ struct ServerState {
 
 fn main() {
     tauri::Builder::default()
+        // The SPA runs on the loopback origin, so its native scan-root picker
+        // is an IPC command that the `main` capability allows remotely.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let web_dir = resolve_web_dir(app.handle());
             let (port, state) = tauri::async_runtime::block_on(start_server(web_dir))

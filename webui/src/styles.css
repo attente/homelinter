@@ -204,10 +204,22 @@ select optgroup {
   margin-bottom: 16px;
 }
 
-.field > span {
+.field > span,
+.field > label {
   display: block;
   color: var(--dim);
   margin-bottom: 4px;
+}
+
+.field-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.field-row > input {
+  flex: 1;
+  min-width: 0;
 }
 
 .field input[type="text"] {

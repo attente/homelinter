@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { hasNativeDirectoryPicker, pickDirectory } from "../lib/native";
 
 type Json = Record<string, unknown>;
 
@@ -452,6 +453,7 @@ export function ScanForm(props: ScanFormProps) {
   const [doc, setDoc] = useState<Json | null>(null);
   const [form, setForm] = useState<OverrideState | null>(null);
   const [saveNote, setSaveNote] = useState<string | null>(null);
+  const [rootPickError, setRootPickError] = useState<string | null>(null);
 
   const dirtyRef = useRef<Set<string>>(new Set());
   const touchRef = useRef<Map<string, number>>(new Map());
@@ -765,6 +767,23 @@ export function ScanForm(props: ScanFormProps) {
     });
   };
 
+  // Available only in the desktop shell, where the native chooser returns
+  // an absolute path the service can scan; a browser directory picker does
+  // not expose one.
+  const browseRoot = async () => {
+    try {
+      const picked = await pickDirectory("choose scan folder");
+      if (picked === null) return;
+      rootTouchedRef.current = true;
+      setRoot(picked);
+      setRootPickError(null);
+    } catch (e: unknown) {
+      setRootPickError(
+        `choosing a folder failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  };
+
   return (
     <main className="scan-form">
       <h1>homelinter</h1>
@@ -800,18 +819,30 @@ export function ScanForm(props: ScanFormProps) {
           void start();
         }}
       >
-        <label className="field">
-          <span>Scan root (absolute path; empty = home)</span>
-          <input
-            type="text"
-            value={root}
-            onChange={(e) => {
-              rootTouchedRef.current = true;
-              setRoot(e.target.value);
-            }}
-            placeholder={defaultHome || "/home/you"}
-          />
-        </label>
+        <div className="field">
+          <label htmlFor="scan-root">Scan root (absolute path; empty = home)</label>
+          <div className="field-row">
+            <input
+              id="scan-root"
+              type="text"
+              value={root}
+              onChange={(e) => {
+                rootTouchedRef.current = true;
+                setRoot(e.target.value);
+                setRootPickError(null);
+              }}
+              placeholder={defaultHome || "/home/you"}
+            />
+            {hasNativeDirectoryPicker() && (
+              <button type="button" onClick={() => void browseRoot()}>
+                browse...
+              </button>
+            )}
+          </div>
+          {rootPickError !== null && (
+            <p className="error">{rootPickError}</p>
+          )}
+        </div>
         <label className="field check">
           <input
             type="checkbox"
