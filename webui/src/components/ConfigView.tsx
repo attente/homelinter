@@ -20,12 +20,13 @@ interface ConfigViewProps {
 /// config hash changes, so what is shown matches the service regardless of
 /// which client changed it (the scan setup page persists changes to the
 /// service as they are made; the config file can be edited directly). The
-/// only actions here are inspecting and clearing the metadata cache.
+/// only actions here are opening the metadata cache viewer and closing; the
+/// cache viewer modal itself offers refresh and clearing.
 export function ConfigView(props: ConfigViewProps) {
   const { configHash, onClose, pushToast } = props;
   const [doc, setDoc] = useState<Json | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [showCache, setShowCache] = useState(false);
+  const [cacheOpen, setCacheOpen] = useState(false);
   const [cache, setCache] = useState<CacheList | null>(null);
   const [cacheKind, setCacheKind] = useState("");
   const [cacheLoading, setCacheLoading] = useState(false);
@@ -70,15 +71,15 @@ export function ConfigView(props: ConfigViewProps) {
   }, [cacheKind, pushToast]);
 
   useEffect(() => {
-    if (showCache) void loadCache();
-  }, [showCache, loadCache]);
+    if (cacheOpen) void loadCache();
+  }, [cacheOpen, loadCache]);
 
   const onClearCache = async () => {
     setConfirmClear(false);
     try {
       await api.cacheClear();
       pushToast("metadata cache cleared");
-      if (showCache) await loadCache();
+      if (cacheOpen) await loadCache();
     } catch (e: unknown) {
       pushToast(`cache clear failed: ${resolveApiError(e)}`);
     }
@@ -100,11 +101,8 @@ export function ConfigView(props: ConfigViewProps) {
       <div className="toolbar">
         <h2>Configuration</h2>
         <div className="grow" />
-        <button type="button" onClick={() => setShowCache((v) => !v)}>
-          {showCache ? "hide cache" : "view cache"}
-        </button>
-        <button type="button" onClick={() => setConfirmClear(true)}>
-          clear cache
+        <button type="button" onClick={() => setCacheOpen(true)}>
+          view cache
         </button>
         <button
           type="button"
@@ -140,68 +138,99 @@ export function ConfigView(props: ConfigViewProps) {
         appear above. API keys are write-only; set them in the config file or
         on the scan setup page.
       </p>
-      {showCache && (
-        <section className="cache-view">
-          <div className="toolbar-row">
-            <h3>Metadata cache</h3>
-            <div className="grow" />
-            <label>
-              kind{" "}
-              <select
-                value={cacheKind}
-                onChange={(e) => setCacheKind(e.target.value)}
-              >
-                <option value="">all</option>
-                {(cache?.kind_counts ?? []).map(({ kind, count }) => (
-                  <option key={kind} value={kind}>
-                    {kind} ({count})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              onClick={() => void loadCache()}
-              disabled={cacheLoading}
-            >
-              refresh
-            </button>
-          </div>
-          <p className="note">
-            {cache === null || cacheLoading
-              ? "loading..."
-              : `${cache.entries.length} of ${cache.total} entries (newest first, up to 200 shown)`}
-          </p>
-          {cache !== null && cache.entries.length > 0 && (
-            <div className="cache-scroll">
-              <table className="cache-table">
-                <thead>
-                  <tr>
-                    <th>created</th>
-                    <th>kind</th>
-                    <th>provider</th>
-                    <th>value</th>
-                    <th>input hash</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cache.entries.map((e) => (
-                    <tr key={e.cache_key}>
-                      <td>{e.created_at}</td>
-                      <td>{e.kind}</td>
-                      <td>{e.provider}</td>
-                      <td className="cache-value">{e.value}</td>
-                      <td className="cache-mono">{e.input_hash.slice(0, 16)}</td>
-                    </tr>
+      {cacheOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setCacheOpen(false)}
+        >
+          <div
+            className="modal cache-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="metadata cache"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="toolbar-row">
+              <h3>Metadata cache</h3>
+              <div className="grow" />
+              <label>
+                kind{" "}
+                <select
+                  value={cacheKind}
+                  onChange={(e) => setCacheKind(e.target.value)}
+                >
+                  <option value="">all</option>
+                  {(cache?.kind_counts ?? []).map(({ kind, count }) => (
+                    <option key={kind} value={kind}>
+                      {kind} ({count})
+                    </option>
                   ))}
-                </tbody>
-              </table>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => void loadCache()}
+                disabled={cacheLoading}
+              >
+                refresh
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => setConfirmClear(true)}
+              >
+                clear cache
+              </button>
+              <button
+                type="button"
+                className="close-btn"
+                autoFocus
+                aria-label="close"
+                title="close"
+                onClick={() => setCacheOpen(false)}
+              >
+                <CloseIcon />
+              </button>
             </div>
-          )}
-          {cache !== null && !cacheLoading && cache.entries.length === 0 && (
-            <p className="empty">no cached entries</p>
-          )}
-        </section>
+            <p className="note">
+              {cache === null || cacheLoading
+                ? "loading..."
+                : `${cache.entries.length} of ${cache.total} entries (newest first, up to 200 shown)`}
+            </p>
+            {cache !== null && cache.entries.length > 0 && (
+              <div className="cache-scroll">
+                <table className="cache-table">
+                  <thead>
+                    <tr>
+                      <th>created</th>
+                      <th>kind</th>
+                      <th>provider</th>
+                      <th>value</th>
+                      <th>input hash</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cache.entries.map((e) => (
+                      <tr key={e.cache_key}>
+                        <td>{e.created_at}</td>
+                        <td>{e.kind}</td>
+                        <td>{e.provider}</td>
+                        <td className="cache-value">{e.value}</td>
+                        <td className="cache-mono">
+                          {e.input_hash.slice(0, 16)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {cache !== null && !cacheLoading && cache.entries.length === 0 && (
+              <p className="empty">no cached entries</p>
+            )}
+          </div>
+        </div>
       )}
       {confirmClear && (
         <div
