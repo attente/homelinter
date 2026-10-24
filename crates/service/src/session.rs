@@ -108,13 +108,22 @@ impl Session {
     /// Select exactly the given top-level suggestion ids. Dependent
     /// operation ids never appear in the batch and are rejected by the
     /// handler before this is called.
+    /// A done suggestion has nothing left to run, so it is never selectable:
+    /// every selection path skips it, and clients clear and disable its
+    /// checkbox.
+    fn selectable(&self, i: usize) -> bool {
+        self.suggestions[i].status != SuggestionStatus::Executed
+    }
+
     pub fn set_selection(&mut self, ids: &[String]) {
         for s in self.suggestions.iter_mut() {
             s.selected = false;
         }
         for id in ids {
             if let Some(i) = self.suggestion_index(id) {
-                self.suggestions[i].selected = true;
+                if self.selectable(i) {
+                    self.suggestions[i].selected = true;
+                }
             }
         }
     }
@@ -122,7 +131,9 @@ impl Session {
     pub fn add_to_selection(&mut self, ids: &[String]) {
         for id in ids {
             if let Some(i) = self.suggestion_index(id) {
-                self.suggestions[i].selected = true;
+                if self.selectable(i) {
+                    self.suggestions[i].selected = true;
+                }
             }
         }
     }

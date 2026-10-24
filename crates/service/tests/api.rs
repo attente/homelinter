@@ -839,6 +839,66 @@ async fn real_execute_moves_keeper_deletes_duplicate_and_idempotent_rerun() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn executed_suggestions_cannot_be_selected_again() {
+    let env = Env::new("select-done");
+    let app = env.service();
+    seed_duplicates(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    let ids = suggestion_ids(&app, "pending").await;
+    assert_eq!(ids.len(), 2, "expected keeper move + duplicate delete");
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/selection",
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = request(&app, "POST", "/api/v1/execute", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+
+    // Completion drops executed suggestions from the selection.
+    assert_eq!(suggestion_ids(&app, "executed").await.len(), 2);
+    let (_, sel) = request(&app, "GET", "/api/v1/selection", None).await;
+    assert_eq!(sel["ids"], json!([]));
+
+    // Every selection path skips done suggestions: a bulk filter (including
+    // the unconstrained filter behind `select filtered`), explicit ids, and
+    // an exact replacement. They are never selectable again.
+    let (status, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "filter": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sel["ids"], json!([]));
+    let (status, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sel["ids"], json!([]));
+    let (status, sel) = request(
+        &app,
+        "PUT",
+        "/api/v1/selection",
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sel["ids"], json!([]));
+    let (_, sel) = request(&app, "GET", "/api/v1/selection", None).await;
+    assert_eq!(sel["ids"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn export_script_contract() {
     let env = Env::new("export");
     let app = env.service();

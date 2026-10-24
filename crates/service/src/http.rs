@@ -775,11 +775,13 @@ async fn selection_add(State(app): State<AppHandle>, Json(body): Json<SelectionB
         }
         None => {
             let f = body.filter.unwrap_or_default();
-            for s in sess.suggestions.iter_mut() {
-                if matches_filter(s, &f) {
-                    s.selected = true;
-                }
-            }
+            let ids: Vec<String> = sess
+                .suggestions
+                .iter()
+                .filter(|s| matches_filter(s, &f))
+                .map(|s| s.id.clone())
+                .collect();
+            sess.add_to_selection(&ids);
         }
     }
     let sel = sess.selection_ids();
