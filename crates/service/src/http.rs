@@ -446,6 +446,7 @@ async fn session_get(State(app): State<AppHandle>) -> ApiResult {
         },
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,
+        "theme": sess.config.ui_theme().name(),
         "warnings": sess.warnings,
     });
     if let Some(f) = &sess.failure {
@@ -1325,7 +1326,10 @@ mod tests {
         executed_delete.status = SuggestionStatus::Executed;
         assert_eq!(
             preview_candidates(&executed_delete),
-            vec![PathBuf::from("/a/original.jpg"), PathBuf::from("/a/copy.jpg")],
+            vec![
+                PathBuf::from("/a/original.jpg"),
+                PathBuf::from("/a/copy.jpg")
+            ],
             "an executed duplicate delete previews the retained keeper"
         );
         assert_eq!(

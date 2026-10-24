@@ -94,6 +94,7 @@ fn config_template_loads_and_validates() {
         "tool_stdout_max_bytes",
         // [ui]
         "path_filter",
+        "theme",
     ] {
         assert!(
             text.contains(key),

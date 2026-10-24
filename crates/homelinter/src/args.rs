@@ -45,6 +45,7 @@ pub struct WebOptions {
     pub root: Option<PathBuf>,
     pub hidden: bool,
     pub target_paths: BTreeMap<String, String>,
+    pub theme: Option<ThemeArg>,
     pub cache_clear: bool,
     pub verbosity: i8,
     pub port: Option<u16>,
@@ -65,6 +66,21 @@ pub enum OutputFormatArg {
     Pretty,
     Json,
     Toml,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ThemeArg {
+    Dark,
+    Light,
+}
+
+impl ThemeArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeArg::Dark => "dark",
+            ThemeArg::Light => "light",
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -168,6 +184,9 @@ struct WebArgs {
     /// Pre-fill one target-path override in the SPA scan dialog; repeatable.
     #[arg(long = "target-path", value_name = "KIND=PATH", action = clap::ArgAction::Append)]
     target_path: Vec<String>,
+    /// Seed the SPA color theme for this invocation (dark or light).
+    #[arg(long, value_enum, value_name = "THEME")]
+    theme: Option<ThemeArg>,
     /// Clear the persistent metadata cache at startup.
     #[arg(long)]
     cache_clear: bool,
@@ -194,6 +213,7 @@ pub fn parse() -> Result<Mode, String> {
             root: web.root.clone(),
             hidden: web.hidden,
             target_paths: parse_target_paths(&web.target_path)?,
+            theme: web.theme,
             cache_clear: web.cache_clear,
             verbosity: web.verbose as i8 - web.quiet as i8,
             port: web.port,

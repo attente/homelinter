@@ -19,7 +19,7 @@ From the repo root, `cargo run -p homelinter -- <subcommand>` runs the `homelint
 - **Plain scan**: `cargo run -p homelinter` scans the default root (your home directory) and prints a summary pointing at the review and action entry points; nothing is executed or exported. Full-screen interactive review lives in `tui`.
 - **Non-interactive**: `cargo run -p homelinter -- --execute` runs all suggestions immediately; `--export <path>` writes the plan to an executable script.
 - **TUI**: `cargo run -p homelinter -- tui` starts the full-screen terminal interface (needs an 80x24 terminal).
-- **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Session state is in memory, so a restart requires a new scan.
+- **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Set `[ui].theme` to `dark` (the default) or `light`, or pass `--theme dark|light` to seed it; the SPA header also toggles it. Session state is in memory, so a restart requires a new scan.
 
 Per-scan options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute`, `--export` are mutually exclusive.
 

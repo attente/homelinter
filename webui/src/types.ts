@@ -19,6 +19,8 @@ export interface ApiErrorBody {
   };
 }
 
+export type Theme = 'dark' | 'light';
+
 export interface Session {
   state: SessionState;
   scan_root: string | null;
@@ -26,6 +28,8 @@ export interface Session {
   platform: string;
   config_hash: string | null;
   batch_config_hash: string | null;
+  /** SPA color theme from the effective `[ui].theme`, dark by default. */
+  theme: Theme;
   suggestions_total: number;
   selection_count: number;
   /** Move suggestions whose destination metadata currently includes at

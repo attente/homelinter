@@ -119,6 +119,11 @@ export default function App() {
   const stRef = useRef(st);
   stRef.current = st;
 
+  const theme = st.session?.theme === "light" ? "light" : "dark";
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
   // Provider metadata resolves one suggestion at a time over SSE. Buffer
   // those deltas and apply them once per animation frame so a large batch
   // does not trigger one state update (and one full-list reconcile) per row.
@@ -283,6 +288,30 @@ export default function App() {
       // The poll will catch up.
     }
   }, []);
+
+  /** Flip the SPA theme and persist it as `[ui].theme` through the ordinary
+   *  settings path. The local session is updated first so the palette changes
+   *  immediately; a failed save rolls it back and reports the error. */
+  const toggleTheme = useCallback(async () => {
+    const current =
+      stRef.current.session?.theme === "light" ? "light" : "dark";
+    const next = current === "dark" ? "light" : "dark";
+    const setTheme = (value: "dark" | "light") => {
+      setSt((prev) =>
+        prev.session
+          ? { ...prev, session: { ...prev.session, theme: value } }
+          : prev,
+      );
+    };
+    setTheme(next);
+    try {
+      await api.configPut({ ui: { theme: next } });
+      void refreshSession();
+    } catch (e: unknown) {
+      setTheme(current);
+      pushToast(`cannot save theme: ${resolveApiError(e)}`);
+    }
+  }, [pushToast, refreshSession]);
 
   const enterBrowse = useCallback(async () => {
     try {
@@ -1103,11 +1132,13 @@ export default function App() {
         state={state}
         root={st.session?.scan_root ?? null}
         busy={st.busy}
+        theme={theme}
         scanDisabled={!canScan}
         onNewScan={() =>
           patch({ showScanForm: true, phase: "idle", configOpen: false })
         }
         onConfig={() => patch({ configOpen: true })}
+        onToggleTheme={() => void toggleTheme()}
       />
       {warnings.length > 0 && (
         <div className="banner notice" role="status">

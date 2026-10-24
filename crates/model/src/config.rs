@@ -588,9 +588,29 @@ pub struct LimitsConfig {
     pub tool_stdout_max_bytes: Option<u64>,
 }
 
+/// The SPA's color theme. Dark is the default, including when the key is
+/// absent; light is opt-in through the config file, `homelinter web
+/// --theme light`, or the SPA's own toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+        }
+    }
+}
+
 /// Client-side UI state persisted through the settings path. Holds no scan
 /// or planning behavior: it is excluded from the config hash, so saving a
-/// filter never makes a running batch look stale.
+/// filter or theme never makes a running batch look stale.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UiConfig {
@@ -599,6 +619,10 @@ pub struct UiConfig {
     /// no filter. The SPA keeps its own filter in URL parameters instead.
     #[serde(default)]
     pub path_filter: Option<String>,
+    /// The SPA's color theme. Absent means dark; the SPA toggle persists its
+    /// choice here through the ordinary settings path.
+    #[serde(default)]
+    pub theme: Option<Theme>,
 }
 
 /// The complete merged configuration file content. Each section defaults to
@@ -641,6 +665,11 @@ impl RawConfig {
         self.scan
             .hidden_definition
             .unwrap_or(HiddenDefinition::Explorer)
+    }
+
+    /// The SPA's effective color theme (dark when unset).
+    pub fn ui_theme(&self) -> Theme {
+        self.ui.theme.unwrap_or_default()
     }
 
     /// The configured scan root, when one is set. Callers fall back to the
@@ -1898,7 +1927,10 @@ pub fn effective_config_json(raw: &RawConfig, config_path: Option<&Path>) -> Jso
     );
     out.insert(
         "ui".into(),
-        serde_json::json!({ "path_filter": raw.ui.path_filter }),
+        serde_json::json!({
+            "path_filter": raw.ui.path_filter,
+            "theme": raw.ui_theme().name(),
+        }),
     );
     out.insert(
         "warnings".into(),
@@ -2149,21 +2181,34 @@ mod tests {
         );
         assert!(ok.is_ok());
 
-        // [ui]: optional client-side filter state. An unknown key inside the
-        // section is rejected like every other section.
-        let err = parse("[ui]\ntheme = \"dark\"\n");
+        // [ui]: optional client-side filter and theme state. An unknown key
+        // inside the section is rejected like every other section.
+        let err = parse("[ui]\nunknown = \"dark\"\n");
+        assert!(err.is_err());
+        let err = parse("[ui]\ntheme = \"sepia\"\n");
         assert!(err.is_err());
         let rc = parse("").unwrap();
         assert_eq!(rc.ui.path_filter, None);
+        assert_eq!(rc.ui_theme(), Theme::Dark);
         let rc = parse("[ui]\npath_filter = \"photos\"\n").unwrap();
         assert_eq!(rc.ui.path_filter.as_deref(), Some("photos"));
+        let rc = parse("[ui]\ntheme = \"light\"\n").unwrap();
+        assert_eq!(rc.ui_theme(), Theme::Light);
         // The ui section is visible in the effective document but excluded
-        // from the config hash, so saving a filter never marks a running
-        // batch stale.
-        let with = parse("[ui]\npath_filter = \"photos\"\n").unwrap();
+        // from the config hash, so saving a filter or theme never marks a
+        // running batch stale.
+        let with = parse("[ui]\npath_filter = \"photos\"\ntheme = \"light\"\n").unwrap();
         assert_eq!(
             effective_config_json(&with, None)["ui"]["path_filter"],
             serde_json::json!("photos")
+        );
+        assert_eq!(
+            effective_config_json(&with, None)["ui"]["theme"],
+            serde_json::json!("light")
+        );
+        assert_eq!(
+            effective_config_json(&parse("").unwrap(), None)["ui"]["theme"],
+            serde_json::json!("dark")
         );
         assert_eq!(config_hash(&with), config_hash(&parse("").unwrap()));
 

@@ -13,7 +13,7 @@ use homelinter_service::{build_service, serve, Built};
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
 
-use crate::args::{ManagedAction, ManagedOptions, TuiOptions, WebOptions};
+use crate::args::{ManagedAction, ManagedOptions, ThemeArg, TuiOptions, WebOptions};
 use crate::output;
 use crate::tui;
 
@@ -218,6 +218,7 @@ fn launch_overrides(
     root: Option<&PathBuf>,
     hidden: bool,
     target_paths: &BTreeMap<String, String>,
+    theme: Option<ThemeArg>,
     cwd: &Path,
 ) -> Result<Value, String> {
     let mut doc = serde_json::Map::new();
@@ -235,6 +236,9 @@ fn launch_overrides(
     if !target_paths.is_empty() {
         doc.insert("target_paths".into(), json!(target_paths));
     }
+    if let Some(theme) = theme {
+        doc.insert("ui".into(), json!({ "theme": theme.as_str() }));
+    }
     Ok(Value::Object(doc))
 }
 
@@ -244,9 +248,16 @@ fn launch_overrides(
 
 pub async fn web(opts: WebOptions) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
-    // `--root`, `--hidden`, and `--target-path` are runtime settings: they
-    // seed the service's initial settings and are editable through the API.
+    let overrides = launch_overrides(
+        opts.root.as_ref(),
+        opts.hidden,
+        &opts.target_paths,
+        opts.theme,
+        &cwd,
+    )?;
+    // `--root`, `--hidden`, `--target-path`, and `--theme` are runtime
+    // settings: they seed the service's initial settings and are editable
+    // through the API.
     let inst = spawn(
         homelinter_service::ServiceOptions {
             cli_config: opts.config,
@@ -306,7 +317,13 @@ fn port_of(client: &Client) -> u16 {
 pub async fn tui(opts: TuiOptions) -> Result<u8, String> {
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
+    let overrides = launch_overrides(
+        opts.root.as_ref(),
+        opts.hidden,
+        &opts.target_paths,
+        None,
+        &cwd,
+    )?;
 
     let inst = spawn(
         homelinter_service::ServiceOptions {
@@ -355,7 +372,13 @@ pub async fn managed(opts: ManagedOptions) -> Result<u8, String> {
     }
     let verbosity = opts.verbosity;
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read working directory: {e}"))?;
-    let overrides = launch_overrides(opts.root.as_ref(), opts.hidden, &opts.target_paths, &cwd)?;
+    let overrides = launch_overrides(
+        opts.root.as_ref(),
+        opts.hidden,
+        &opts.target_paths,
+        None,
+        &cwd,
+    )?;
 
     let inst = spawn(
         homelinter_service::ServiceOptions {

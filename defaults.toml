@@ -139,8 +139,11 @@ tool_stdout_max_bytes = 16777216
 
 [ui]
 # Client-side UI state saved through the settings path, not scan or planning
-# behavior (it is excluded from the config hash). path_filter is the TUI
-# suggestion browser's saved path filter: a case-insensitive substring
-# matched against each suggestion's paths. Unset or empty means no filter;
-# the web UI keeps its own filter in URL parameters instead.
+# behavior (it is excluded from the config hash). theme selects the web SPA's
+# color theme: dark (default) or light; the SPA's sun/moon toggle writes it
+# here. path_filter is the TUI suggestion browser's saved path filter: a
+# case-insensitive substring matched against each suggestion's paths. Unset
+# or empty means no filter; the web UI keeps its own filter in URL parameters
+# instead.
+theme = "dark"
 # path_filter = ""

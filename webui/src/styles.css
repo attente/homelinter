@@ -13,12 +13,36 @@
   --ok: #9ece6a;
   --bad: #f7768e;
   --busy: #e0af68;
+  --overlay: rgba(0, 0, 0, 0.45);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --fill-hover-filter: brightness(1.15);
   --mono:
     "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo,
     monospace;
   --sans:
     "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, sans-serif;
+}
+
+/* The SPA defaults to the dark palette above. Light is opt-in through
+   `[ui].theme`, `homelinter web --theme light`, or the header toggle; the
+   signal colours stay green/red/amber, darkened for contrast on light
+   surfaces. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --bg2: #e8ebf0;
+  --fg: #22252c;
+  --bright: #090b10;
+  --dim: #596170;
+  --line: #c4cad4;
+  --accent: #1d5fbf;
+  --ok: #2b7430;
+  --bad: #c02828;
+  --busy: #8a5a00;
+  --overlay: rgba(24, 28, 38, 0.3);
+  --shadow: 0 2px 10px rgba(24, 28, 38, 0.18);
+  --fill-hover-filter: brightness(0.92);
 }
 
 * {
@@ -89,6 +113,25 @@ body {
   margin-left: auto;
 }
 
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+}
+
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .state-ok {
   color: var(--ok);
 }
@@ -153,13 +196,13 @@ button.caution {
 button.go:hover:not(:disabled) {
   border-color: var(--ok);
   color: var(--bg);
-  filter: brightness(1.15);
+  filter: var(--fill-hover-filter);
 }
 
 button.caution:hover:not(:disabled) {
   border-color: var(--bad);
   color: var(--bg);
-  filter: brightness(1.15);
+  filter: var(--fill-hover-filter);
 }
 
 input[type="text"],
@@ -212,11 +255,11 @@ textarea:focus {
   color: var(--fg);
 }
 
-/* Selects, including the popup list of options. `color-scheme: dark` asks
-   the browser for dark widgets, but the popup is drawn by the platform rather
-   than the page, so on a light GTK theme Chromium painted the list light
-   while the options kept this page's light text. Paint both sides here;
-   Chromium and Firefox both honour `option` colours. */
+/* Selects, including the popup list of options. `color-scheme` asks the
+   browser for widgets matching the active theme, but the popup is drawn by
+   the platform rather than the page, so on a light GTK theme Chromium painted
+   the list light while the options kept this page's light text. Paint both
+   sides explicitly; Chromium and Firefox both honour `option` colours. */
 select {
   font: inherit;
   color: var(--fg);
@@ -1198,7 +1241,7 @@ select optgroup {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1423,7 +1466,7 @@ select optgroup {
   border: 1px solid var(--accent);
   border-radius: 6px;
   padding: 6px 10px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow);
 }
 
 .toast span {
