@@ -6,6 +6,7 @@
   --bg: #16181d;
   --bg2: #1e2128;
   --fg: #d7dae0;
+  --bright: #ffffff;
   --dim: #8b90a0;
   --line: #2e323c;
   --accent: #7aa2f7;
@@ -982,6 +983,14 @@ select optgroup {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--dim);
+}
+
+/* The latest, still-running row is the one to watch, so its label and
+   percentage read in bright white while completed rows and the unstarted
+   placeholder stay dim. */
+.scan-stage:not(.done) .scan-stage-label,
+.scan-stage:not(.done) .scan-stage-status {
+  color: var(--bright);
 }
 
 /* A completed row's full bar dims so the active row stays visually
