@@ -1791,6 +1791,13 @@ fn commit_unit_rebuild(
                         .and_then(|s| s.rejection_reason.clone().map(|r| (rid, r)))
                 })
                 .collect();
+            // A suggestion rejected by the rebuilt metadata leaves the
+            // selection: rejected entries are never selectable.
+            for (rid, _) in &newly_rejected {
+                if let Some(s) = sess.suggestions.iter_mut().find(|s| &s.id == rid) {
+                    s.selected = false;
+                }
+            }
         }
     }
     let mut summary = sess.summary_of_batch();
@@ -3394,6 +3401,57 @@ mod tests {
             "a delete suggestion must never be replaced by a rebuilt move"
         );
         assert!(!sess.suggestions[0].metadata_pending);
+    }
+
+    #[test]
+    fn rebuilt_rejection_deselects_every_rejected_suggestion() {
+        // A rebuilt metadata value can make the unit's destination collide
+        // with another suggestion. Validation rejects both, and both leave
+        // the selection, not just the rebuilt one.
+        let home = PathBuf::from("/home/alice");
+        let provenance = Provenance {
+            identity_available: true,
+            ..Default::default()
+        };
+        let mut first = Suggestion::new_move(
+            AssetKind::Photo,
+            &home.join("a.jpg"),
+            &home.join("dest-a.jpg"),
+            "organize".into(),
+            Default::default(),
+            Vec::new(),
+            provenance.clone(),
+        );
+        let mut second = Suggestion::new_move(
+            AssetKind::Photo,
+            &home.join("b.jpg"),
+            &home.join("dest-b.jpg"),
+            "organize".into(),
+            Default::default(),
+            Vec::new(),
+            provenance.clone(),
+        );
+        first.selected = true;
+        second.selected = true;
+        let replacement = Suggestion::new_move(
+            AssetKind::Photo,
+            &home.join("a.jpg"),
+            &home.join("dest-b.jpg"),
+            "organize".into(),
+            Default::default(),
+            Vec::new(),
+            provenance,
+        );
+        let id = first.id.clone();
+        let mut sess = Session::new(home, RawConfig::default(), None);
+        sess.suggestions = vec![first, second];
+
+        let commit = commit_unit_rebuild(&mut sess, &id, Ok(Some(replacement)), true).unwrap();
+        assert_eq!(commit.rejected.len(), 1);
+        assert!(sess
+            .suggestions
+            .iter()
+            .all(|s| s.status == SuggestionStatus::Rejected && !s.selected));
     }
 
     #[tokio::test]

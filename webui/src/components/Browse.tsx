@@ -16,6 +16,7 @@ import {
   isDefaultFilter,
 } from '../lib/filter';
 import {
+  isSelectable,
   manualOverrideLabel,
   metadataProgressLabel,
   rowText,
@@ -625,13 +626,14 @@ const SuggestionRow = memo(function SuggestionRow({
   // status suffix: green and struck for done, red for rejected/failed,
   // orange for partial, dim for skipped.
   const tone = rowTone(suggestion.status);
+  const selectable = isSelectable(suggestion);
   return (
     <>
       <input
         type="checkbox"
         className="row-check"
-        checked={suggestion.selected && suggestion.status !== 'executed'}
-        disabled={suggestion.status === 'executed'}
+        checked={suggestion.selected && selectable}
+        disabled={!selectable}
         onChange={() => onToggle(suggestion.id, !suggestion.selected)}
         aria-label="select"
       />

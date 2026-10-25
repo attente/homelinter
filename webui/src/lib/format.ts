@@ -149,6 +149,11 @@ export function rowText(s: Suggestion, root?: string | null): string {
  */
 export type RowTone = 'done' | 'bad' | 'partial' | 'skipped';
 
+/** A rejected or executed suggestion is never selectable. */
+export function isSelectable(s: Pick<Suggestion, 'status'>): boolean {
+  return s.status !== 'executed' && s.status !== 'rejected';
+}
+
 export function rowTone(status: SuggestionStatus): RowTone | null {
   switch (status) {
     case 'executed':

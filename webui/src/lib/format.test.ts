@@ -26,6 +26,7 @@ import {
   actionLabel,
   actionLabelParts,
   actionText,
+  isSelectable,
   manualOverrideLabel,
   metadataProgressLabel,
   pathLabel,
@@ -477,6 +478,19 @@ describe('format', () => {
     expect(rowTone('failed')).toBe('bad');
     expect(rowTone('rejected')).toBe('bad');
     expect(rowTone('skipped')).toBe('skipped');
+  });
+
+  it('only pending-like outcomes are selectable', () => {
+    for (const status of [
+      'pending',
+      'partial',
+      'failed',
+      'skipped',
+    ] as const) {
+      expect(isSelectable({ status })).toBe(true);
+    }
+    expect(isSelectable({ status: 'executed' })).toBe(false);
+    expect(isSelectable({ status: 'rejected' })).toBe(false);
   });
 
   it('action label reads the performed operation, not the id', () => {

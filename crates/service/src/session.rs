@@ -108,11 +108,15 @@ impl Session {
     /// Select exactly the given top-level suggestion ids. Dependent
     /// operation ids never appear in the batch and are rejected by the
     /// handler before this is called.
-    /// A done suggestion has nothing left to run, so it is never selectable:
-    /// every selection path skips it, and clients clear and disable its
+    /// A done suggestion has nothing left to run, and a rejected suggestion
+    /// cannot run or be exported, so neither is ever selectable: every
+    /// selection path skips them, and clients clear and disable their
     /// checkbox.
     fn selectable(&self, i: usize) -> bool {
-        self.suggestions[i].status != SuggestionStatus::Executed
+        !matches!(
+            self.suggestions[i].status,
+            SuggestionStatus::Executed | SuggestionStatus::Rejected
+        )
     }
 
     pub fn set_selection(&mut self, ids: &[String]) {
@@ -178,6 +182,9 @@ impl Session {
             if let Some(i) = self.suggestion_index(id) {
                 self.suggestions[i].status = SuggestionStatus::Rejected;
                 self.suggestions[i].rejection_reason = Some(reason.clone());
+                // A suggestion that becomes rejected leaves the selection:
+                // rejected entries are never selectable.
+                self.suggestions[i].selected = false;
             }
         }
         rejected
@@ -252,5 +259,56 @@ impl Session {
             ),
             None => (0, 0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homelinter_model::asset_kind::AssetKind;
+    use homelinter_model::suggestion::Provenance;
+
+    fn move_suggestion(target: &str, new_path: &str, selected: bool) -> Suggestion {
+        let mut s = Suggestion::new_move(
+            AssetKind::Photo,
+            Path::new(target),
+            Path::new(new_path),
+            "organize".into(),
+            Default::default(),
+            Vec::new(),
+            Provenance {
+                identity_available: true,
+                ..Default::default()
+            },
+        );
+        s.selected = selected;
+        s
+    }
+
+    fn session_with(suggestions: Vec<Suggestion>) -> Session {
+        let mut sess = Session::new(PathBuf::from("/home/alice"), RawConfig::default(), None);
+        sess.suggestions = suggestions;
+        sess
+    }
+
+    #[test]
+    fn rejected_suggestions_are_not_selectable() {
+        let mut sess = session_with(vec![
+            move_suggestion("/home/alice/a.jpg", "/home/alice/dest.jpg", true),
+            move_suggestion("/home/alice/b.jpg", "/home/alice/dest.jpg", false),
+        ]);
+        let ids: Vec<String> = sess.suggestions.iter().map(|s| s.id.clone()).collect();
+
+        // Re-validation rejects the collision set and drops the selected
+        // member from the selection.
+        let rejected = sess.validate_ids(&ids);
+        assert_eq!(rejected.len(), 2);
+        assert!(sess.selection_ids().is_empty());
+
+        // Every selection path skips rejected suggestions.
+        sess.add_to_selection(&ids);
+        assert!(sess.selection_ids().is_empty());
+        sess.set_selection(&ids);
+        assert!(sess.selection_ids().is_empty());
     }
 }

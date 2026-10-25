@@ -147,6 +147,10 @@ impl Row {
     fn is_executable(&self) -> bool {
         (self.status == "pending" || self.status == "executed") && !self.pending_meta
     }
+
+    fn is_selectable(&self) -> bool {
+        self.status != "executed" && self.status != "rejected"
+    }
 }
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -1022,6 +1026,9 @@ impl App {
         let Some(idx) = self.filtered_index(self.cursor) else {
             return Ok(Vec::new());
         };
+        if !self.rows[idx].is_selectable() {
+            return Ok(Vec::new());
+        }
         let id = self.rows[idx].id.clone();
         self.client
             .selection_add(Some(vec![id.clone()]), None)
@@ -1035,6 +1042,13 @@ impl App {
         let Some(idx) = self.filtered_index(self.cursor) else {
             return;
         };
+        if !self.rows[idx].is_selectable() {
+            self.toast = Some(format!(
+                "{} suggestions cannot be selected",
+                self.rows[idx].status
+            ));
+            return;
+        }
         let id = self.rows[idx].id.clone();
         let select = !self.rows[idx].selected;
         let res = if select {

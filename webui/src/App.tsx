@@ -23,6 +23,7 @@ import {
   appendScanStage,
   countsOf,
   countsSummary,
+  isSelectable,
   metadataProgressLabel,
   stateLabel,
 } from "./lib/format";
@@ -580,6 +581,7 @@ export default function App() {
                         ...s,
                         status: "rejected" as SuggestionStatus,
                         rejection_reason: reasons.get(s.id) ?? null,
+                        selected: false,
                       }
                     : s,
                 )
@@ -707,6 +709,12 @@ export default function App() {
 
   const toggle = useCallback(
     async (id: string, select: boolean) => {
+      if (select) {
+        const current = stRef.current.suggestions.find((s) => s.id === id);
+        if (!current || !isSelectable(current)) {
+          return;
+        }
+      }
       setSt((prev) => ({
         ...prev,
         suggestions: prev.suggestions.map((s) =>
@@ -736,7 +744,7 @@ export default function App() {
       setSt((prev) => ({
         ...prev,
         suggestions: prev.suggestions.map((s) =>
-          !s.selected && matchesFilter(s, filter)
+          !s.selected && isSelectable(s) && matchesFilter(s, filter)
             ? { ...s, selected: true }
             : s,
         ),
