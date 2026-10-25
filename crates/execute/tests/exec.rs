@@ -182,6 +182,7 @@ fn delete_verifies_hash_then_removes() {
     let mut items = vec![s];
     let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(report.reclaimed_bytes, 12);
     assert!(!b.exists());
     assert!(a.exists());
     std::fs::remove_dir_all(&base).ok();
@@ -213,6 +214,7 @@ fn delete_refuses_when_content_changed() {
     let mut items = vec![s];
     let report = execute_batch(&mut items, &base, true);
     assert_eq!(report.entries[0].result, ExecutionStatus::Failed);
+    assert_eq!(report.reclaimed_bytes, 0);
     assert!(b.exists(), "changed file must not be deleted");
     std::fs::remove_dir_all(&base).ok();
 }

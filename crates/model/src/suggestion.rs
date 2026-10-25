@@ -278,6 +278,12 @@ pub enum OperationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub entries: Vec<ReportEntry>,
+    /// Total file bytes removed by completed duplicate deletes. This is the
+    /// executor's actual outcome, not the scan-time estimate; it counts a
+    /// delete whose dependent repair failed as partial, and is 0 for an
+    /// operation whose size was not recorded.
+    #[serde(default)]
+    pub reclaimed_bytes: u64,
     /// True when a parent succeeded but a dependent repair failed.
     pub partial: bool,
     pub scan_root: String,
@@ -296,6 +302,7 @@ impl ExecutionReport {
     pub fn empty(scan_root: &Path) -> ExecutionReport {
         ExecutionReport {
             entries: Vec::new(),
+            reclaimed_bytes: 0,
             partial: false,
             scan_root: scan_root.to_string_lossy().into_owned(),
             platform: crate::config::platform_name().to_string(),

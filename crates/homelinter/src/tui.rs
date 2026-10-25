@@ -34,6 +34,8 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::output::bytes_label;
+
 /// Minimum terminal dimensions required by the design.
 const MIN_COLS: u16 = 80;
 const MIN_ROWS: u16 = 24;
@@ -2486,14 +2488,18 @@ impl App {
                 let line = format!("[{}] {}", result, str_field(e, "suggestion_id"));
                 entry_lines.push(line);
             }
-            let summary = if counts.is_empty() {
+            let mut summary_parts = counts
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>();
+            let reclaimed = report["reclaimed_bytes"].as_u64().unwrap_or(0);
+            if reclaimed > 0 {
+                summary_parts.push(format!("reclaimed={}", bytes_label(reclaimed)));
+            }
+            let summary = if summary_parts.is_empty() {
                 "no entries executed".to_string()
             } else {
-                counts
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join("  ")
+                summary_parts.join("  ")
             };
             text.lines.push(Line::from(format!(
                 " mode: execution   partial: {}   root: {}",

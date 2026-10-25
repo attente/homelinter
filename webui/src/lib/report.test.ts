@@ -99,6 +99,7 @@ function runState(): RunState {
 function report(): ExecutionReport {
   return {
     entries,
+    reclaimed_bytes: 0,
     partial: true,
     scan_root: '/scan',
     platform: 'linux',
@@ -149,6 +150,18 @@ describe('executionReportText', () => {
     expect(errorsAt).toBeGreaterThan(summaryAt);
     expect(actionsAt).toBeGreaterThan(errorsAt);
     expect(text.indexOf('run error:')).toBe(-1);
+  });
+
+  it('reports the file bytes reclaimed by duplicate deletes', () => {
+    const text = executionReportText({
+      report: { ...report(), reclaimed_bytes: 1536 },
+      run: runState(),
+      generatedAt: AT,
+    });
+    const summaryAt = text.indexOf('summary (4 actions)');
+    const reclaimedAt = text.indexOf('  reclaimed 1.5 KiB');
+    expect(reclaimedAt).toBeGreaterThan(summaryAt);
+    expect(reclaimedAt).toBeLessThan(text.indexOf('scan root:'));
   });
 
   it('counts results, including requested suggestions the report omits', () => {

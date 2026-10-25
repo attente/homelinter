@@ -12,7 +12,12 @@ import type {
   OperationOutcome,
   ReportEntry,
 } from '../types';
-import { actionText, statusLabel, type ReportCounts } from './format';
+import {
+  actionText,
+  formatBytes,
+  statusLabel,
+  type ReportCounts,
+} from './format';
 import { isFinal, type RunItemStatus, type RunState } from './run';
 
 export interface ExecutionReportInput {
@@ -172,6 +177,9 @@ export function executionReportText(input: ExecutionReportInput): string {
   lines.push(`summary (${actions.length} ${plural('action', actions.length)})`);
   for (const key of ['executed', 'partial', 'failed', 'skipped'] as const) {
     lines.push(`  ${statusLabel(key).padEnd(8)} ${counts[key]}`);
+  }
+  if (report.reclaimed_bytes > 0) {
+    lines.push(`  reclaimed ${formatBytes(report.reclaimed_bytes)}`);
   }
   lines.push('');
   if (error) {

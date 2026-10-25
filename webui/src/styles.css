@@ -1120,14 +1120,18 @@ select optgroup {
   font-variant-numeric: tabular-nums;
 }
 
-/* The run's final summary counts, once the report is in, immediately after
-   the disabled cancel button in the status header. A span rather than a
-   paragraph: `.modal p`'s bottom margin would lift it out of line with the
-   header's other text. The container keeps the progress count's quiet tone;
-   each count then takes the colour of its outcome's run rows, so the summary
-   reads by goodness, with tabular digits so the words do not shift. */
+/* The run's final summary counts and recovered bytes, once the report is in,
+   immediately after the disabled cancel button in the status header. A span
+   rather than a paragraph: `.modal p`'s bottom margin would lift it out of
+   line with the header's other text. The container keeps the progress count's
+   quiet tone; each count then takes the colour of its outcome's run rows, so
+   the summary reads by goodness, with tabular digits so the words do not
+   shift. */
 .run-summary {
+  display: inline-flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 1ch;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }

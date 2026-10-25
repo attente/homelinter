@@ -75,6 +75,27 @@ pub fn emit_report(format: OutputFormat, report: &Value) -> std::io::Result<()> 
     }
 }
 
+/// Human-readable byte count using binary units, so a reclaimed-space
+/// figure stays readable without losing the exact number in machine output.
+pub(crate) fn bytes_label(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let text = if value >= 10.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    };
+    format!("{text} {}", UNITS[unit])
+}
+
 /// Human-readable execution report: one entry per suggestion with the
 /// operation's paths and any failure or partial-completion detail.
 fn report_text(report: &Value) -> String {
@@ -98,6 +119,10 @@ fn report_text(report: &Value) -> String {
         "  entries:   {}",
         report["entries"].as_array().map(|a| a.len()).unwrap_or(0)
     );
+    let reclaimed = report["reclaimed_bytes"].as_u64().unwrap_or(0);
+    if reclaimed > 0 {
+        let _ = writeln!(s, "  reclaimed: {}", bytes_label(reclaimed));
+    }
     for e in report["entries"].as_array().into_iter().flatten() {
         let _ = writeln!(
             s,
@@ -157,6 +182,7 @@ mod tests {
             "scan_root": "/home/alice",
             "platform": "linux",
             "partial": true,
+            "reclaimed_bytes": 2048,
             "entries": [{
                 "suggestion_id": "s1",
                 "result": "partial",
@@ -177,5 +203,16 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("detail=copy verified"), "{text}");
+        assert!(text.contains("reclaimed: 2.0 KiB"), "{text}");
+    }
+
+    #[test]
+    fn bytes_label_uses_binary_units() {
+        assert_eq!(bytes_label(0), "0 B");
+        assert_eq!(bytes_label(1023), "1023 B");
+        assert_eq!(bytes_label(1024), "1.0 KiB");
+        assert_eq!(bytes_label(1536), "1.5 KiB");
+        assert_eq!(bytes_label(10 * 1024), "10 KiB");
+        assert_eq!(bytes_label(3 * 1024 * 1024), "3.0 MiB");
     }
 }

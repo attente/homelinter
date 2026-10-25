@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   actionText,
   countsSummaryParts,
+  formatBytes,
   stateLabel,
   statusLabel,
 } from '../lib/format';
@@ -138,7 +139,9 @@ export function RunView(props: RunViewProps) {
             >
               cancel
             </button>
-            {report && <ReportSummary run={run} />}
+            {report && (
+              <ReportSummary run={run} reclaimedBytes={report.reclaimed_bytes} />
+            )}
           </div>
           <button
             type="button"
@@ -227,7 +230,13 @@ export function RunView(props: RunViewProps) {
  *  disabled cancel button once the report is in: the same words the
  *  downloaded report and the TUI use, each count coloured by its outcome's
  *  goodness (the colours its rows use on the list). */
-function ReportSummary({ run }: { run: RunState | null }) {
+function ReportSummary({
+  run,
+  reclaimedBytes,
+}: {
+  run: RunState | null;
+  reclaimedBytes: number;
+}) {
   const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   if (run) {
     for (const item of run.items) {
@@ -241,6 +250,11 @@ function ReportSummary({ run }: { run: RunState | null }) {
           {part.label}
         </span>
       ))}
+      {reclaimedBytes > 0 && (
+        <span className="run-summary-part part-ok">
+          reclaimed {formatBytes(reclaimedBytes)}
+        </span>
+      )}
     </span>
   );
 }

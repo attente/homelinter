@@ -778,6 +778,9 @@ pub async fn run_execute(app: AppHandle, req: ExecuteRequest) {
                 );
             }
         }
+        report.reclaimed_bytes = report
+            .reclaimed_bytes
+            .saturating_add(homelinter_execute::reclaimed_bytes(&s, &entry));
         report.entries.push(entry);
         pos += 1;
     }

@@ -25,6 +25,7 @@ import {
   countsSummary,
   isSelectable,
   metadataProgressLabel,
+  reclaimedLabel,
   stateLabel,
 } from "./lib/format";
 import {
@@ -421,7 +422,12 @@ export default function App() {
     let summary = "";
     try {
       const report = await api.execution();
-      summary = countsSummary(countsOf(report.entries));
+      summary = [
+        countsSummary(countsOf(report.entries)),
+        reclaimedLabel(report.reclaimed_bytes),
+      ]
+        .filter(Boolean)
+        .join("  ");
       setSt((prev) => ({ ...prev, report }));
     } catch {
       // The refreshed rows still show the outcome without the report.

@@ -131,6 +131,9 @@ export interface ReportEntry {
 
 export interface ExecutionReport {
   entries: ReportEntry[];
+  /** File bytes removed by completed duplicate deletes, not the scan-time
+   *  estimate. A partial unit whose delete completed still counts. */
+  reclaimed_bytes: number;
   partial: boolean;
   scan_root: string;
   platform: string;

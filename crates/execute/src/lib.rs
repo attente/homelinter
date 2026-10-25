@@ -113,6 +113,9 @@ pub fn execute_batch(
         if entry.result == ExecutionStatus::Partial {
             report.partial = true;
         }
+        report.reclaimed_bytes = report
+            .reclaimed_bytes
+            .saturating_add(reclaimed_bytes(&items[idx], &entry));
         report.entries.push(entry);
         if let Some((from, to)) = landed {
             relocated.insert(from.clone(), to.clone());
@@ -122,6 +125,34 @@ pub fn execute_batch(
         }
     }
     report
+}
+
+/// File bytes removed by this entry's duplicate delete, or 0 when the entry
+/// did not complete one. A delete is only counted when it names a keeper
+/// (`metadata.duplicate_of`) and its own operation completed; a dependent
+/// repair failure still leaves the delete's bytes reclaimed. The recorded
+/// metadata size wins over provenance so the report matches what the user was
+/// shown, with provenance as a fallback for suggestions built without it.
+pub fn reclaimed_bytes(s: &Suggestion, entry: &ReportEntry) -> u64 {
+    if s.suggestion_type != SuggestionType::Delete
+        || s.metadata
+            .get("duplicate_of")
+            .and_then(|v| v.as_str())
+            .is_none()
+    {
+        return 0;
+    }
+    let deleted = entry
+        .operations
+        .iter()
+        .any(|o| o.operation == OperationKind::Delete && o.status == OperationStatus::Completed);
+    if !deleted {
+        return 0;
+    }
+    s.metadata
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(s.provenance.size)
 }
 
 /// Keeper relocations recorded by moves that already executed, keyed by each

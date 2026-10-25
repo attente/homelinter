@@ -245,6 +245,27 @@ export function countsSummary(counts: ReportCounts): string {
     .join('  ');
 }
 
+/** A byte count in binary units, matching the Rust clients' label. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit + 1 < units.length) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text =
+    unit === 0 || value >= 10 ? value.toFixed(0) : value.toFixed(1);
+  return `${text} ${units[unit]}`;
+}
+
+/** The recovered-space part of an execution summary, or an empty string when
+ *  no duplicate delete reclaimed anything. */
+export function reclaimedLabel(bytes: number): string {
+  return bytes > 0 ? `reclaimed ${formatBytes(bytes)}` : '';
+}
+
 export function elapsedLabel(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
