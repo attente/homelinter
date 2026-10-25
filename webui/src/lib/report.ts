@@ -153,6 +153,20 @@ function actionLine(action: ReportAction): string {
   return `  [${statusLabel(action.status)}] ${action.label}`;
 }
 
+/** Label column widths. The summary block indents two spaces before a
+ *  ten-wide label, while the metadata block pads a label to eleven; each
+ *  leaves its values in one column. */
+const SUMMARY_LABEL_WIDTH = 10;
+const METADATA_LABEL_WIDTH = 11;
+
+function summaryLine(label: string, value: string | number): string {
+  return `  ${label.padEnd(SUMMARY_LABEL_WIDTH)}${value}`;
+}
+
+function metadataLine(label: string, value: string): string {
+  return `${label.padEnd(METADATA_LABEL_WIDTH)}${value}`;
+}
+
 function countActions(actions: ReportAction[]): ReportCounts {
   const counts: ReportCounts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   for (const action of actions) counts[action.status] += 1;
@@ -176,28 +190,31 @@ export function executionReportText(input: ExecutionReportInput): string {
   lines.push('');
   lines.push(`summary (${actions.length} ${plural('action', actions.length)})`);
   for (const key of ['executed', 'partial', 'failed', 'skipped'] as const) {
-    lines.push(`  ${statusLabel(key).padEnd(8)} ${counts[key]}`);
+    lines.push(summaryLine(statusLabel(key), counts[key]));
   }
   if (report.reclaimed_bytes > 0) {
-    lines.push(`  reclaimed ${formatBytes(report.reclaimed_bytes)}`);
+    lines.push(summaryLine('reclaimed', formatBytes(report.reclaimed_bytes)));
   }
   lines.push('');
   if (error) {
-    lines.push(`run error: ${error}`);
+    lines.push(metadataLine('run error:', error));
   }
-  lines.push(`scan root: ${report.scan_root}`);
-  lines.push(`platform: ${report.platform}`);
+  lines.push(metadataLine('scan root:', report.scan_root));
+  lines.push(metadataLine('platform:', report.platform));
   if (report.scan_started_at) {
-    lines.push(`scanned: ${reportStamp(report.scan_started_at)}`);
+    lines.push(metadataLine('scanned:', reportStamp(report.scan_started_at)));
   }
   if (report.executed_at) {
-    lines.push(`executed: ${reportStamp(report.executed_at)}`);
+    lines.push(metadataLine('executed:', reportStamp(report.executed_at)));
   }
-  lines.push(`generated: ${reportStamp(at)}`);
+  lines.push(metadataLine('generated:', reportStamp(at)));
   lines.push(
     report.partial
-      ? 'partial: yes (some actions completed without finishing source cleanup or dependent repairs)'
-      : 'partial: no',
+      ? metadataLine(
+          'partial:',
+          'yes (some actions completed without finishing source cleanup or dependent repairs)',
+        )
+      : metadataLine('partial:', 'no'),
   );
 
   if (errors.length > 0) {

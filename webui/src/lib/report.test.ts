@@ -121,8 +121,8 @@ describe('executionReportText timestamps', () => {
       run: null,
       generatedAt: AT,
     });
-    expect(text).toContain('scanned: 2025-03-05T13:55:00Z');
-    expect(text).toContain('executed: 2025-03-05T14:02:00Z');
+    expect(text).toContain('scanned:   2025-03-05T13:55:00Z');
+    expect(text).toContain('executed:  2025-03-05T14:02:00Z');
     expect(text).toContain('generated: 2025-03-05T14:02:11Z');
   });
 
@@ -132,7 +132,7 @@ describe('executionReportText timestamps', () => {
       run: null,
       generatedAt: AT,
     });
-    expect(text).toContain('scanned: not a time');
+    expect(text).toContain('scanned:   not a time');
   });
 });
 
@@ -170,10 +170,10 @@ describe('executionReportText', () => {
       run: runState(),
       generatedAt: AT,
     });
-    expect(text).toContain('  done     1');
-    expect(text).toContain('  partial  1');
-    expect(text).toContain('  failed   1');
-    expect(text).toContain('  skipped  1');
+    expect(text).toContain('  done      1');
+    expect(text).toContain('  partial   1');
+    expect(text).toContain('  failed    1');
+    expect(text).toContain('  skipped   1');
     expect(text).toContain('[skipped] deleted dup.jpg, duplicate of keeper.jpg');
   });
 
@@ -213,6 +213,30 @@ describe('executionReportText', () => {
     expect(text).toContain('    no operations recorded');
   });
 
+  it('aligns every summary and metadata value in one column', () => {
+    const text = executionReportText({
+      report: { ...report(), reclaimed_bytes: 1536 },
+      run: runState(),
+      error: 'scan was cancelled',
+      generatedAt: AT,
+    });
+    const labelled = text
+      .split('\n')
+      .filter((line) =>
+        /^ {2}(done|partial|failed|skipped|reclaimed) /.test(line) ||
+        /^[a-z][a-z ]*:[ ]/.test(line),
+      );
+    expect(labelled.length).toBeGreaterThan(0);
+    for (const line of labelled) {
+      // Summary values start after two spaces of indent and a ten-wide label
+      // (column 12); metadata values start after an eleven-wide label
+      // (column 11).
+      const column = line.startsWith('  ') ? 12 : 11;
+      expect(line[column - 1]).toBe(' ');
+      expect(line[column]).not.toBe(' ');
+    }
+  });
+
   it('reports a run-level error and the run metadata before the errors', () => {
     const text = executionReportText({
       report: report(),
@@ -222,11 +246,11 @@ describe('executionReportText', () => {
     });
     expect(text).toContain('run error: scan was cancelled');
     expect(text).toContain('scan root: /scan');
-    expect(text).toContain('platform: linux');
-    expect(text).toContain('scanned: 2025-03-05T13:55:00Z');
-    expect(text).toContain('executed: 2025-03-05T14:02:00Z');
+    expect(text).toContain('platform:  linux');
+    expect(text).toContain('scanned:   2025-03-05T13:55:00Z');
+    expect(text).toContain('executed:  2025-03-05T14:02:00Z');
     expect(text).toContain('generated: 2025-03-05T14:02:11Z');
-    expect(text).toContain('partial: yes');
+    expect(text).toContain('partial:   yes');
     expect(text.indexOf('run error:')).toBeLessThan(text.indexOf('errors (2)'));
   });
 
