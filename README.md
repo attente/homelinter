@@ -21,7 +21,7 @@ From the repo root, `cargo run -p homelinter -- <subcommand>` runs the `homelint
 - **TUI**: `cargo run -p homelinter -- tui` starts the full-screen terminal interface (needs an 80x24 terminal).
 - **Web**: `cargo run -p homelinter -- web` starts a localhost service on an ephemeral port and serves the SPA at the printed URL; pass `--port 8787` to pin the port (needed for the SPA dev loop). Set `[ui].theme` to `dark` (the default) or `light`, or pass `--theme dark|light` to seed it; the SPA header also toggles it. Session state is in memory, so a restart requires a new scan.
 
-Per-scan options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute`, `--export` are mutually exclusive.
+Command-line options include `--config`, `--root`, `--hidden`, `--target-path kind=format`, and `--format pretty|json|toml`. `--execute` and `--export` are mutually exclusive.
 
 ### Developing the SPA
 
@@ -96,10 +96,10 @@ The AppImage is written to `target/appimage/`.
 
 ## Configuration
 
-Configuration is TOML, resolved by precedence: per-scan CLI options, then the config file, then values inferred from tools and your home layout, then defaults.
+Configuration is TOML, resolved by precedence: runtime settings written through the API, then launch-time CLI options, then the config file, then values inferred from tools and your home layout, then defaults.
 
-The default config path is `$HOME/.config/homelinter/config.toml` on Linux and macOS, and `%APPDATA%\homelinter\config.toml` on Windows; any file is merged over it (system-wide first, then user). Use `--config <path>` to select a specific file. A missing file is created on the first saved setting, seeded from the documented defaults (`defaults.toml`) and edited in place, so a change appears as a small diff against the commented defaults. The SPA shows the effective configuration read-only; the scan dialog overrides any scan-relevant option (destination paths, exclusions, providers, extraction commands, limits) for the next scan only, and durable settings are changed in the config file itself.
+The platform config path is `$HOME/.config/homelinter/config.toml` on Linux, `~/Library/Application Support/homelinter/config.toml` on macOS, and `%APPDATA%\homelinter\config.toml` on Windows. The system-wide file (`/etc/homelinter/config.toml` on Linux and macOS, the system-wide application-data location on Windows) is merged first, then the user file, then an explicit `--config <path>` file. A missing user config file is created on the first saved setting, seeded from the documented defaults (`defaults.toml`) and edited in place, so a change appears as a small diff against the commented defaults. The SPA's configuration view shows the effective configuration read-only, but the scan dialog edits the service's persistent configuration directly: its settings are saved through `PUT /config` as they change, and the scan root, hidden-file setting, and destination-path overrides are saved when the scan starts. There is no per-scan configuration overlay, so a scan runs under the settings just saved and saved changes apply to the next scan.
 
 Key sections: `[target_paths]` maps each asset kind to a destination format string (for example `photo = "Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e"`); `[geocoder]` and `[description]` configure optional content-description and location providers (all disabled by default); `[scan]` sets `exclude_paths` globs and (on Windows) the hidden-file definition; `[output]` selects pretty, JSON, or TOML reporting.
 
-The scan root and hidden-file selection are per-scan settings, not config values; `scan.root` and `scan.hidden` in a config file are rejected. API keys and provider secrets are never written to logs or suggestions.
+The scan root and hidden-file setting are runtime settings, not read-only defaults: the CLI seeds them, clients edit them through `PUT /config`, and `scan.root` and `scan.hidden` are valid config-file keys. They are captured when a scan starts and retained with the session. API keys and provider secrets are never written to logs or suggestions.
