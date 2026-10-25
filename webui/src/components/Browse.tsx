@@ -22,7 +22,11 @@ import {
   rowTone,
   suggestionCountLabel,
 } from '../lib/format';
-import { previewSourcePath } from '../lib/preview';
+import {
+  resolveEnlargedView,
+  type EnlargedView,
+  previewSourcePath,
+} from '../lib/preview';
 import { useEscapeClose } from '../lib/modal';
 import type { MetadataProgress, Suggestion } from '../types';
 import { CloseIcon } from './CloseIcon';
@@ -368,9 +372,9 @@ function DetailPane(props: {
   const [tab, setTab] = useState<TabId>('preview');
   // The enlarged preview and the enlarged map share one modal state, so
   // only one can be open and Escape dismisses whichever it is through the
-  // shared modal stack (lib/modal), like every other dialog.
-  const [expanded, setExpanded] = useState<'preview' | 'location' | null>(null);
-  useEscapeClose(expanded !== null, () => setExpanded(null));
+  // shared modal stack (lib/modal), like every other dialog. The modal
+  // carries both views as tabs, so switching happens in place.
+  const [expanded, setExpanded] = useState<EnlargedView | null>(null);
   // An executed suggestion's target no longer exists, so the preview element
   // is chosen from the file's post-execution path (see previewSourcePath).
   const kind = previewKind(previewSourcePath(suggestion));
@@ -397,6 +401,16 @@ function DetailPane(props: {
     lat !== null && lon !== null
       ? `https://www.openstreetmap.org/export/embed.html?bbox=${(lon - 0.01).toFixed(4)}%2C${(lat - 0.01).toFixed(4)}%2C${(lon + 0.01).toFixed(4)}%2C${(lat + 0.01).toFixed(4)}&layer=mapnik&marker=${lat}%2C${lon}`
       : null;
+  // The enlarged view follows `expanded`, and both views are offered inside
+  // the modal whenever their content exists, so `enlarged` also decides
+  // whether the modal is open at all.
+  const previewAvailable = kind !== null;
+  const mapAvailable = mapSrc !== null;
+  const enlarged =
+    expanded === null
+      ? null
+      : resolveEnlargedView(expanded, previewAvailable, mapAvailable);
+  useEscapeClose(enlarged !== null, () => setExpanded(null));
 
   return (
     <aside className="detail-pane">
@@ -523,7 +537,7 @@ function DetailPane(props: {
         </div>
       )}
 
-      {expanded !== null && (
+      {enlarged !== null && (
         <div
           className="modal-backdrop preview-backdrop"
           role="presentation"
@@ -533,9 +547,29 @@ function DetailPane(props: {
             className="preview-modal"
             role="dialog"
             aria-modal="true"
-            aria-label={expanded === 'location' ? 'location map' : 'file preview'}
+            aria-label={enlarged === 'location' ? 'location map' : 'file preview'}
             onClick={(e) => e.stopPropagation()}
           >
+            {previewAvailable && mapAvailable && (
+              <div className="preview-modal-tabs">
+                {(['preview', 'location'] as const).map((view) => (
+                  <button
+                    key={view}
+                    type="button"
+                    className={`tab-btn${enlarged === view ? ' active' : ''}`}
+                    title={`show the enlarged ${view === 'location' ? 'map' : 'preview'}`}
+                    onClick={() => {
+                      // The pane follows the modal, so dismissing it leaves
+                      // the detail pane on the view last looked at.
+                      setTab(view);
+                      setExpanded(view);
+                    }}
+                  >
+                    {view}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               className="close-btn preview-modal-close"
@@ -546,7 +580,7 @@ function DetailPane(props: {
             >
               <CloseIcon />
             </button>
-            {expanded === 'location' ? (
+            {enlarged === 'location' ? (
               <iframe
                 className="map-frame map-frame-enlarged"
                 title="location map"

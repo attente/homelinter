@@ -795,6 +795,18 @@ select optgroup {
   z-index: 1;
 }
 
+/* The enlarge modal carries the pane's preview/location choice, so the pair
+   sits where the pane's tab bar does and leaves the close button clear. */
+.preview-modal-tabs {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .preview-enlarged {
   width: 100%;
   height: 100%;

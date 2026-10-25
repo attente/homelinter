@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { previewSourcePath } from './preview';
+import { previewSourcePath, resolveEnlargedView } from './preview';
 
 const move = {
   type: 'move' as const,
@@ -54,5 +54,27 @@ describe('previewSourcePath', () => {
     expect(
       previewSourcePath({ ...del, status: 'executed', metadata: null }),
     ).toBe(del.target);
+  });
+});
+
+describe('resolveEnlargedView', () => {
+  it('keeps the requested view while it exists', () => {
+    expect(resolveEnlargedView('preview', true, true)).toBe('preview');
+    expect(resolveEnlargedView('location', true, true)).toBe('location');
+  });
+
+  it('offers each view on its own', () => {
+    expect(resolveEnlargedView('preview', true, false)).toBe('preview');
+    expect(resolveEnlargedView('location', false, true)).toBe('location');
+  });
+
+  it('falls back to the other view when the requested one vanished', () => {
+    expect(resolveEnlargedView('preview', false, true)).toBe('location');
+    expect(resolveEnlargedView('location', true, false)).toBe('preview');
+  });
+
+  it('reports no view when neither is available', () => {
+    expect(resolveEnlargedView('preview', false, false)).toBeNull();
+    expect(resolveEnlargedView('location', false, false)).toBeNull();
   });
 });

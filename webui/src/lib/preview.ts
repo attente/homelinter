@@ -22,3 +22,21 @@ export function previewSourcePath(s: {
   const keeper = s.metadata?.['duplicate_of'];
   return typeof keeper === 'string' && keeper.length > 0 ? keeper : s.target;
 }
+
+/** Which view the enlarge modal shows. The modal carries the pane's preview
+ *  and location choice, so a switch happens in place instead of a dismiss and
+ *  a re-open. The requested view wins when its content exists; if it has gone
+ *  away (no previewable file, no coordinates) the other view takes over, and
+ *  with neither the modal has nothing to show and closes. */
+export type EnlargedView = 'preview' | 'location';
+
+export function resolveEnlargedView(
+  requested: EnlargedView,
+  previewAvailable: boolean,
+  mapAvailable: boolean,
+): EnlargedView | null {
+  const first = requested === 'preview' ? previewAvailable : mapAvailable;
+  if (first) return requested;
+  const other = requested === 'preview' ? mapAvailable : previewAvailable;
+  return other ? (requested === 'preview' ? 'location' : 'preview') : null;
+}
