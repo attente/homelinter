@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use homelinter_analyze::{Analysis, AnalyzedFile};
 use homelinter_model::asset_kind::{strip_trailing_document_extension, AssetKind};
-use homelinter_model::format::{FormatString, PlaceholderValues};
+use homelinter_model::format::{verbatim_segment, FormatString, PlaceholderValues};
 use homelinter_model::path;
 use homelinter_model::suggestion::{
     DependentOpType, DependentOperation, MetadataField, Provenance, Suggestion,
@@ -85,6 +85,7 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
             &repo.root,
             meta.remote_host.clone(),
             meta.remote_owner.clone(),
+            meta.remote_name.clone(),
         );
         let fmt = input
             .formats
@@ -489,16 +490,28 @@ fn repo_values(
     root: &Path,
     remote_host: Option<String>,
     remote_owner: Option<String>,
+    remote_name: Option<String>,
 ) -> PlaceholderValues {
-    let name = root
+    let local_name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // `%n` names a repository from the final segment of its remote URL when
+    // one is available, preserving the remote's spelling; the local
+    // directory name is the fallback (and stays the value `%f`/`%t` report).
+    // A remote name is not a host filename, so it is used verbatim only when
+    // it is a safe single path segment; otherwise the local name keeps the
+    // destination well formed.
+    let stem = remote_name
+        .as_deref()
+        .and_then(verbatim_segment)
+        .map(str::to_owned)
+        .unwrap_or_else(|| local_name.clone());
     PlaceholderValues {
         asset_kind: AssetKind::Repository,
-        title: Some(name.clone()),
-        file_name: Some(name.clone()),
-        stem: Some(name),
+        title: Some(local_name.clone()),
+        file_name: Some(local_name),
+        stem: Some(stem),
         remote_host,
         remote_owner,
         ..Default::default()
@@ -677,6 +690,34 @@ mod tests {
         );
         assert_eq!(coordinate_fallback(Some(f64::NAN), Some(2.0)), None);
         assert_eq!(coordinate_fallback(Some(1.0), None), None);
+    }
+
+    #[test]
+    fn repo_n_uses_remote_name_verbatim() {
+        let v = repo_values(
+            Path::new("/home/alice/checkout"),
+            Some("github.com".into()),
+            Some("William".into()),
+            Some("HomeLinter".into()),
+        );
+        assert_eq!(v.stem.as_deref(), Some("HomeLinter"));
+        assert_eq!(v.remote_owner.as_deref(), Some("William"));
+        // The local directory name still backs `%f`/`%t`.
+        assert_eq!(v.file_name.as_deref(), Some("checkout"));
+        assert_eq!(v.title.as_deref(), Some("checkout"));
+
+        // No remote name: fall back to the local directory name.
+        let local = repo_values(Path::new("/home/alice/checkout"), None, None, None);
+        assert_eq!(local.stem.as_deref(), Some("checkout"));
+
+        // An unsafe remote name is not emitted as a path segment.
+        let unsafe_name = repo_values(
+            Path::new("/home/alice/checkout"),
+            None,
+            None,
+            Some("../escape".into()),
+        );
+        assert_eq!(unsafe_name.stem.as_deref(), Some("checkout"));
     }
 
     #[test]

@@ -19,6 +19,10 @@ pub struct RepoMeta {
     pub remote_url: Option<String>,
     pub remote_host: Option<String>,
     pub remote_owner: Option<String>,
+    /// Repository name from the remote URL: the final path segment (the
+    /// `repo` in `host/owner/repo`), with a trailing `.git` stripped. This
+    /// backs `%n` for repositories, preserving the remote's own spelling.
+    pub remote_name: Option<String>,
     pub default_branch: Option<String>,
     pub commit_count: Option<u64>,
     pub last_activity: Option<SystemTime>,
@@ -60,6 +64,7 @@ impl<'a> RepoAnalyzer<'a> {
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
             remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
+            remote_name: remote_url.as_ref().and_then(|u| parse_repo_name(u)),
             remote_url,
             default_branch,
             commit_count,
@@ -95,6 +100,7 @@ impl<'a> RepoAnalyzer<'a> {
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
             remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
+            remote_name: remote_url.as_ref().and_then(|u| parse_repo_name(u)),
             remote_url,
             default_branch,
             commit_count,
@@ -123,6 +129,7 @@ impl<'a> RepoAnalyzer<'a> {
         RepoMeta {
             remote_host: remote_url.as_ref().and_then(|u| parse_host(u)),
             remote_owner: remote_url.as_ref().and_then(|u| parse_owner(u)),
+            remote_name: remote_url.as_ref().and_then(|u| parse_repo_name(u)),
             remote_url,
             default_branch,
             commit_count: None,
@@ -220,6 +227,35 @@ fn parse_owner(url: &str) -> Option<String> {
         None
     } else {
         Some(owner.to_string())
+    }
+}
+
+/// Extract the repository name from common remote URL forms: the final path
+/// segment, with a trailing `.git` stripped. `git@github.com:owner/repo.git`
+/// -> `repo`, `https://gitlab.com/owner/MyRepo` -> `MyRepo`. The remote's
+/// spelling (case and punctuation) is preserved; URLs without a named
+/// segment (e.g. `file:///srv/repo`) yield `None`.
+fn parse_repo_name(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.starts_with("file://") {
+        return None;
+    }
+    let path = if let Some(rest) = url.strip_prefix("git@") {
+        rest.split_once(':').map(|(_, p)| p)
+    } else if let Some((_, rest)) = url.split_once("://") {
+        let after_user = rest.split('@').last().unwrap_or(rest);
+        after_user.split_once('/').map(|(_, p)| p)
+    } else if let Some((_, rest)) = url.split_once('@') {
+        rest.split_once(':').map(|(_, p)| p)
+    } else {
+        None
+    }?;
+    let name = path.split('/').filter(|s| !s.is_empty()).next_back()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -355,6 +391,33 @@ mod tests {
         );
         assert_eq!(parse_owner("file:///srv/repo"), None);
         assert_eq!(parse_owner("/srv/repo"), None);
+    }
+
+    #[test]
+    fn repo_name_parsing() {
+        assert_eq!(
+            parse_repo_name("https://github.com/foo/bar.git"),
+            Some("bar".into())
+        );
+        assert_eq!(
+            parse_repo_name("git@github.com:foo/bar.git"),
+            Some("bar".into())
+        );
+        // The remote's own spelling is preserved, not lowercased.
+        assert_eq!(
+            parse_repo_name("ssh://git@gitlab.com/Owner/MyRepo"),
+            Some("MyRepo".into())
+        );
+        assert_eq!(
+            parse_repo_name("https://user:pass@example.com/x/y"),
+            Some("y".into())
+        );
+        assert_eq!(
+            parse_repo_name("https://host/owner/repo/"),
+            Some("repo".into())
+        );
+        assert_eq!(parse_repo_name("file:///srv/repo"), None);
+        assert_eq!(parse_repo_name("/srv/repo"), None);
     }
 
     #[test]

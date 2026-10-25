@@ -371,7 +371,8 @@ pub struct PlaceholderValues {
     pub camera: Option<String>,
     pub remote_host: Option<String>,
     /// Repository remote URL owner/username: the first path segment after
-    /// the host in a remote URL (e.g. `github.com/<owner>/<repo>`).
+    /// the host in a remote URL (e.g. `github.com/<owner>/<repo>`). Rendered
+    /// verbatim when it is a safe single path segment.
     pub remote_owner: Option<String>,
     /// Original filename including extension (`%f`), kept verbatim.
     pub file_name: Option<String>,
@@ -447,6 +448,29 @@ pub fn normalize_provider_text(input: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Accept a value that will be emitted verbatim as one path segment.
+///
+/// Repository owners and names come from a remote URL, not from a host
+/// filename, so they are not guaranteed to be a safe single component. A
+/// value is accepted only when it has non-whitespace text, is not `.` or
+/// `..`, and contains no path separator (`/`, `\`), NUL, control character,
+/// or platform-invalid character. An accepted value is returned unchanged,
+/// so its case and punctuation are preserved; a rejected value renders as
+/// no segment, exactly like a missing placeholder.
+pub fn verbatim_segment(value: &str) -> Option<&str> {
+    if value.trim().is_empty()
+        || value == "."
+        || value == ".."
+        || value
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control() || is_platform_invalid(c))
+    {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Lowercase (Unicode-aware) and normalize a metadata segment. Accented
@@ -675,10 +699,12 @@ impl PlaceholderValues {
                 .as_deref()
                 .map(str::to_lowercase)
                 .unwrap_or_default(),
-            Placeholder::RemoteOwner => match self.remote_owner.as_deref() {
-                Some(v) if !v.trim().is_empty() => sanitize_metadata_segment(v),
-                _ => String::new(),
-            },
+            Placeholder::RemoteOwner => self
+                .remote_owner
+                .as_deref()
+                .and_then(verbatim_segment)
+                .unwrap_or_default()
+                .to_string(),
             Placeholder::AssetKind => self.asset_kind.name().to_string(),
             Placeholder::FileName => self.file_name.clone().unwrap_or_default(),
             Placeholder::FileNameNorm => {
@@ -994,11 +1020,40 @@ mod tests {
         v.stem = Some("homelinter".into());
         v.remote_owner = Some("William".into());
         let p = fs.resolve(&v, home).unwrap().unwrap();
-        assert_eq!(p, PathBuf::from("/home/alice/Projects/william/homelinter"));
+        // The remote owner keeps its own spelling (case preserved).
+        assert_eq!(p, PathBuf::from("/home/alice/Projects/William/homelinter"));
         // With no remote, the owner segment is omitted (no `unknown`).
         v.remote_owner = None;
         let p = fs.resolve(&v, home).unwrap().unwrap();
         assert_eq!(p, PathBuf::from("/home/alice/Projects/homelinter"));
+    }
+
+    #[test]
+    fn remote_owner_must_be_a_safe_segment() {
+        let home = std::path::Path::new("/home/alice");
+        let fs = FormatString::parse("Projects/%o/%n").unwrap();
+        let mut v = vals();
+        v.stem = Some("homelinter".into());
+        for bad in ["a/b", "a\\b", "..", ".", "a\nb", ""] {
+            v.remote_owner = Some(bad.into());
+            let p = fs.resolve(&v, home).unwrap().unwrap();
+            assert_eq!(p, PathBuf::from("/home/alice/Projects/homelinter"));
+        }
+    }
+
+    #[test]
+    fn verbatim_segment_preserves_safe_values() {
+        assert_eq!(verbatim_segment("William"), Some("William"));
+        assert_eq!(verbatim_segment("My-Repo_x.y"), Some("My-Repo_x.y"));
+        assert_eq!(verbatim_segment(".hidden"), Some(".hidden"));
+        assert_eq!(verbatim_segment(""), None);
+        assert_eq!(verbatim_segment("   "), None);
+        assert_eq!(verbatim_segment("."), None);
+        assert_eq!(verbatim_segment(".."), None);
+        assert_eq!(verbatim_segment("a/b"), None);
+        assert_eq!(verbatim_segment("a\\b"), None);
+        assert_eq!(verbatim_segment("a\nb"), None);
+        assert_eq!(verbatim_segment("a\0b"), None);
     }
 
     #[test]
