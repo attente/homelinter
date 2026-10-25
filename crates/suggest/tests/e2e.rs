@@ -385,3 +385,178 @@ fn model_defaults_cover_kinds() {
         assert!(defaults.contains_key(&kind), "missing default for {kind:?}");
     }
 }
+
+/// Per-kind format map that also covers repository moves.
+fn fmt_with_repository() -> BTreeMap<AssetKind, FormatString> {
+    let mut m = fmt_map();
+    m.insert(
+        AssetKind::Repository,
+        FormatString::parse("Repos/%n").unwrap(),
+    );
+    m
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_move_relocates_links_inside_the_tree() {
+    use std::os::unix::fs::symlink;
+    let (base, _root, home) = setup("repolinks");
+    // The repository is scanned from the home directory, like a real run,
+    // and carries two symlinks of its own plus one link outside the tree.
+    let repo = home.join("projects/proj");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/config"), "[core]").unwrap();
+    std::fs::create_dir_all(repo.join(".agents/skills")).unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    // A relative link pointing inside the tree keeps resolving after the
+    // whole tree moves, so no repair may be recorded for it.
+    symlink("../.agents/skills", repo.join(".claude/skills")).unwrap();
+    // An absolute link pointing inside the tree needs its target rewritten,
+    // and the rewrite must happen at the link's post-move path.
+    symlink(repo.join(".agents/skills"), repo.join(".claude/abs-skills")).unwrap();
+    // A link outside the tree stays put and is repointed at the new root.
+    let outside = home.join("proj-shortcut");
+    symlink(&repo, &outside).unwrap();
+
+    let scan = scan_root(
+        &home,
+        &home,
+        &discovery(&home, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
+    let analysis = analyze(
+        &scan.files,
+        &scan.repos,
+        &AnalyzeOptions::default(),
+        &|| false,
+        &|_| {},
+    );
+    let out = generate_suggestions(&GenerateInput {
+        analysis: &analysis,
+        symlinks: &scan.symlinks,
+        formats: &fmt_with_repository(),
+        home: &home,
+    })
+    .unwrap();
+
+    let moves: Vec<_> = out
+        .suggestions
+        .iter()
+        .filter(|s| s.suggestion_type == SuggestionType::Move)
+        .collect();
+    assert_eq!(moves.len(), 1, "expected exactly one repository move");
+    let mv = moves[0];
+    assert_eq!(mv.asset_kind, AssetKind::Repository);
+    let new_root = home.join("Repos/proj");
+    assert_eq!(mv.new_path.as_deref(), Some(new_root.to_str().unwrap()));
+
+    let deps = &mv.dependent_operations;
+    assert_eq!(
+        deps.len(),
+        2,
+        "only the links whose target really changes are repaired: {deps:?}"
+    );
+    // The in-tree relative link is untouched.
+    assert!(!deps.iter().any(|d| d.link_path.ends_with(".claude/skills")));
+
+    // The in-tree absolute link is repaired at its new path.
+    let abs = deps
+        .iter()
+        .find(|d| d.link_path.ends_with(".claude/abs-skills"))
+        .expect("absolute in-tree link needs a repair");
+    assert_eq!(
+        std::path::Path::new(&abs.link_path),
+        new_root.join(".claude/abs-skills")
+    );
+    assert_eq!(
+        std::path::Path::new(&abs.replacement_target),
+        new_root.join(".agents/skills")
+    );
+
+    // The outside link keeps its path and gains an absolute target.
+    let out_dep = deps
+        .iter()
+        .find(|d| std::path::Path::new(&d.link_path) == outside)
+        .expect("the outside link is repointed");
+    assert_eq!(std::path::Path::new(&out_dep.replacement_target), new_root);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_move_recomputes_outside_relative_link_from_its_new_parent() {
+    use std::os::unix::fs::symlink;
+    let (base, _root, home) = setup("reporel");
+    let repo = home.join("projects/proj");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/config"), "[core]").unwrap();
+    // A relative link inside the tree points at a sibling outside it, so its
+    // raw target changes even though the link moves with the repository.
+    std::fs::create_dir_all(home.join("shared/data")).unwrap();
+    std::fs::create_dir_all(repo.join("data")).unwrap();
+    symlink("../../../shared/data", repo.join("data/shared")).unwrap();
+    // And a relative link outside the tree points at the repository root.
+    std::fs::create_dir_all(home.join("links")).unwrap();
+    let outside = home.join("links/proj");
+    symlink("../projects/proj", &outside).unwrap();
+
+    let scan = scan_root(
+        &home,
+        &home,
+        &discovery(&home, false),
+        &|| false,
+        &|_, _| {},
+    )
+    .unwrap();
+    let analysis = analyze(
+        &scan.files,
+        &scan.repos,
+        &AnalyzeOptions::default(),
+        &|| false,
+        &|_| {},
+    );
+    let out = generate_suggestions(&GenerateInput {
+        analysis: &analysis,
+        symlinks: &scan.symlinks,
+        // This destination is deeper than the source tree, so links that
+        // move with the tree no longer resolve their outside targets.
+        formats: &{
+            let mut m = fmt_map();
+            m.insert(
+                AssetKind::Repository,
+                FormatString::parse("Archive/Projects/Repos/%n").unwrap(),
+            );
+            m
+        },
+        home: &home,
+    })
+    .unwrap();
+
+    let mv = out
+        .suggestions
+        .iter()
+        .find(|s| s.suggestion_type == SuggestionType::Move)
+        .expect("repository move");
+    let new_root = home.join("Archive/Projects/Repos/proj");
+    let deps = &mv.dependent_operations;
+    assert_eq!(deps.len(), 2, "both links need a rewrite: {deps:?}");
+
+    let inner = deps
+        .iter()
+        .find(|d| d.link_path.ends_with("data/shared"))
+        .expect("in-tree relative link");
+    assert_eq!(
+        std::path::Path::new(&inner.link_path),
+        new_root.join("data/shared")
+    );
+    assert_eq!(inner.replacement_target, "../../../../../shared/data");
+
+    let outer = deps
+        .iter()
+        .find(|d| std::path::Path::new(&d.link_path) == outside)
+        .expect("outside relative link");
+    assert_eq!(outer.replacement_target, "../Archive/Projects/Repos/proj");
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -598,6 +598,13 @@ fn date_from_time(t: std::time::SystemTime) -> DateFields {
 /// Links whose canonical resolved target is the moved object or a
 /// descendant of a moved directory are repaired to point at the new
 /// location, preserving the relative/absolute form of the original target.
+///
+/// A link that lives inside the moved tree travels with it, so its repair is
+/// recorded at the post-move link path and its relative target is recomputed
+/// from that new parent directory. A link whose raw target already names the
+/// same place after the move needs no repair and is not emitted; that is the
+/// ordinary case for a relative link pointing inside a repository that is
+/// moved whole, where the target moves exactly as far as the link does.
 fn collect_dependents(
     target: &Path,
     canonical_target: &Path,
@@ -611,28 +618,77 @@ fn collect_dependents(
         .unwrap_or(false);
     if target_is_dir {
         for link in links.iter() {
-            let Some(rt) = &link.resolved_target else {
-                continue;
+            // Only a link that is a descendant of the moved directory travels
+            // with it; every other link keeps its own path.
+            let relocated = relocated_link_path(&link.link_path, target, canonical_target, new_abs);
+            let link_path = relocated.clone().unwrap_or_else(|| link.link_path.clone());
+            let inside_target = link
+                .resolved_target
+                .as_ref()
+                .and_then(|rt| rt.strip_prefix(canonical_target).ok());
+            let replacement_abs = match inside_target {
+                // The link points into the moved tree, so its target changes.
+                Some(suffix) => {
+                    if suffix.as_os_str().is_empty() {
+                        new_abs.to_path_buf()
+                    } else {
+                        new_abs.join(suffix)
+                    }
+                }
+                // The link moves with the tree but points outside it: an
+                // absolute target keeps resolving, a relative one must be
+                // recomputed from the link's new parent directory.
+                None if relocated.is_some() && link.target_relative => {
+                    let Some(absolute) = lexical_target(link) else {
+                        continue;
+                    };
+                    absolute
+                }
+                None => continue,
             };
-            let Ok(suffix) = rt.strip_prefix(canonical_target) else {
-                continue;
-            };
-            let replacement_abs = if suffix.as_os_str().is_empty() {
-                new_abs.to_path_buf()
-            } else {
-                new_abs.join(suffix)
-            };
-            out.push(make_repair(link, &replacement_abs));
+            if let Some(dep) = make_repair(link, &link_path, &replacement_abs) {
+                out.push(dep);
+            }
         }
         return out;
     }
     // Exact file match via canonical identity.
     if let Some(idxs) = by_canon.get(canonical_target) {
         for &i in idxs {
-            out.push(make_repair(&links[i], new_abs));
+            if let Some(dep) = make_repair(&links[i], &links[i].link_path, new_abs) {
+                out.push(dep);
+            }
         }
     }
     out
+}
+
+/// Where a symlink will live once `from` has been moved to `to`, when the
+/// link lies inside the moved tree. `None` when the link stays where it is.
+fn relocated_link_path(
+    link_path: &Path,
+    from: &Path,
+    canonical_from: &Path,
+    to: &Path,
+) -> Option<PathBuf> {
+    let suffix = link_path
+        .strip_prefix(from)
+        .or_else(|_| link_path.strip_prefix(canonical_from))
+        .ok()?;
+    if suffix.as_os_str().is_empty() {
+        return None;
+    }
+    Some(to.join(suffix))
+}
+
+/// The absolute path a link's raw target names today, without resolving
+/// symlinks in it, so a repair preserves the path the user wrote.
+fn lexical_target(link: &SymlinkEntry) -> Option<PathBuf> {
+    let raw = Path::new(&link.raw_target);
+    if !link.target_relative {
+        return Some(raw.to_path_buf());
+    }
+    path::normalize_lexical(&link.link_path.parent()?.join(raw))
 }
 
 fn delete_dependents(
@@ -644,22 +700,37 @@ fn delete_dependents(
     let mut out = Vec::new();
     if let Some(idxs) = by_canon.get(canonical_deleted) {
         for &i in idxs {
-            out.push(make_repair(&links[i], keeper));
+            if let Some(dep) = make_repair(&links[i], &links[i].link_path, keeper) {
+                out.push(dep);
+            }
         }
     }
     out
 }
 
-fn make_repair(link: &SymlinkEntry, replacement_abs: &Path) -> DependentOperation {
+/// Build one repair operation that writes `link_path` to `replacement_abs`,
+/// keeping the link's recorded relative or absolute form. Returns `None` when
+/// the link's raw target already expresses that destination, since rewriting
+/// it would be a no-op.
+fn make_repair(
+    link: &SymlinkEntry,
+    link_path: &Path,
+    replacement_abs: &Path,
+) -> Option<DependentOperation> {
     let replacement = if link.target_relative {
-        // Recalculate relative from the symlink's parent directory.
+        // Recalculate relative from the symlink's parent directory. After a
+        // move of the tree that contains the link, this is the parent the
+        // link will have when the repair runs.
         relative_to(
-            link.link_path.parent().unwrap_or(Path::new("/")),
+            link_path.parent().unwrap_or(Path::new("/")),
             replacement_abs,
         )
     } else {
         replacement_abs.to_string_lossy().into_owned()
     };
+    if replacement == link.raw_target {
+        return None;
+    }
     let prov = Provenance {
         link_resolved_target: link
             .resolved_target
@@ -668,14 +739,14 @@ fn make_repair(link: &SymlinkEntry, replacement_abs: &Path) -> DependentOperatio
         link_raw_relative: Some(link.target_relative),
         ..Default::default()
     };
-    DependentOperation {
+    Some(DependentOperation {
         op_type: DependentOpType::RepairSymlink,
-        link_path: link.link_path.to_string_lossy().into_owned(),
+        link_path: link_path.to_string_lossy().into_owned(),
         recorded_target: link.raw_target.clone(),
         replacement_target: replacement,
         recorded_target_relative: link.target_relative,
         provenance: prov,
-    }
+    })
 }
 
 pub use homelinter_model::path::relative_to;

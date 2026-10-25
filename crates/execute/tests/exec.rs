@@ -988,3 +988,62 @@ fn suggestion_type_serde_roundtrip() {
     assert_eq!(back.suggestion_type, SuggestionType::Move);
     assert_eq!(back.status, SuggestionStatus::Pending);
 }
+
+#[cfg(unix)]
+#[test]
+fn move_directory_repairs_links_inside_the_moved_tree() {
+    use std::os::unix::fs::symlink;
+
+    let base = tmpdir("repairintree");
+    let src = base.join("projects").join("repo");
+    let dst = base.join("archive").join("projects").join("repo");
+    write(&src.join(".agents/skills/SKILL.md"), b"skill");
+    // A relative link that points inside the tree keeps resolving after the
+    // move, so it carries no repair and must survive untouched.
+    let relative = src.join(".claude/skills");
+    std::fs::create_dir_all(relative.parent().unwrap()).unwrap();
+    symlink("../.agents/skills", &relative).unwrap();
+    // An absolute link pointing inside the tree is repaired at the path it
+    // occupies after the parent move.
+    let absolute = src.join(".claude/absolute");
+    let target = src.join(".agents/skills");
+    symlink(&target, &absolute).unwrap();
+
+    let moved_link = dst.join(".claude/absolute");
+    let moved_target = dst.join(".agents/skills");
+    let dep = DependentOperation {
+        op_type: DependentOpType::RepairSymlink,
+        link_path: moved_link.to_string_lossy().into_owned(),
+        recorded_target: target.to_string_lossy().into_owned(),
+        replacement_target: moved_target.to_string_lossy().into_owned(),
+        recorded_target_relative: false,
+        provenance: Provenance {
+            link_resolved_target: Some(target.to_string_lossy().into_owned()),
+            link_raw_relative: Some(false),
+            ..Default::default()
+        },
+    };
+
+    let mut s = Suggestion::new_move(
+        AssetKind::Repository,
+        &src,
+        &dst,
+        "test".into(),
+        Default::default(),
+        vec![dep],
+        provenance_for(&src),
+    );
+    s.selected = true;
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert_eq!(
+        std::fs::read_link(dst.join(".claude/absolute")).unwrap(),
+        moved_target
+    );
+    assert_eq!(
+        std::fs::read_link(dst.join(".claude/skills")).unwrap(),
+        Path::new("../.agents/skills")
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
