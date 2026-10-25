@@ -505,16 +505,21 @@ function DetailPane(props: {
               ))}
             </tbody>
           </table>
-          <MetadataEditor
-            suggestion={suggestion}
-            onSave={onSetMetadata}
-            actions={
-              <FetchMetadataButton
-                suggestion={suggestion}
-                onRefresh={onRefreshMetadata}
-              />
-            }
-          />
+          {/* Only a move has editable metadata; the service refuses an
+              edit or a provider re-request for a delete, so the tab shows
+              the read-only table without the editor or its fetch action. */}
+          {suggestion.type === 'move' && (
+            <MetadataEditor
+              suggestion={suggestion}
+              onSave={onSetMetadata}
+              actions={
+                <FetchMetadataButton
+                  suggestion={suggestion}
+                  onRefresh={onRefreshMetadata}
+                />
+              }
+            />
+          )}
         </div>
       )}
 
