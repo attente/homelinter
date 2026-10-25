@@ -99,7 +99,7 @@ function runState(): RunState {
 function report(): ExecutionReport {
   return {
     entries,
-    reclaimed_bytes: 0,
+    freed_bytes: 0,
     partial: true,
     scan_root: '/scan',
     platform: 'linux',
@@ -152,16 +152,16 @@ describe('executionReportText', () => {
     expect(text.indexOf('run error:')).toBe(-1);
   });
 
-  it('reports the file bytes reclaimed by duplicate deletes', () => {
+  it('reports the file bytes freed by duplicate deletes', () => {
     const text = executionReportText({
-      report: { ...report(), reclaimed_bytes: 1536 },
+      report: { ...report(), freed_bytes: 1536 },
       run: runState(),
       generatedAt: AT,
     });
     const summaryAt = text.indexOf('summary (4 actions)');
-    const reclaimedAt = text.indexOf('  reclaimed 1.5 KiB');
-    expect(reclaimedAt).toBeGreaterThan(summaryAt);
-    expect(reclaimedAt).toBeLessThan(text.indexOf('scan root:'));
+    const freedAt = text.indexOf('  freed     1.5 KiB');
+    expect(freedAt).toBeGreaterThan(summaryAt);
+    expect(freedAt).toBeLessThan(text.indexOf('scan root:'));
   });
 
   it('counts results, including requested suggestions the report omits', () => {
@@ -215,7 +215,7 @@ describe('executionReportText', () => {
 
   it('aligns every summary and metadata value in one column', () => {
     const text = executionReportText({
-      report: { ...report(), reclaimed_bytes: 1536 },
+      report: { ...report(), freed_bytes: 1536 },
       run: runState(),
       error: 'scan was cancelled',
       generatedAt: AT,
@@ -223,7 +223,7 @@ describe('executionReportText', () => {
     const labelled = text
       .split('\n')
       .filter((line) =>
-        /^ {2}(done|partial|failed|skipped|reclaimed) /.test(line) ||
+        /^ {2}(done|partial|failed|skipped|freed) /.test(line) ||
         /^[a-z][a-z ]*:[ ]/.test(line),
       );
     expect(labelled.length).toBeGreaterThan(0);

@@ -144,7 +144,7 @@ pub fn generate_suggestions(input: &GenerateInput) -> Result<GenerateOutput, Sug
                 f.kind,
                 &f.path,
                 format!(
-                    "Duplicate of {}; retaining the oldest copy and reclaiming {} bytes.",
+                    "Duplicate of {}; retaining the oldest copy and freeing {} bytes.",
                     keeper_path.display(),
                     size
                 ),

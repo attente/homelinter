@@ -23,7 +23,7 @@ import {
   countsSummary,
   countsSummaryParts,
   formatBytes,
-  reclaimedLabel,
+  freedLabel,
   statusLabel,
   actionLabel,
   actionLabelParts,
@@ -40,15 +40,15 @@ import {
 import type { ReportEntry, Suggestion } from '../types';
 
 describe('byte labels', () => {
-  it('formats reclaimed space in binary units', () => {
+  it('formats freed space in binary units', () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(1023)).toBe('1023 B');
     expect(formatBytes(1024)).toBe('1.0 KiB');
     expect(formatBytes(1536)).toBe('1.5 KiB');
     expect(formatBytes(10 * 1024)).toBe('10 KiB');
     expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MiB');
-    expect(reclaimedLabel(0)).toBe('');
-    expect(reclaimedLabel(2048)).toBe('reclaimed 2.0 KiB');
+    expect(freedLabel(0)).toBe('');
+    expect(freedLabel(2048)).toBe('freed 2.0 KiB');
   });
 });
 

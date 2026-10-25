@@ -25,7 +25,7 @@ import {
   countsSummary,
   isSelectable,
   metadataProgressLabel,
-  reclaimedLabel,
+  freedLabel,
   stateLabel,
 } from "./lib/format";
 import {
@@ -424,7 +424,7 @@ export default function App() {
       const report = await api.execution();
       summary = [
         countsSummary(countsOf(report.entries)),
-        reclaimedLabel(report.reclaimed_bytes),
+        freedLabel(report.freed_bytes),
       ]
         .filter(Boolean)
         .join("  ");

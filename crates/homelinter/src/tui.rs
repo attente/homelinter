@@ -2492,9 +2492,9 @@ impl App {
                 .iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>();
-            let reclaimed = report["reclaimed_bytes"].as_u64().unwrap_or(0);
-            if reclaimed > 0 {
-                summary_parts.push(format!("reclaimed={}", bytes_label(reclaimed)));
+            let freed = report["freed_bytes"].as_u64().unwrap_or(0);
+            if freed > 0 {
+                summary_parts.push(format!("freed={}", bytes_label(freed)));
             }
             let summary = if summary_parts.is_empty() {
                 "no entries executed".to_string()

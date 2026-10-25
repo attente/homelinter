@@ -261,9 +261,9 @@ export function formatBytes(bytes: number): string {
 }
 
 /** The recovered-space part of an execution summary, or an empty string when
- *  no duplicate delete reclaimed anything. */
-export function reclaimedLabel(bytes: number): string {
-  return bytes > 0 ? `reclaimed ${formatBytes(bytes)}` : '';
+ *  no duplicate delete freed anything. */
+export function freedLabel(bytes: number): string {
+  return bytes > 0 ? `freed ${formatBytes(bytes)}` : '';
 }
 
 export function elapsedLabel(ms: number): string {

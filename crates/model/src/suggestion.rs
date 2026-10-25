@@ -283,7 +283,7 @@ pub struct ExecutionReport {
     /// delete whose dependent repair failed as partial, and is 0 for an
     /// operation whose size was not recorded.
     #[serde(default)]
-    pub reclaimed_bytes: u64,
+    pub freed_bytes: u64,
     /// True when a parent succeeded but a dependent repair failed.
     pub partial: bool,
     pub scan_root: String,
@@ -302,7 +302,7 @@ impl ExecutionReport {
     pub fn empty(scan_root: &Path) -> ExecutionReport {
         ExecutionReport {
             entries: Vec::new(),
-            reclaimed_bytes: 0,
+            freed_bytes: 0,
             partial: false,
             scan_root: scan_root.to_string_lossy().into_owned(),
             platform: crate::config::platform_name().to_string(),
@@ -322,8 +322,8 @@ pub struct ScanSummary {
     pub suggestions_by_type: BTreeMap<String, u64>,
     /// Suggestions by asset kind.
     pub suggestions_by_kind: BTreeMap<String, u64>,
-    /// Estimated bytes reclaimed by deduplication (delete suggestions).
-    pub estimated_space_reclaimed: u64,
+    /// Estimated bytes freed by deduplication (delete suggestions).
+    pub estimated_space_freed: u64,
 }
 
 /// Session state machine states.

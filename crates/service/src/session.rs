@@ -190,7 +190,7 @@ impl Session {
         rejected
     }
 
-    /// Suggestion counts by type and kind plus estimated reclaimed space,
+    /// Suggestion counts by type and kind plus estimated freed space,
     /// from the current batch.
     pub fn summary_of_batch(&self) -> ScanSummary {
         let mut summary = ScanSummary {
@@ -215,7 +215,7 @@ impl Session {
                 homelinter_model::suggestion::SuggestionType::Delete
             ) {
                 if let Some(size) = s.metadata.get("size").and_then(|v| v.as_u64()) {
-                    summary.estimated_space_reclaimed += size;
+                    summary.estimated_space_freed += size;
                 }
             }
         }

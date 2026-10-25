@@ -113,9 +113,9 @@ pub fn execute_batch(
         if entry.result == ExecutionStatus::Partial {
             report.partial = true;
         }
-        report.reclaimed_bytes = report
-            .reclaimed_bytes
-            .saturating_add(reclaimed_bytes(&items[idx], &entry));
+        report.freed_bytes = report
+            .freed_bytes
+            .saturating_add(freed_bytes(&items[idx], &entry));
         report.entries.push(entry);
         if let Some((from, to)) = landed {
             relocated.insert(from.clone(), to.clone());
@@ -130,10 +130,10 @@ pub fn execute_batch(
 /// File bytes removed by this entry's duplicate delete, or 0 when the entry
 /// did not complete one. A delete is only counted when it names a keeper
 /// (`metadata.duplicate_of`) and its own operation completed; a dependent
-/// repair failure still leaves the delete's bytes reclaimed. The recorded
+/// repair failure still leaves the delete's bytes freed. The recorded
 /// metadata size wins over provenance so the report matches what the user was
 /// shown, with provenance as a fallback for suggestions built without it.
-pub fn reclaimed_bytes(s: &Suggestion, entry: &ReportEntry) -> u64 {
+pub fn freed_bytes(s: &Suggestion, entry: &ReportEntry) -> u64 {
     if s.suggestion_type != SuggestionType::Delete
         || s.metadata
             .get("duplicate_of")
@@ -201,7 +201,7 @@ fn refresh_delete_reason(s: &mut Suggestion, keeper: &Path) {
         return;
     };
     s.reason = format!(
-        "Duplicate of {}; retaining the oldest copy and reclaiming {size} bytes.",
+        "Duplicate of {}; retaining the oldest copy and freeing {size} bytes.",
         keeper.display()
     );
 }

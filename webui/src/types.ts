@@ -112,7 +112,7 @@ export interface ScanSummary {
   total_symlinks_indexed: number;
   suggestions_by_type: Record<string, number>;
   suggestions_by_kind: Record<string, number>;
-  estimated_space_reclaimed: number;
+  estimated_space_freed: number;
 }
 
 export interface OperationOutcome {
@@ -133,7 +133,7 @@ export interface ExecutionReport {
   entries: ReportEntry[];
   /** File bytes removed by completed duplicate deletes, not the scan-time
    *  estimate. A partial unit whose delete completed still counts. */
-  reclaimed_bytes: number;
+  freed_bytes: number;
   partial: boolean;
   scan_root: string;
   platform: string;

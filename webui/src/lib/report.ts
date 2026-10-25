@@ -192,8 +192,8 @@ export function executionReportText(input: ExecutionReportInput): string {
   for (const key of ['executed', 'partial', 'failed', 'skipped'] as const) {
     lines.push(summaryLine(statusLabel(key), counts[key]));
   }
-  if (report.reclaimed_bytes > 0) {
-    lines.push(summaryLine('reclaimed', formatBytes(report.reclaimed_bytes)));
+  if (report.freed_bytes > 0) {
+    lines.push(summaryLine('freed', formatBytes(report.freed_bytes)));
   }
   lines.push('');
   if (error) {

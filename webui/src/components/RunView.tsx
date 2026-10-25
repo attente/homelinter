@@ -140,7 +140,7 @@ export function RunView(props: RunViewProps) {
               cancel
             </button>
             {report && (
-              <ReportSummary run={run} reclaimedBytes={report.reclaimed_bytes} />
+              <ReportSummary run={run} freedBytes={report.freed_bytes} />
             )}
           </div>
           <button
@@ -232,10 +232,10 @@ export function RunView(props: RunViewProps) {
  *  goodness (the colours its rows use on the list). */
 function ReportSummary({
   run,
-  reclaimedBytes,
+  freedBytes,
 }: {
   run: RunState | null;
-  reclaimedBytes: number;
+  freedBytes: number;
 }) {
   const counts = { executed: 0, partial: 0, failed: 0, skipped: 0 };
   if (run) {
@@ -250,9 +250,9 @@ function ReportSummary({
           {part.label}
         </span>
       ))}
-      {reclaimedBytes > 0 && (
+      {freedBytes > 0 && (
         <span className="run-summary-part part-ok">
-          reclaimed {formatBytes(reclaimedBytes)}
+          freed {formatBytes(freedBytes)}
         </span>
       )}
     </span>
