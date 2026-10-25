@@ -102,6 +102,14 @@ export interface RejectedId {
   reason: string;
 }
 
+/** Result of any selection mutation: the full resulting selection plus the
+ *  affected suggestions validation rejected, so the SPA can update their
+ *  status and reason without refetching. */
+export interface SelectionResult {
+  ids: string[];
+  rejected: RejectedId[];
+}
+
 export interface ValidateResult {
   valid: boolean;
   rejected: RejectedId[];

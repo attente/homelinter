@@ -1683,3 +1683,92 @@ async fn spa_rejects_non_get_methods() {
     let (status, _, _) = request_raw(&app, "POST", "/").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selection_add_filter_selects_every_matching_suggestion() {
+    let env = Env::new("select_all_repro");
+    let app = env.service();
+    let dl = env.home.join("Downloads");
+    std::fs::create_dir_all(&dl).unwrap();
+    for i in 0..20 {
+        std::fs::write(
+            dl.join(format!("file{i}.bin")),
+            format!("unique-content-{i}"),
+        )
+        .unwrap();
+    }
+    scan_to_ready(&app, &env.home).await;
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let total = list["total"].as_u64().unwrap();
+    assert!(
+        total >= 20,
+        "expected the seeded files' suggestions, got {total}"
+    );
+    let (status, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "filter": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sel["ids"].as_array().unwrap().len(),
+        total as usize,
+        "the filter add returns the whole resulting selection"
+    );
+    let (_, session) = request(&app, "GET", "/api/v1/session", None).await;
+    assert_eq!(
+        session["selection_count"].as_u64().unwrap(),
+        total,
+        "the session count matches every suggestion the filter selected"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selection_response_reports_affected_rejections() {
+    let env = Env::new("selection-rejected");
+    let app = env.service();
+    seed_photo_collision(&env.home);
+    scan_to_ready(&app, &env.home).await;
+
+    let rejected_ids = suggestion_ids(&app, "rejected").await;
+    assert_eq!(rejected_ids.len(), 2, "expected the colliding pair");
+    let pending = suggestion_ids(&app, "pending").await;
+    assert_eq!(pending.len(), 1, "expected the unique photo's move");
+
+    // A bulk add skips the already-rejected rows, but still returns their
+    // reasons so a client with stale row statuses can repair them.
+    let (status, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "filter": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sel["ids"], json!(pending));
+    let reported = sel["rejected"].as_array().unwrap();
+    assert_eq!(reported.len(), 2);
+    for entry in reported {
+        let id = entry["id"].as_str().unwrap();
+        assert!(rejected_ids.iter().any(|rid| rid == id), "{id}");
+        assert!(entry["reason"]
+            .as_str()
+            .unwrap()
+            .contains("destination_collision"));
+    }
+
+    // An explicit add of one rejected id reports that id too.
+    let (_, sel) = request(
+        &app,
+        "POST",
+        "/api/v1/selection/add",
+        Some(json!({ "ids": [rejected_ids[0]] })),
+    )
+    .await;
+    assert_eq!(sel["ids"], json!(pending));
+    let rejected = sel["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["id"], rejected_ids[0]);
+}

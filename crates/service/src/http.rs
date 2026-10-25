@@ -745,13 +745,44 @@ fn publish_validated(app: &AppHandle, rejected: Vec<(String, String)>) {
     });
 }
 
-fn session_selection_json(sess: &crate::session::Session) -> Value {
-    json!({ "ids": sess.selection_ids() })
+fn selection_json(sess: &crate::session::Session, rejected: &[(String, String)]) -> Value {
+    let rejected: Vec<Value> = rejected
+        .iter()
+        .map(|(id, reason)| json!({ "id": id, "reason": reason }))
+        .collect();
+    json!({ "ids": sess.selection_ids(), "rejected": rejected })
+}
+
+/// Extend the newly rejected ids with affected suggestions that were already
+/// rejected before this request. Selection paths skip those rows, so they
+/// never enter `validate_ids`' subset; returning their reasons lets a client
+/// repair a stale row (for example after missing a `batch.validated` event)
+/// without refetching the page.
+fn with_existing_rejections(
+    sess: &crate::session::Session,
+    affected: &[String],
+    newly_rejected: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut out = newly_rejected.to_vec();
+    for id in affected {
+        if out.iter().any(|(rid, _)| rid == id) {
+            continue;
+        }
+        let Some(s) = sess.suggestion_by_id(id) else {
+            continue;
+        };
+        if s.status == SuggestionStatus::Rejected {
+            if let Some(reason) = &s.rejection_reason {
+                out.push((id.clone(), reason.clone()));
+            }
+        }
+    }
+    out
 }
 
 async fn selection_get(State(app): State<AppHandle>) -> ApiResult {
     let sess = app.session.lock().await;
-    ok(session_selection_json(&sess))
+    ok(selection_json(&sess, &[]))
 }
 
 async fn selection_put(State(app): State<AppHandle>, Json(body): Json<SelectionBody>) -> ApiResult {
@@ -760,19 +791,21 @@ async fn selection_put(State(app): State<AppHandle>, Json(body): Json<SelectionB
     let ids = resolve_ids(&sess, &ids).map_err(api_err)?;
     sess.set_selection(&ids);
     let sel = sess.selection_ids();
-    let rejected = sess.validate_ids(&sel);
-    let body = session_selection_json(&sess);
+    let newly_rejected = sess.validate_ids(&sel);
+    let rejected = with_existing_rejections(&sess, &ids, &newly_rejected);
+    let body = selection_json(&sess, &rejected);
     drop(sess);
-    publish_validated(&app, rejected);
+    publish_validated(&app, newly_rejected);
     ok(body)
 }
 
 async fn selection_add(State(app): State<AppHandle>, Json(body): Json<SelectionBody>) -> ApiResult {
     let mut sess = app.session.lock().await;
-    match body.ids {
+    let affected = match body.ids {
         Some(ids) => {
             let ids = resolve_ids(&sess, &ids).map_err(api_err)?;
             sess.add_to_selection(&ids);
+            ids
         }
         None => {
             let f = body.filter.unwrap_or_default();
@@ -783,13 +816,15 @@ async fn selection_add(State(app): State<AppHandle>, Json(body): Json<SelectionB
                 .map(|s| s.id.clone())
                 .collect();
             sess.add_to_selection(&ids);
+            ids
         }
-    }
+    };
     let sel = sess.selection_ids();
-    let rejected = sess.validate_ids(&sel);
-    let body = session_selection_json(&sess);
+    let newly_rejected = sess.validate_ids(&sel);
+    let rejected = with_existing_rejections(&sess, &affected, &newly_rejected);
+    let body = selection_json(&sess, &rejected);
     drop(sess);
-    publish_validated(&app, rejected);
+    publish_validated(&app, newly_rejected);
     ok(body)
 }
 
@@ -798,25 +833,34 @@ async fn selection_remove(
     Json(body): Json<SelectionBody>,
 ) -> ApiResult {
     let mut sess = app.session.lock().await;
-    match body.ids {
+    let affected = match body.ids {
         Some(ids) => {
             let ids = resolve_ids(&sess, &ids).map_err(api_err)?;
             sess.remove_from_selection(&ids);
+            ids
         }
         None => {
             let f = body.filter.unwrap_or_default();
+            let ids: Vec<String> = sess
+                .suggestions
+                .iter()
+                .filter(|s| matches_filter(s, &f))
+                .map(|s| s.id.clone())
+                .collect();
             for s in sess.suggestions.iter_mut() {
                 if matches_filter(s, &f) {
                     s.selected = false;
                 }
             }
+            ids
         }
-    }
+    };
     let sel = sess.selection_ids();
-    let rejected = sess.validate_ids(&sel);
-    let body = session_selection_json(&sess);
+    let newly_rejected = sess.validate_ids(&sel);
+    let rejected = with_existing_rejections(&sess, &affected, &newly_rejected);
+    let body = selection_json(&sess, &rejected);
     drop(sess);
-    publish_validated(&app, rejected);
+    publish_validated(&app, newly_rejected);
     ok(body)
 }
 
@@ -1240,19 +1284,26 @@ async fn events_sse(
         v
     };
 
-    let rx = app.events.subscribe();
-    let live = stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(ev) => return Some((Ok(sse_event(ev)), rx)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-            }
-        }
-    });
+    let live = live_events(app.events.subscribe());
 
     let merged = stream::iter(initial).chain(live);
     Sse::new(merged).keep_alive(KeepAlive::default())
+}
+
+/// Stream live events until the subscriber falls behind the broadcast
+/// channel. Ending the response lets `EventSource` reconnect, and the client
+/// reloads the suggestion window it missed deltas for instead of leaving
+/// stale checkboxes and statuses on screen.
+fn live_events(
+    rx: tokio::sync::broadcast::Receiver<ServerEvent>,
+) -> impl Stream<Item = Result<SseEvent, std::convert::Infallible>> + Send {
+    stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Ok(ev) => Some((Ok(sse_event(ev)), rx)),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+        }
+    })
 }
 
 fn sse_event(ev: ServerEvent) -> SseEvent {
@@ -1336,6 +1387,20 @@ mod tests {
             preview_candidates(&keeper),
             vec![PathBuf::from("/a/copy.jpg")],
             "a pending duplicate delete previews its own target"
+        );
+    }
+
+    #[tokio::test]
+    async fn lagged_sse_stream_ends_so_clients_reconnect() {
+        let bus = crate::events::EventBus::new();
+        let rx = bus.subscribe();
+        for _ in 0..5000 {
+            bus.publish(ServerEvent::CacheCleared);
+        }
+        let mut live = Box::pin(live_events(rx));
+        assert!(
+            live.next().await.is_none(),
+            "a lagging subscriber must be disconnected instead of silently skipping events"
         );
     }
 

@@ -8,6 +8,7 @@ import type {
   ExecuteRequest,
   ExportResult,
   ScanSummary,
+  SelectionResult,
   Session,
   Suggestion,
   SuggestionList,
@@ -176,15 +177,15 @@ export const api = {
     return res.item;
   },
 
-  async selectionPut(ids: string[]): Promise<void> {
-    await request<void>("/selection", {
+  async selectionPut(ids: string[]): Promise<SelectionResult> {
+    return request<SelectionResult>("/selection", {
       method: "PUT",
       body: JSON.stringify({ ids }),
     });
   },
 
-  async selectionAdd(ids: string[]): Promise<void> {
-    await request<void>("/selection/add", {
+  async selectionAdd(ids: string[]): Promise<SelectionResult> {
+    return request<SelectionResult>("/selection/add", {
       method: "POST",
       body: JSON.stringify({ ids }),
     });
@@ -192,9 +193,10 @@ export const api = {
 
   /** Add every suggestion matching `filter` to the selection, without
    *  shipping the ids (see DESIGN.md "Service API > Suggestions &
-   *  Selection"). */
-  async selectionAddFilter(filter: SelectionFilter): Promise<void> {
-    await request<void>("/selection/add", {
+   *  Selection"). The response carries the entire resulting selection and
+   *  the affected suggestions validation rejected. */
+  async selectionAddFilter(filter: SelectionFilter): Promise<SelectionResult> {
+    return request<SelectionResult>("/selection/add", {
       method: "POST",
       body: JSON.stringify({ filter }),
     });
@@ -202,16 +204,17 @@ export const api = {
 
   /** Remove every suggestion matching `filter` from the selection, without
    *  shipping the ids (see DESIGN.md "Service API > Suggestions &
-   *  Selection"). */
-  async selectionRemoveFilter(filter: SelectionFilter): Promise<void> {
-    await request<void>("/selection/remove", {
+   *  Selection"). The response carries the entire resulting selection and
+   *  the affected suggestions validation rejected. */
+  async selectionRemoveFilter(filter: SelectionFilter): Promise<SelectionResult> {
+    return request<SelectionResult>("/selection/remove", {
       method: "POST",
       body: JSON.stringify({ filter }),
     });
   },
 
-  async selectionRemove(ids: string[]): Promise<void> {
-    await request<void>("/selection/remove", {
+  async selectionRemove(ids: string[]): Promise<SelectionResult> {
+    return request<SelectionResult>("/selection/remove", {
       method: "POST",
       body: JSON.stringify({ ids }),
     });

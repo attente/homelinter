@@ -10,14 +10,22 @@ const EVENTS_URL = '/api/v1/events';
 export class EventSourceClient {
   private es: EventSource | null = null;
   private listeners: Set<(ev: SseEvent) => void> = new Set();
+  private reconnectListeners: Set<() => void> = new Set();
   private failed = false;
+  private opened = false;
 
   start(): void {
     if (this.es) return;
     const es = new EventSource(EVENTS_URL);
     this.failed = false;
+    this.opened = false;
     es.onopen = () => {
       this.failed = false;
+      const reconnected = this.opened;
+      this.opened = true;
+      if (reconnected) {
+        for (const fn of this.reconnectListeners) fn();
+      }
     };
     es.onerror = () => {
       // The browser attempts reconnects automatically; we only note
@@ -42,12 +50,23 @@ export class EventSourceClient {
       this.es.close();
       this.es = null;
     }
+    this.opened = false;
   }
 
   onEvent(fn: (ev: SseEvent) => void): () => void {
     this.listeners.add(fn);
     return () => {
       this.listeners.delete(fn);
+    };
+  }
+
+  /** Notified when an interrupted stream reopens. Events published during
+   *  the gap were lost, so the app reloads the rows that deltas would have
+   *  updated. */
+  onReconnect(fn: () => void): () => void {
+    this.reconnectListeners.add(fn);
+    return () => {
+      this.reconnectListeners.delete(fn);
     };
   }
 

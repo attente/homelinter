@@ -142,8 +142,9 @@ impl ServerEvent {
 }
 
 /// A broadcast sender helper with lossless fan-out for all connected
-/// clients. Subscribers that lag behind drop out of the stream; the SSE
-/// handler reconnects them with a fresh snapshot on their next request.
+/// clients. A subscriber that lags behind the broadcast channel loses events;
+/// the SSE handler ends that stream so the browser reconnects and reloads the
+/// row window it missed, rather than silently continuing with stale state.
 #[derive(Debug, Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<ServerEvent>,

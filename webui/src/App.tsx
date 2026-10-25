@@ -11,6 +11,7 @@ import { Toasts } from "./components/Toasts";
 import { EventSourceClient } from "./events";
 import { downloadText, saveTextFile } from "./lib/download";
 import { useEscapeClose } from "./lib/modal";
+import { applySelectionResult as reconcileSelection } from "./lib/selection";
 import {
   Filter,
   filterFromSearchParams,
@@ -45,6 +46,7 @@ import type {
   MetadataProgress,
   ScanProgress,
   ScanStage,
+  SelectionResult,
   Session,
   SseEvent,
   Suggestion,
@@ -484,6 +486,19 @@ export default function App() {
     },
     [],
   );
+
+  /** Reload the visible suggestion window after the event stream was
+   *  interrupted. The reconnect snapshot carries session state and totals but
+   *  not row deltas, so without this reload a revalidation missed during the
+   *  gap would leave stale statuses and checkboxes on screen. */
+  const resyncSuggestions = useCallback(() => {
+    const cur = stRef.current;
+    if (cur.phase !== "browse") return;
+    void resetSuggestions(cur.filter).catch((e: unknown) => {
+      pushToast(`cannot refresh suggestions: ${resolveApiError(e)}`);
+    });
+  }, [pushToast, resetSuggestions]);
+
   const handleSse = useCallback(
     async (ev: SseEvent) => {
       const d = ev.data as Record<string, unknown>;
@@ -701,6 +716,7 @@ export default function App() {
     sse.onEvent((ev) => {
       void handleSse(ev);
     });
+    const offReconnect = sse.onReconnect(resyncSuggestions);
     sse.start();
     sseRef.current = sse;
     const timer = setInterval(() => {
@@ -709,9 +725,27 @@ export default function App() {
     return () => {
       cancelled = true;
       clearInterval(timer);
+      offReconnect();
       sse.stop();
     };
-  }, [handleSse, poll, resetSuggestions]);
+  }, [handleSse, poll, resetSuggestions, resyncSuggestions]);
+
+  /** Apply the service's selection result to the loaded rows and the
+   *  session count. This repairs optimistic selections and stale statuses
+   *  (for example a row the service already rejected) even when the row
+   *  delta was missed. Rows the new status pushes out of the active filter
+   *  are dropped, matching the service-side filter. */
+  const applySelectionIds = useCallback((result: SelectionResult) => {
+    setSt((prev) => ({
+      ...prev,
+      suggestions: reconcileSelection(prev.suggestions, result).filter((s) =>
+        matchesFilter(s, prev.filter),
+      ),
+      session: prev.session
+        ? { ...prev.session, selection_count: result.ids.length }
+        : prev.session,
+    }));
+  }, []);
 
   const toggle = useCallback(
     async (id: string, select: boolean) => {
@@ -728,18 +762,17 @@ export default function App() {
         ),
       }));
       try {
-        if (select) {
-          await api.selectionAdd([id]);
-        } else {
-          await api.selectionRemove([id]);
-        }
+        const result = select
+          ? await api.selectionAdd([id])
+          : await api.selectionRemove([id]);
+        applySelectionIds(result);
       } catch (e: unknown) {
         pushToast(`selection update failed: ${resolveApiError(e)}`);
         await resetSuggestions(stRef.current.filter);
       }
       void refreshSession();
     },
-    [pushToast, refreshSession, resetSuggestions],
+    [applySelectionIds, pushToast, refreshSession, resetSuggestions],
   );
 
   /** Select every suggestion matching the active filter (the whole filtered
@@ -757,7 +790,8 @@ export default function App() {
       }));
       void (async () => {
         try {
-          await api.selectionAddFilter(toApiFilter(filter));
+          const result = await api.selectionAddFilter(toApiFilter(filter));
+          applySelectionIds(result);
         } catch (e: unknown) {
           pushToast(`selection update failed: ${resolveApiError(e)}`);
           await resetSuggestions(stRef.current.filter);
@@ -765,7 +799,7 @@ export default function App() {
         void refreshSession();
       })();
     },
-    [pushToast, refreshSession, resetSuggestions],
+    [applySelectionIds, pushToast, refreshSession, resetSuggestions],
   );
 
   /** Deselect every suggestion matching the active filter (again the whole
@@ -783,7 +817,8 @@ export default function App() {
       }));
       void (async () => {
         try {
-          await api.selectionRemoveFilter(toApiFilter(filter));
+          const result = await api.selectionRemoveFilter(toApiFilter(filter));
+          applySelectionIds(result);
         } catch (e: unknown) {
           pushToast(`selection update failed: ${resolveApiError(e)}`);
           await resetSuggestions(stRef.current.filter);
@@ -791,7 +826,7 @@ export default function App() {
         void refreshSession();
       })();
     },
-    [pushToast, refreshSession, resetSuggestions],
+    [applySelectionIds, pushToast, refreshSession, resetSuggestions],
   );
 
   const startRun = useCallback(
