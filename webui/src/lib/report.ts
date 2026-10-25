@@ -153,10 +153,10 @@ function actionLine(action: ReportAction): string {
   return `  [${statusLabel(action.status)}] ${action.label}`;
 }
 
-/** Label column widths. The summary block indents two spaces before a
- *  ten-wide label, while the metadata block pads a label to eleven; each
+/** Label column widths. The summary block indents two spaces before an
+ *  eight-wide label, while the metadata block pads a label to eleven; each
  *  leaves its values in one column. */
-const SUMMARY_LABEL_WIDTH = 10;
+const SUMMARY_LABEL_WIDTH = 8;
 const METADATA_LABEL_WIDTH = 11;
 
 function summaryLine(label: string, value: string | number): string {

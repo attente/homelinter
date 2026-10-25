@@ -159,7 +159,7 @@ describe('executionReportText', () => {
       generatedAt: AT,
     });
     const summaryAt = text.indexOf('summary (4 actions)');
-    const freedAt = text.indexOf('  freed     1.5 KiB');
+    const freedAt = text.indexOf('  freed   1.5 KiB');
     expect(freedAt).toBeGreaterThan(summaryAt);
     expect(freedAt).toBeLessThan(text.indexOf('scan root:'));
   });
@@ -170,10 +170,10 @@ describe('executionReportText', () => {
       run: runState(),
       generatedAt: AT,
     });
-    expect(text).toContain('  done      1');
-    expect(text).toContain('  partial   1');
-    expect(text).toContain('  failed    1');
-    expect(text).toContain('  skipped   1');
+    expect(text).toContain('  done    1');
+    expect(text).toContain('  partial 1');
+    expect(text).toContain('  failed  1');
+    expect(text).toContain('  skipped 1');
     expect(text).toContain('[skipped] deleted dup.jpg, duplicate of keeper.jpg');
   });
 
@@ -228,10 +228,10 @@ describe('executionReportText', () => {
       );
     expect(labelled.length).toBeGreaterThan(0);
     for (const line of labelled) {
-      // Summary values start after two spaces of indent and a ten-wide label
-      // (column 12); metadata values start after an eleven-wide label
+      // Summary values start after two spaces of indent and an eight-wide
+      // label (column 10); metadata values start after an eleven-wide label
       // (column 11).
-      const column = line.startsWith('  ') ? 12 : 11;
+      const column = line.startsWith('  ') ? 10 : 11;
       expect(line[column - 1]).toBe(' ');
       expect(line[column]).not.toBe(' ');
     }
