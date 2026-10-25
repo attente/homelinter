@@ -710,6 +710,117 @@ async fn execute_repoints_a_duplicate_repair_at_the_moved_keeper() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execute_repairs_symlinks_that_move_with_their_repository() {
+    use std::os::unix::fs::symlink;
+
+    let env = Env::new("exec_repair_in_tree");
+    let app = env.service();
+    let repo = env.home.join("code").join("proj");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/config"), "[core]").unwrap();
+    std::fs::create_dir_all(repo.join(".agents/skills")).unwrap();
+    std::fs::write(repo.join(".agents/skills/SKILL.md"), b"skill").unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    // Relative link inside the tree: the whole tree moves, so it keeps
+    // resolving and must be left exactly as it was.
+    symlink("../.agents/skills", repo.join(".claude/skills")).unwrap();
+    // Absolute link inside the tree: it needs a repair, and that repair runs
+    // at the link's post-move path once the parent move has finished.
+    let absolute = repo.join(".claude/absolute");
+    symlink(repo.join(".agents/skills"), &absolute).unwrap();
+    // Relative link inside the tree pointing outside it: the destination is
+    // at a different depth, so the raw target stops resolving.
+    std::fs::create_dir_all(env.home.join("shared/data")).unwrap();
+    std::fs::create_dir_all(repo.join("data")).unwrap();
+    let outward = repo.join("data/shared");
+    symlink("../../../shared/data", &outward).unwrap();
+    // A relative link outside the tree keeps its own path and is repointed.
+    let outside = env.home.join("shared/proj");
+    symlink("../code/proj", &outside).unwrap();
+
+    // A destination deeper than the source is what breaks relative links that
+    // point out of the moved tree, so move repositories three levels down.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        Some(json!({ "target_paths": { "repository": "Archive/Projects/%n" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    scan_to_ready(&app, &env.home).await;
+    let (_, list) = request(&app, "GET", "/api/v1/suggestions", None).await;
+    let items = list["items"].as_array().unwrap();
+    let moves: Vec<_> = items
+        .iter()
+        .filter(|s| s["type"] == "move" && s["asset_kind"] == "repository")
+        .collect();
+    assert_eq!(
+        moves.len(),
+        1,
+        "expected exactly one repository move: {list}"
+    );
+    let moved_to = PathBuf::from(moves[0]["new_path"].as_str().unwrap());
+    assert_eq!(
+        moves[0]["dependent_operations"].as_array().unwrap().len(),
+        3,
+        "only the links whose target really changes are repaired: {}",
+        moves[0]
+    );
+
+    let ids = suggestion_ids(&app, "pending").await;
+    assert_eq!(ids.len(), 1);
+    let (status, _) = request(&app, "POST", "/api/v1/execute", Some(json!({ "ids": ids }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_state(&app, "done").await;
+
+    assert!(!repo.exists());
+    assert!(moved_to.is_dir());
+    let (_, report) = request(&app, "GET", "/api/v1/execution", None).await;
+    let entry = &report["entries"][0];
+    assert_eq!(entry["result"], "executed", "no repair may fail: {report}");
+    let ops = entry["operations"].as_array().unwrap();
+    let repairs: Vec<_> = ops
+        .iter()
+        .filter(|o| o["operation"] == "repair_symlink")
+        .collect();
+    assert_eq!(repairs.len(), 3, "{report}");
+    for repair in repairs {
+        assert_eq!(repair["status"], "completed", "{repair}");
+    }
+
+    // Every link resolves to the same object it named before the move.
+    assert_eq!(
+        std::fs::read_link(moved_to.join(".claude/skills")).unwrap(),
+        PathBuf::from("../.agents/skills"),
+        "a link that still resolves is never rewritten"
+    );
+    assert_eq!(
+        std::fs::canonicalize(moved_to.join(".claude/skills")).unwrap(),
+        std::fs::canonicalize(moved_to.join(".agents/skills")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_link(moved_to.join(".claude/absolute")).unwrap(),
+        moved_to.join(".agents/skills")
+    );
+    assert_eq!(
+        std::fs::read_link(moved_to.join("data/shared")).unwrap(),
+        PathBuf::from("../../../../shared/data"),
+        "the relative target is recomputed from the link's new parent"
+    );
+    assert_eq!(
+        std::fs::canonicalize(moved_to.join("data/shared")).unwrap(),
+        std::fs::canonicalize(env.home.join("shared/data")).unwrap()
+    );
+    assert_eq!(
+        std::fs::canonicalize(&outside).unwrap(),
+        std::fs::canonicalize(&moved_to).unwrap()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execute_follows_a_keeper_moved_in_an_earlier_batch() {
     use std::os::unix::fs::symlink;
