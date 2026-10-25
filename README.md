@@ -29,36 +29,6 @@ The SPA lives in `webui/`. For development, run `cargo run -p homelinter -- web 
 
 For production-style serving, `pnpm build` in `webui/` produces `webui/dist`, which `homelinter web` serves alongside the API. The Rust workspace never builds the JS toolchain, so remember to `pnpm build` after frontend changes before serving.
 
-## macOS app
-
-`crates/desktop` is a Tauri 2 shell that packages the SPA and the service into one normal macOS `.app`.
-It is a separate Cargo workspace (`crates/desktop/src-tauri`), so the normal Linux `cargo build` and `cargo test` never need WebKitGTK.
-The shell starts the same in-process service on an ephemeral loopback port, loads `http://127.0.0.1:<port>/` in a WebView, and shuts the service down when the app exits; no child process is left behind.
-The window is an ordinary resizable macOS window with a title bar, but no location bar, bookmarks, navigation buttons, tab strip, or extension UI.
-The built SPA is bundled as `Contents/Resources/webui`, so a user only installs the app.
-
-You do not need a physical Mac to produce the release.
-`.github/workflows/macos-release.yml` builds on a GitHub-hosted macOS runner and creates a universal (Apple Silicon + Intel) app.
-With no Apple secrets it produces an unsigned DMG that needs no Apple account; macOS asks the recipient to approve the app once, without disabling Gatekeeper globally.
-If all six Apple secrets are set, the same workflow signs, notarizes, and staples the app so Gatekeeper opens it without any security bypass.
-That optional signed route requires an Apple Developer Program membership and a `Developer ID Application` certificate.
-Signed-route secrets: `APPLE_CERTIFICATE` (base64 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), and `APPLE_TEAM_ID`.
-See [docs/macos-release.md](docs/macos-release.md) for the complete no-Mac checklist, including the unsigned approval steps and the optional certificate setup on Linux.
-
-The app targets the hardened runtime but is not App Sandboxed: it must scan the home directory and move files wherever the user chooses, which is why it is distributed outside the Mac App Store.
-Signed builds use the hardened runtime; an unsigned build has no signature for Gatekeeper to verify.
-macOS will still show normal folder-access prompts (Desktop, Documents, Downloads), with purpose strings from `crates/desktop/src-tauri/Info.plist`.
-
-To build the same artifacts manually on a Mac, run the Tauri CLI from `crates/desktop`; its `beforeBuildCommand` installs the SPA dependencies and rebuilds `webui/dist` first:
-
-```
-cd crates/desktop
-pnpm dlx @tauri-apps/cli@2.11.1 build --target universal-apple-darwin
-```
-
-Without the Apple secrets this produces the unsigned build; with all six set it signs and notarizes.
-The DMG is written to `crates/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/`.
-
 ## Linux app (AppImage)
 
 `crates/launcher` builds `homelinter-app`, a small launcher that runs the same in-process service and opens the SPA in an app-mode window of the browser you already have.
@@ -93,6 +63,36 @@ APPIMAGETOOL=appimagetool ./packaging/appimage/build.sh
 ```
 
 The AppImage is written to `target/appimage/`.
+
+## macOS app
+
+`crates/desktop` is a Tauri 2 shell that packages the SPA and the service into one normal macOS `.app`.
+It is a separate Cargo workspace (`crates/desktop/src-tauri`), so the normal Linux `cargo build` and `cargo test` never need WebKitGTK.
+The shell starts the same in-process service on an ephemeral loopback port, loads `http://127.0.0.1:<port>/` in a WebView, and shuts the service down when the app exits; no child process is left behind.
+The window is an ordinary resizable macOS window with a title bar, but no location bar, bookmarks, navigation buttons, tab strip, or extension UI.
+The built SPA is bundled as `Contents/Resources/webui`, so a user only installs the app.
+
+You do not need a physical Mac to produce the release.
+`.github/workflows/macos-release.yml` builds on a GitHub-hosted macOS runner and creates a universal (Apple Silicon + Intel) app.
+With no Apple secrets it produces an unsigned DMG that needs no Apple account; macOS asks the recipient to approve the app once, without disabling Gatekeeper globally.
+If all six Apple secrets are set, the same workflow signs, notarizes, and staples the app so Gatekeeper opens it without any security bypass.
+That optional signed route requires an Apple Developer Program membership and a `Developer ID Application` certificate.
+Signed-route secrets: `APPLE_CERTIFICATE` (base64 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), and `APPLE_TEAM_ID`.
+See [docs/macos-release.md](docs/macos-release.md) for the complete no-Mac checklist, including the unsigned approval steps and the optional certificate setup on Linux.
+
+The app targets the hardened runtime but is not App Sandboxed: it must scan the home directory and move files wherever the user chooses, which is why it is distributed outside the Mac App Store.
+Signed builds use the hardened runtime; an unsigned build has no signature for Gatekeeper to verify.
+macOS will still show normal folder-access prompts (Desktop, Documents, Downloads), with purpose strings from `crates/desktop/src-tauri/Info.plist`.
+
+To build the same artifacts manually on a Mac, run the Tauri CLI from `crates/desktop`; its `beforeBuildCommand` installs the SPA dependencies and rebuilds `webui/dist` first:
+
+```
+cd crates/desktop
+pnpm dlx @tauri-apps/cli@2.11.1 build --target universal-apple-darwin
+```
+
+Without the Apple secrets this produces the unsigned build; with all six set it signs and notarizes.
+The DMG is written to `crates/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/`.
 
 ## Configuration
 
