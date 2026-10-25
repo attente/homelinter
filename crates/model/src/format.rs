@@ -6,7 +6,7 @@
 //! generation share one implementation.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::asset_kind::AssetKind;
 use crate::error::ApiError;
@@ -338,6 +338,7 @@ impl FormatString {
             rendered = full;
         }
         let raw_path = PathBuf::from(&rendered);
+        let raw_path = cap_path_components(&raw_path);
         let norm = crate::path::normalize_lexical(&raw_path).ok_or_else(|| {
             FormatError(format!("template resolved outside the root: {rendered}"))
         })?;
@@ -764,15 +765,87 @@ pub fn validate_target_paths(
 }
 
 /// Validate that a filename-only segment is safe on the host: no separator,
-/// NUL, or control character, not `.`/`..`, and (on Windows) not a reserved
-/// device name. Existing host file names satisfy this by construction; it
-/// guards resolved destinations whose final segment came from metadata.
+/// NUL, or control character, not `.`/`..`, within the host's per-component
+/// filename limit, and (on Windows) not a reserved device name. Existing host
+/// file names satisfy this by construction; it guards resolved destinations
+/// whose final segment came from metadata.
 pub fn validate_file_name_segment(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
+        && file_name_len(name) <= max_file_name_len()
         && !name.chars().any(file_name_invalid)
         && (cfg!(not(windows)) || !is_windows_reserved_name(name))
+}
+
+/// Practical per-component filename limit: 255 bytes on Unix, 255 UTF-16
+/// code units on Windows.
+fn max_file_name_len() -> usize {
+    255
+}
+
+fn file_name_len(name: &str) -> usize {
+    if cfg!(windows) {
+        name.chars()
+            .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
+            .sum()
+    } else {
+        name.len()
+    }
+}
+
+/// Shorten an over-long component at a character boundary, preserving its
+/// final extension when one fits, so a long metadata value or source name
+/// cannot produce an execution-time `File name too long` failure.
+fn cap_component(name: &str) -> String {
+    let max = max_file_name_len();
+    if file_name_len(name) <= max {
+        return name.to_string();
+    }
+    let p = Path::new(name);
+    let stem = p
+        .file_stem()
+        .unwrap_or(p.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    if let Some(ext) = p.extension().map(|e| e.to_string_lossy().into_owned()) {
+        let reserved = file_name_len(&ext) + 1;
+        if reserved < max {
+            let cut = floor_char_boundary(&stem, max - reserved);
+            if cut > 0 {
+                return format!("{}.{ext}", &stem[..cut]);
+            }
+        }
+    }
+    let cut = floor_char_boundary(name, max);
+    if cut > 0 {
+        name[..cut].to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Cap every normal component of `path` at the host's per-component limit.
+/// Root, prefix, and parent components are kept as-is.
+fn cap_path_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(part) => out.push(cap_component(&part.to_string_lossy())),
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn is_windows_reserved_name(name: &str) -> bool {
@@ -860,6 +933,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(p, PathBuf::from("/mnt/usb/2024/IMG_0001.jpg"));
+    }
+
+    #[test]
+    fn overlong_file_name_segment_is_invalid() {
+        assert!(validate_file_name_segment(&"a".repeat(255)));
+        assert!(!validate_file_name_segment(&"a".repeat(256)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlong_final_segment_is_truncated_preserving_extension() {
+        let mut v = vals();
+        v.file_name = Some(format!("{}.png", "a".repeat(300)));
+        let fs = FormatString::parse("Pictures/%f").unwrap();
+        let p = fs
+            .resolve(&v, std::path::Path::new("/home/alice"))
+            .unwrap()
+            .unwrap();
+        let name = p.file_name().unwrap().to_string_lossy();
+        assert_eq!(name.len(), 255);
+        assert!(name.ends_with(".png"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlong_multibyte_segment_is_truncated_at_char_boundary() {
+        let mut v = vals();
+        v.file_name = Some(format!("{}{}.png", "e".repeat(200), "\u{e9}".repeat(100)));
+        let fs = FormatString::parse("Pictures/%f").unwrap();
+        let p = fs
+            .resolve(&v, std::path::Path::new("/home/alice"))
+            .unwrap()
+            .unwrap();
+        let name = p.file_name().unwrap().to_string_lossy();
+        assert!(name.len() <= 255);
+        // The cut never lands inside a multibyte character.
+        assert!(std::str::from_utf8(name.as_bytes()).is_ok());
+        assert!(name.ends_with(".png"));
     }
 
     #[test]

@@ -542,9 +542,15 @@ fn repo_provenance(root: &Path) -> Provenance {
         p.ino = id.ino;
         p.identity_available = id.available;
     }
-    if let Ok(mt) = std::fs::metadata(root).and_then(|m| m.modified()) {
-        if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
-            p.mtime_ns = d.as_nanos() as i128;
+    // Record the directory entry's size too: the executor's preflight
+    // compares it against the re-stat, and a zero default would fail every
+    // repository move with "source size changed".
+    if let Ok(meta) = std::fs::metadata(root) {
+        p.size = meta.len();
+        if let Ok(mt) = meta.modified() {
+            if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+                p.mtime_ns = d.as_nanos() as i128;
+            }
         }
     }
     p
@@ -718,6 +724,15 @@ mod tests {
             Some("../escape".into()),
         );
         assert_eq!(unsafe_name.stem.as_deref(), Some("checkout"));
+    }
+
+    #[test]
+    fn repo_provenance_records_directory_size() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let meta = std::fs::metadata(root).unwrap();
+        let p = repo_provenance(root);
+        assert_eq!(p.size, meta.len());
+        assert!(p.identity_available);
     }
 
     #[test]

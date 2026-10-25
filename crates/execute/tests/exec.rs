@@ -114,6 +114,33 @@ fn move_refuses_existing_destination() {
 }
 
 #[test]
+fn move_directory_with_recorded_provenance_executes() {
+    let base = tmpdir("mvdir");
+    let src = base.join("work").join("repo");
+    std::fs::create_dir_all(&src).unwrap();
+    write(&src.join("README.md"), b"repo-bytes");
+    let dst = base.join("Code").join("repo");
+
+    let mut s = Suggestion::new_move(
+        AssetKind::Repository,
+        &src,
+        &dst,
+        "test".into(),
+        Default::default(),
+        vec![],
+        provenance_for(&src),
+    );
+    s.selected = true;
+
+    let mut items = vec![s];
+    let report = execute_batch(&mut items, &base, true);
+    assert_eq!(report.entries[0].result, ExecutionStatus::Executed);
+    assert!(!src.exists());
+    assert_eq!(std::fs::read(dst.join("README.md")).unwrap(), b"repo-bytes");
+    std::fs::remove_dir_all(&base).ok();
+}
+
+#[test]
 fn failed_parent_reports_dependent_repairs_as_skipped() {
     let base = tmpdir("mvdeny-dep");
     let src = base.join("a.txt");
