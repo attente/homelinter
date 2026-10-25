@@ -385,10 +385,12 @@ pub struct PlaceholderValues {
 /// Convert provider text to printable ASCII before it becomes metadata.
 /// Compatibility decomposition transliterates accented and presentation
 /// forms; typographic quotes and dashes map to their keyboard equivalents,
-/// common symbols map to short ASCII names, and unsupported Unicode
-/// characters become spaces so they cannot join neighboring words. The
-/// returned string contains only characters from U+0020 through U+007E and
-/// has whitespace runs collapsed.
+/// common symbols map to short ASCII names, and an ampersand is spelled out
+/// as `and` so a title reads as prose instead of carrying a symbol that a
+/// filename sanitizer would drop. Unsupported Unicode characters become
+/// spaces so they cannot join neighboring words. The returned string
+/// contains only characters from U+0020 through U+007E and has whitespace
+/// runs collapsed.
 pub fn normalize_provider_text(input: &str) -> String {
     let mut out = String::new();
     let mut pending_space = false;
@@ -411,6 +413,9 @@ pub fn normalize_provider_text(input: &str) -> String {
             '\u{00b7}' | '\u{22c5}' => ".",
             '\u{00d7}' => "x",
             '\u{00f7}' => "/",
+            // Spelled out with the spaces around it so `Bed & Breakfast`
+            // and `R&D` both read as words rather than as `BedandBreakfast`.
+            '&' => " and ",
             '\u{2190}' => "<-",
             '\u{2192}' => "->",
             '\u{2194}' => "<->",
@@ -851,6 +856,12 @@ mod tests {
             "\"Cafe\" - 'it's' ... TM -"
         );
         assert_eq!(normalize_provider_text("\u{6771}\u{4eac}"), "");
+        assert_eq!(
+            normalize_provider_text("Bed & Breakfast"),
+            "Bed and Breakfast"
+        );
+        assert_eq!(normalize_provider_text("R&D"), "R and D");
+        assert_eq!(normalize_provider_text("&"), "and");
     }
 
     #[test]
