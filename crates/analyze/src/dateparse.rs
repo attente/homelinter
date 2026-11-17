@@ -106,7 +106,7 @@ pub fn parse_filename_date(name: &str) -> Option<DateParts> {
 
     // 1) YYYYMMDD_HHMMSS or YYYYMMDD-HHMMSS or YYYYMMDDHHMMSS (>= 14 digits
     //    in a row after an optional prefix such as IMG_/PXL_).
-    // 2) YYYY-MM-DD[_HH-MM-SS].
+    // 2) YYYY-MM-DD with an optional separated or compact time.
     // 3) YYYYMMDD (exactly 8 digits in a row).
 
     // Form 2 with separators.
@@ -187,7 +187,8 @@ fn time_from(b: &[u8]) -> Option<(u32, u32, u32)> {
     }
 }
 
-/// `YYYY-MM-DD` optionally followed by `_HH-MM-SS` or `-HH:MM:SS`.
+/// `YYYY-MM-DD` optionally followed by `-HH-MM-SS`, or by `_`, a space,
+/// or `T` and a compact `HHMMSS` time.
 fn parse_separated(bytes: &[u8]) -> Option<DateParts> {
     if bytes.len() < 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
@@ -203,8 +204,31 @@ fn parse_separated(bytes: &[u8]) -> Option<DateParts> {
     if !d.valid() {
         return None;
     }
-    // Optional time following `_` or ` ` then HHMMSS / HH:MM:SS / HH-MM-SS.
     let rest = &bytes[10..];
+    // Homelinter's photo format separates every date and time field with
+    // `-`. Recognize that complete timestamp so generated names round-trip.
+    // Requiring a non-digit after the seconds avoids truncating a longer
+    // numeric field into a plausible time.
+    if rest.len() >= 9
+        && rest[0] == b'-'
+        && rest[3] == b'-'
+        && rest[6] == b'-'
+        && rest.get(9).is_none_or(|b| !b.is_ascii_digit())
+    {
+        let hour = digits(&rest[1..3])?;
+        let minute = digits(&rest[4..6])?;
+        let second = digits(&rest[7..9])?;
+        if hour < 24 && minute < 60 && second < 60 {
+            return Some(DateParts {
+                hour,
+                minute,
+                second,
+                ..d
+            });
+        }
+        return None;
+    }
+    // Optional compact time following `_`, a space, or `T`.
     if let Some(pos) = rest
         .iter()
         .position(|b| *b == b'_' || *b == b' ' || *b == b'T')
@@ -345,11 +369,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_homelinter_timestamped_filenames() {
+        assert_eq!(
+            parse_filename_date("2059-06-28-15-29-18-kingyo-doppelganger.jpg").unwrap(),
+            DateParts {
+                year: 2059,
+                month: 6,
+                day: 28,
+                hour: 15,
+                minute: 29,
+                second: 18
+            }
+        );
+        for name in [
+            "2024-03-15-15-30-45",
+            "2024-03-15-15-30-45.jpg",
+            "2024-03-15-15-30-45-location-subject.jpg",
+        ] {
+            assert_eq!(
+                parse_filename_date(name).unwrap(),
+                DateParts {
+                    year: 2024,
+                    month: 3,
+                    day: 15,
+                    hour: 15,
+                    minute: 30,
+                    second: 45
+                },
+                "{name}"
+            );
+        }
+        let last_second = parse_filename_date("2024-02-29-23-59-59.jpg").unwrap();
+        assert_eq!(
+            (last_second.hour, last_second.minute, last_second.second),
+            (23, 59, 59)
+        );
+    }
+
+    #[test]
+    fn does_not_guess_hyphenated_times_from_partial_or_longer_fields() {
+        for name in [
+            "2024-03-15-15-30.jpg",
+            "2024-03-15-15-30-451.jpg",
+            "2024-03-15-subject.jpg",
+        ] {
+            let date = parse_filename_date(name).unwrap();
+            assert_eq!((date.year, date.month, date.day), (2024, 3, 15));
+            assert_eq!((date.hour, date.minute, date.second), (0, 0, 0), "{name}");
+        }
+    }
+
+    #[test]
     fn rejects_implausible_dates_and_noise() {
         assert!(parse_filename_date("readme.txt").is_none());
         assert!(parse_filename_date("invoice_12345678.pdf").is_none()); // year 1234 out of range
         assert!(parse_filename_date("IMG_21010315.jpg").is_none()); // year 2101 out of range
         assert!(parse_filename_date("IMG_20241301.jpg").is_none()); // month 13
         assert!(parse_filename_date("IMG_20240231.jpg").is_none()); // Feb 31
+        assert!(parse_filename_date("2024-03-15-24-00-00.jpg").is_none()); // hour 24
+        assert!(parse_filename_date("2024-03-15-15-60-00.jpg").is_none()); // minute 60
+        assert!(parse_filename_date("2024-03-15-15-30-60.jpg").is_none()); // second 60
+        assert!(parse_filename_date("2023-02-29-15-30-45.jpg").is_none()); // not a leap year
     }
 }

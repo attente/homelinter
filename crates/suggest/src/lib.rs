@@ -1069,6 +1069,33 @@ mod tests {
     }
 
     #[test]
+    fn photo_timestamp_survives_reparsing_the_generated_filename() {
+        let fmt = FormatString::parse("Photos/%Y-%m-%d-%H-%M-%S-%l-%s.%e").unwrap();
+        let home = Path::new("/home/user");
+        let symlinks = SymlinkIndex::default();
+        let mut f = analyzed("/tmp/20590628_1529185173804172_2029079496_o.jpg");
+        f.subject = Some("kingyo doppelganger".into());
+        f.extracted_date =
+            homelinter_analyze::parse_filename_date(f.path.file_name().unwrap().to_str().unwrap());
+        f.date_source = "filename";
+        let suggestion = rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .unwrap();
+        f.path = suggestion.new_path.unwrap().into();
+        assert_eq!(
+            f.path,
+            home.join("Photos/2059-06-28-15-29-18-kingyo-doppelganger.jpg")
+        );
+        let reparsed =
+            homelinter_analyze::parse_filename_date(f.path.file_name().unwrap().to_str().unwrap());
+        assert_eq!(reparsed, f.extracted_date);
+        f.extracted_date = reparsed;
+        assert!(rebuild_move_suggestion(&f, Some(&fmt), home, &symlinks)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn metadata_reports_date_and_zone_provenance() {
         let fmt = FormatString::parse("Archives/%Y/%f").unwrap();
         let home = Path::new("/home/user");
